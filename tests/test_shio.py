@@ -333,3 +333,18 @@ agent ask(doc: Source):
     import shio
     mod = shio.load(str(p))
     assert mod.ask(mod.Source("d", text="x")) is None
+
+
+def test_json_schemas_sent_to_models_have_no_refs():
+    import json
+    from pydantic import BaseModel
+    from shio.schema import to_json_schema
+
+    class Citation(BaseModel):
+        case: str
+
+    class Brief(BaseModel):
+        citations: list[Citation]
+
+    for t in (Brief, list[Citation]):
+        assert "$ref" not in json.dumps(to_json_schema(t))

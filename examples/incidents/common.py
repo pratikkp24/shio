@@ -18,7 +18,7 @@ def model_from(args, scripted):
     if name == "replay":
         many = all(isinstance(v, dict) for v in scripted.values())
         return replay(lambda req: scripted[req.name] if many else scripted, name="replay"), name
-    return ollama(name), name
+    return ollama(name, timeout=180), name
 
 
 def plain_model_call(llm, ask, text, schema, name="answer"):

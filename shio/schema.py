@@ -16,11 +16,48 @@ def _is_model(schema):
     return isinstance(schema, type) and issubclass(schema, BaseModel)
 
 
+def _inline(node, defs, seen=()):
+    """Replace {"$ref": "#/$defs/X"} with X itself, so local models' structured output (which often ignores or
+    chokes on $ref) sees plain nested objects. A type that refers to itself keeps its $ref."""
+    if isinstance(node, dict):
+        ref = node.get("$ref", "")
+        if ref.startswith("#/$defs/"):
+            name = ref.rsplit("/", 1)[1]
+            if name in defs and name not in seen:
+                rest = {k: v for k, v in node.items() if k != "$ref"}
+                return {**_inline(defs[name], defs, seen + (name,)), **rest}
+            return node
+        return {k: _inline(v, defs, seen) for k, v in node.items() if k != "$defs"}
+    if isinstance(node, list):
+        return [_inline(v, defs, seen) for v in node]
+    return node
+
+
+def _flatten(js):
+    defs = js.get("$defs", {})
+    out = _inline(js, defs)
+    if defs and any(isinstance(n, dict) and "$ref" in n for n in _walk(out)):
+        out["$defs"] = defs                      # a recursive type: keep the definitions it still points to
+    return out
+
+
+def _walk(node):
+    yield node
+    if isinstance(node, dict):
+        for v in node.values():
+            yield from _walk(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk(v)
+
+
 def to_json_schema(schema):
     if _is_model(schema):
-        return schema.model_json_schema()
+        return _flatten(schema.model_json_schema())
     # plain types are wrapped so every reading is a JSON object
-    return {"type": "object", "properties": {"value": TypeAdapter(schema).json_schema()}, "required": ["value"]}
+    inner = TypeAdapter(schema).json_schema()
+    defs = inner.pop("$defs", {})
+    return _flatten({"type": "object", "properties": {"value": inner}, "required": ["value"], "$defs": defs})
 
 
 def schema_ref(schema):
