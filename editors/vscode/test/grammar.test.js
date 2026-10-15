@@ -176,6 +176,13 @@ async function main() {
   expect(ed, L, 18, "an ordinary comment", "description", { not: true });
   expect(ed, L, 19, "read", "keyword.other.read.shio", { not: true });
   expect(ed, L, 9, "z", "entity.name.variable.reading.shio");
+  {
+    const C = await tokenize("agent a(x):\n    read v: int from x by m:\n        hi\n    check ok: v > 0\n    check big after ok, other: v > 10, \"small {v}\"\n");
+    expect("check after", C, 5, "after", "keyword.other.after.shio");
+    expect("check after", C, 5, "big", "entity.name.function.check.shio");
+    expect("check after", C, 5, "other", "entity.name.function.check.shio");
+    expect("check after", C, 5, "small", "string.quoted.double.detail.shio");
+  }
   expect(ed, L, 9, "k", "meta.read.shio");
   expect(ed, L, 9, "seeing", "keyword.other.seeing.shio");
   expect(ed, L, 9, "w", "entity.name.variable.reading.shio");

@@ -442,9 +442,9 @@
       ]
     },
     "check-stmt": {
-      "comment": "check NAME[KEY]: EXPR, \"detail with {expr}\"  and  when NAME[KEY]: EXPR",
+      "comment": "check NAME[KEY] [after A, B]: EXPR, \"detail with {expr}\"  and  when NAME[KEY]: EXPR",
       "name": "meta.check.shio",
-      "begin": "^\\s*(check|when)\\s+([A-Za-z_]\\w*)(?:(\\[)(.+?)(\\]))?\\s*(:)",
+      "begin": "^\\s*(check|when)\\s+([A-Za-z_]\\w*)(?:(\\[)(.+?)(\\]))?(?:\\s+(after)\\s+([\\w\\s,]+?))?\\s*(:)",
       "beginCaptures": {
         "1": {
           "name": "keyword.other.$1.shio"
@@ -466,6 +466,21 @@
           "name": "punctuation.definition.key.end.shio"
         },
         "6": {
+          "name": "keyword.other.after.shio"
+        },
+        "7": {
+          "patterns": [
+            {
+              "match": "[A-Za-z_]\\w*",
+              "name": "entity.name.function.check.shio"
+            },
+            {
+              "match": ",",
+              "name": "punctuation.separator.element.shio"
+            }
+          ]
+        },
+        "8": {
           "name": "punctuation.separator.colon.shio"
         }
       },
