@@ -68,7 +68,12 @@ of the language rather than a convention:
 
 ## Evidence so far
 
-- 20 tests: every boundary error, iteration scope, null readings, checks that raise, and reward replay.
+- Tests for every boundary error, iteration scope, null readings (including a model that times out), checks that
+  raise, reward replay, schemas without `$ref`, and every example program (each incident is acted on by the plain
+  agent and held by the Shio one).
+- `examples/incidents`: five real incidents. With `qwen3:8b` and `llama3.2:3b` on Ollama, the models were fooled in
+  three of five (the $1 Tahoe, uncheckable case citations, the private-repo leak) and the Shio agent held every one;
+  in the other two the models answered safely and Shio let the answer through.
 - `examples/injection`: with `llama3.2:3b` and `qwen3:8b` on Ollama, the plain Python agent forwards an invoice to
   the address in the injected text; the same agent in Shio does not compile until the decision is a rule, and then
   holds the email for review. A clean email from the same supplier is still sent.

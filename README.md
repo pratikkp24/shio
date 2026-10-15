@@ -91,8 +91,11 @@ Replit agent deletes a production database (2025)
 ...
 ```
 
-Each fix is one or two `check` lines. The [gallery](https://github.com/Aonami-Labs/shio/tree/main/examples/incidents)
-has all five, the checks, and sources for every incident.
+Each fix is one or two `check` lines. We also ran all five with real local models: `qwen3:8b` agreed to the $1
+Tahoe, cited cases that are not in the records and planned to leak the private repos, and each time the plain agent
+acted on it while the Shio agent held it; where the model was not fooled, Shio let the answer through. The
+[gallery](https://github.com/Aonami-Labs/shio/tree/main/examples/incidents) has all five, the results per model, and
+sources for every incident.
 
 ## How it works
 
