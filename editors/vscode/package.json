@@ -5,6 +5,11 @@
   "version": "0.1.0",
   "publisher": "aonami-labs",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Aonami-Labs/shio",
+    "directory": "editors/vscode"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -94,7 +99,7 @@
   },
   "scripts": {
     "test": "node test/grammar.test.js && node test/check.test.js",
-    "package": "vsce package --allow-missing-repository"
+    "package": "vsce package"
   },
   "devDependencies": {
     "@vscode/vsce": "^3.2.0",

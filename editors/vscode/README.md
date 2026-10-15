@@ -33,7 +33,7 @@ Build and install the extension (Node 18 or later):
 ```bash
 cd path/to/shio/editors/vscode
 npm install
-npx vsce package --allow-missing-repository
+npx vsce package
 code --install-extension shio-0.1.0.vsix
 ```
 

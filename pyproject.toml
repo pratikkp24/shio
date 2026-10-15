@@ -12,6 +12,20 @@ authors = [{ name = "Aonami Labs" }]
 requires-python = ">=3.10"
 dependencies = ["pydantic>=2"]
 
+keywords = ["llm", "ai-agents", "prompt-injection", "programming-language", "ollama"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Compilers",
+]
+
+[project.urls]
+Homepage = "https://github.com/Aonami-Labs/shio"
+Source = "https://github.com/Aonami-Labs/shio"
+Issues = "https://github.com/Aonami-Labs/shio/issues"
+Security = "https://github.com/Aonami-Labs/shio/blob/main/SECURITY.md"
+
 [project.optional-dependencies]
 pdf = ["pypdf>=4"]
 train = ["trl>=0.20", "datasets", "peft"]
