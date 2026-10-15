@@ -1,0 +1,70 @@
+# Travel insurance: flight delay claims. The model reads the airline's delay letter; code computes the delay in UTC
+# from the official schedule and the actual arrival (letters mix local time and UTC), and pays by the policy bands.
+# A letter whose flight, schedule or stated delay does not tie out goes to a claims handler, not to payment.
+
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from common import model, grounded, show
+
+SCHEDULE = {   # official timetable: scheduled arrival, local time at the destination
+    ("ZX 418", "2026-10-03"): {"arr": "2026-10-03 12:40", "tz": "Europe/London"},
+    ("ZX 233", "2026-10-07"): {"arr": "2026-10-07 21:05", "tz": "Asia/Kolkata"},
+}
+BANDS = [(12, 500.00), (6, 250.00), (3, 100.00), (0, 0.00)]     # delay hours at least -> payout, USD
+
+type Letter:
+    flight: str            # flight number as printed, e.g. ZX 418
+    date: str              # scheduled date of the flight, YYYY-MM-DD
+    actual_arrival: str    # actual arrival as printed, YYYY-MM-DD HH:MM
+    actual_tz: str         # the zone that time is given in: an IANA name such as Europe/London, or UTC
+    actual_quote: str      # the sentence with the actual arrival time, copied exactly
+    stated_delay_hours: float?   # the delay the letter itself states, null if it states none
+
+def utc(stamp, tz):
+    try:
+        return datetime.strptime(stamp, "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo(tz)).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def delay_hours(flight, day, actual, actual_tz):
+    s = SCHEDULE.get((flight, day))
+    a, b = utc(actual, actual_tz), s and utc(s["arr"], s["tz"])
+    return None if a is None or b is None else round((a - b).total_seconds() / 3600, 2)
+
+def payout(hours):
+    return next(amount for floor, amount in BANDS if hours >= floor)
+
+agent delay_claim(policy_no: str, letter: str, llm):
+    read l: Letter by llm:
+        Read this airline delay confirmation letter.
+
+        {letter}
+
+    check on_schedule: (l.flight, l.date) in SCHEDULE, "{l.flight} on {l.date} is not in the official schedule"
+    check time_readable: (l.flight, l.date) not in SCHEDULE or delay_hours(l.flight, l.date, l.actual_arrival, l.actual_tz) is not None, "cannot compute a delay from '{l.actual_arrival} {l.actual_tz}'"
+    check arrival_on_letter: grounded(l.actual_quote, letter) and l.actual_arrival[-5:] in l.actual_quote, "actual arrival {l.actual_arrival} is not in the letter as quoted"
+    check adds_up: l.stated_delay_hours is None or delay_hours(l.flight, l.date, l.actual_arrival, l.actual_tz) is None or abs(l.stated_delay_hours - delay_hours(l.flight, l.date, l.actual_arrival, l.actual_tz)) <= 0.5, "letter states {l.stated_delay_hours} h, schedule and arrival give {delay_hours(l.flight, l.date, l.actual_arrival, l.actual_tz)} h"
+
+    rule settle:
+        if checks.failures():
+            return {"action": "REVIEW", "policy": policy_no, "why": [c["detail"] for c in checks.failures()]}
+        hours = delay_hours(l.flight, l.date, l.actual_arrival, l.actual_tz)
+        amount = payout(hours)
+        return {"action": "PAY" if amount else "NO PAYOUT", "policy": policy_no, "delay_hours": hours, "amount": amount}
+    return settle
+
+main:
+    letter = """Zephyr Air confirms that flight ZX 418 Dubai-London of 3 October 2026, scheduled to arrive at 12:40 London
+    time, arrived at London Heathrow at 18:05 UTC on 2026-10-03 owing to a technical fault. We regret a delay of 6.4 hours."""
+    ok = {"l": {"flight": "ZX 418", "date": "2026-10-03", "actual_arrival": "2026-10-03 18:05", "actual_tz": "UTC",
+                "actual_quote": "arrived at London Heathrow at 18:05 UTC on 2026-10-03", "stated_delay_hours": 6.4}}
+    show("6 h 25 min late (12:40 BST is 11:40 UTC)", delay_claim("TRV-88120", letter, model(ok)))
+
+    ghost = letter.replace("ZX 418", "ZX 419")
+    show("Letter for a flight not in the schedule", delay_claim("TRV-88121", ghost, model({"l": dict(ok["l"], flight="ZX 419")})))
+
+    edited = """Zephyr Air: flight ZX 233 Muscat-Kochi of 7 October 2026 arrived at Kochi at 23:10 local time (Asia/Kolkata)
+    on 2026-10-07. The flight was delayed by 13 hours."""
+    show("Stated delay does not add up", delay_claim("TRV-88122", edited, model({"l": {"flight": "ZX 233", "date": "2026-10-07",
+         "actual_arrival": "2026-10-07 23:10", "actual_tz": "Asia/Kolkata", "actual_quote": "arrived at Kochi at 23:10 local time",
+         "stated_delay_hours": 13}})))

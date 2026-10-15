@@ -1,0 +1,65 @@
+# Accounts payable: three-way match. The model reads the supplier invoice; code matches every line against the
+# purchase order (price) and the goods receipt note (quantity), and checks the invoice adds up. PAY or HOLD.
+
+from common import model, money_eq, numbers, show
+
+PURCHASE_ORDERS = {
+    "PO-7731": {"vendor": "Halden Fasteners", "lines": {"BOLT-M8": 0.42, "NUT-M8": 0.11, "WASH-M8": 0.04}},
+}
+RECEIVED = {"PO-7731": {"BOLT-M8": 500, "NUT-M8": 450, "WASH-M8": 1000}}     # goods receipt notes, units counted in
+PRICE_TOLERANCE = 0.02                                                     # 2% over PO price is accepted
+
+type Line:
+    sku: str               # the item code, e.g. BOLT-M8
+    qty: float             # units invoiced
+    unit_price: float
+    amount: float          # the line amount as printed
+
+type Invoice:
+    po: str                # the purchase order the invoice quotes
+    lines: list[Line]
+    total: float           # the invoice total as printed
+
+def billed(inv, sku):
+    return sum(l.qty for l in inv.lines if l.sku == sku)
+
+def price_of(inv, sku):
+    return max([l.unit_price for l in inv.lines if l.sku == sku] or [0])
+
+agent three_way(invoice_text: str, po_id: str, llm):
+    po = PURCHASE_ORDERS[po_id]
+    grn = RECEIVED[po_id]
+    read inv: Invoice by llm:
+        Read this supplier invoice, line by line.
+
+        {invoice_text}
+
+    check same_po: inv.po == po_id, "invoice quotes {inv.po}, matched against {po_id}"
+    check only_ordered_items: all(l.sku in po["lines"] for l in inv.lines), "invoice bills items not on {po_id}"
+    for sku in po["lines"]:
+        check received[sku]: billed(inv, sku) <= grn[sku], "{sku}: billed {billed(inv, sku):g}, received {grn[sku]}"
+        check price[sku]: price_of(inv, sku) <= po["lines"][sku] * (1 + PRICE_TOLERANCE), "{sku}: invoiced at {price_of(inv, sku)}, PO price {po['lines'][sku]}"
+    check lines_multiply: all(money_eq(l.qty * l.unit_price, l.amount, 0.01) for l in inv.lines), "a line's qty x price is not its amount"
+    check lines_add_up: money_eq(sum(l.amount for l in inv.lines), inv.total, 0.01), "lines add to {sum(l.amount for l in inv.lines):.2f}, total read as {inv.total:.2f}"
+    check total_printed: inv.total in numbers(invoice_text), "total {inv.total} is not printed on the invoice"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "HOLD", "po": po_id, "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "PAY", "po": po_id, "vendor": po["vendor"], "amount": inv.total}
+    return decision
+
+main:
+    clean = "HALDEN FASTENERS  Invoice HF-2210  PO-7731\nBOLT-M8 500 x 0.42 = 210.00\nNUT-M8 450 x 0.11 = 49.50\nTOTAL 259.50"
+    lines = [{"sku": "BOLT-M8", "qty": 500, "unit_price": 0.42, "amount": 210.00},
+             {"sku": "NUT-M8", "qty": 450, "unit_price": 0.11, "amount": 49.50}]
+    show("Matches PO and receipt", three_way(clean, "PO-7731", model({"inv": {"po": "PO-7731", "lines": lines, "total": 259.50}})))
+
+    short = "HALDEN FASTENERS  Invoice HF-2214  PO-7731\nBOLT-M8 500 x 0.42 = 210.00\nNUT-M8 500 x 0.11 = 55.00\nTOTAL 265.00"
+    billed_500 = [lines[0], {"sku": "NUT-M8", "qty": 500, "unit_price": 0.11, "amount": 55.00}]
+    show("Bills 500 nuts, 450 received", three_way(short, "PO-7731", model({"inv": {"po": "PO-7731", "lines": billed_500, "total": 265.00}})))
+
+    creep = "HALDEN FASTENERS  Invoice HF-2219  PO-7731\nWASH-M8 1000 x 0.05 = 50.00\nTOTAL 50.00"
+    show("Washers 25% over PO price", three_way(creep, "PO-7731", model({"inv": {"po": "PO-7731", "lines": [{"sku": "WASH-M8", "qty": 1000, "unit_price": 0.05, "amount": 50.00}], "total": 50.00}})))
+
+    show("Model misreads the total", three_way(clean, "PO-7731", model({"inv": {"po": "PO-7731", "lines": lines, "total": 295.50}})))

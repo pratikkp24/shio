@@ -1,0 +1,65 @@
+# Payroll: an employee emails a new salary account. The model reads the email; the change is applied only if the
+# IBAN passes its mod-97 checksum, the email came from the employee's own registered address, the account holder is
+# the employee on the HR record, and the account has not changed recently. Anything else: call the employee back.
+
+import re
+from common import model, norm, grounded, parse_date, TODAY, show
+
+EMPLOYEES = {
+    "E-2291": {"name": "Lena Varga", "email": "lena.varga@corvenholdings.com", "last_change": "2024-03-11"},
+    "E-3105": {"name": "Tomas Brandt", "email": "tomas.brandt@corvenholdings.com", "last_change": "2026-09-28"},
+}
+COOLDOWN_DAYS = 90
+
+type BankChange:
+    employee_id: str       # the employee number, e.g. E-2291
+    iban: str              # the new IBAN, no spaces
+    holder: str            # the account holder's name as written
+    iban_quote: str        # the sentence giving the IBAN, copied exactly
+
+def iban_ok(iban):
+    s = re.sub(r"\s+", "", str(iban or "")).upper()
+    if not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}", s):
+        return False
+    return int("".join(str(int(c, 36)) for c in s[4:] + s[:4])) % 97 == 1
+
+def same_person(a, b):
+    return sorted(norm(a).split()) == sorted(norm(b).split())
+
+agent payroll_change(email: str, sender: str, llm):
+    read req: BankChange by llm:
+        Read this request to change the salary bank account.
+
+        {email}
+
+    check known_employee: req.employee_id in EMPLOYEES, "no employee {req.employee_id}"
+    check own_address: req.employee_id in EMPLOYEES and norm(sender) == EMPLOYEES[req.employee_id]["email"], "sent from {sender}, not the registered address"
+    check iban_valid: iban_ok(req.iban), "IBAN {req.iban} fails the mod-97 checksum"
+    check iban_in_email: grounded(req.iban_quote, email) and req.iban.replace(" ", "") in email.replace(" ", ""), "IBAN {req.iban} is not what the email says"
+    check holder_is_employee: req.employee_id in EMPLOYEES and same_person(req.holder, EMPLOYEES[req.employee_id]["name"]), "account holder {req.holder} is not the employee"
+    check cooled_down: req.employee_id in EMPLOYEES and (TODAY - parse_date(EMPLOYEES[req.employee_id]["last_change"])).days > COOLDOWN_DAYS, "bank details changed less than {COOLDOWN_DAYS} days ago"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "CALL BACK", "on": "the phone number in the HR record", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "APPLY", "employee": req.employee_id, "iban": req.iban, "from_payroll": "next run"}
+    return decision
+
+main:
+    good = "Hi Payroll, I'm Lena Varga (E-2291). Please pay my salary to my new account: DE44500105175407324931, holder Lena Varga. Thanks!"
+    ask = {"employee_id": "E-2291", "iban": "DE44500105175407324931", "holder": "Lena Varga", "iban_quote": "Please pay my salary to my new account: DE44500105175407324931"}
+    show("Employee changes her account", payroll_change(good, "lena.varga@corvenholdings.com", model({"req": ask})))
+
+    show("Model drops a digit from the IBAN", payroll_change(good, "lena.varga@corvenholdings.com",
+         model({"req": dict(ask, iban="DE4450010517540732493")})))
+
+    spoof = ("From HR portal - Lena Varga, E-2291. Update salary account to GB60BARC20000055779911 (account name: "
+             "K. Marsh, my partner). Needed before Friday's run.")
+    show("Look-alike address, someone else's account", payroll_change(spoof, "lena.varga@corvenholdings-hr.com",
+         model({"req": {"employee_id": "E-2291", "iban": "GB60BARC20000055779911", "holder": "K. Marsh",
+                        "iban_quote": "Update salary account to GB60BARC20000055779911"}})))
+
+    again = "Tomas Brandt, E-3105: please move my pay again, to FR7630006000011234567890189 in my name Tomas Brandt."
+    show("Second change in three weeks", payroll_change(again, "tomas.brandt@corvenholdings.com",
+         model({"req": {"employee_id": "E-3105", "iban": "FR7630006000011234567890189", "holder": "Tomas Brandt",
+                        "iban_quote": "please move my pay again, to FR7630006000011234567890189"}})))

@@ -1,0 +1,66 @@
+# Infrastructure change approval. The model summarizes a Terraform plan for the change ticket; code parses the plan
+# itself (the counts line and every resource action), the summary must match those counts and name every resource
+# that is destroyed, and any destroy or replace of a stateful resource type goes to the change advisory board.
+
+import re
+from common import model, show
+
+STATEFUL = {"aws_db_instance", "aws_rds_cluster", "aws_dynamodb_table", "aws_s3_bucket", "aws_ebs_volume", "aws_efs_file_system"}
+ACTION = re.compile(r"#\s+(\S+)\s+(?:will be|must be)\s+(created|updated in-place|destroyed|replaced)")
+COUNTS = re.compile(r"Plan:\s+(\d+) to add,\s+(\d+) to change,\s+(\d+) to destroy")
+
+type Summary:
+    to_add: int
+    to_change: int
+    to_destroy: int
+    destroyed: list[str]   # addresses of resources destroyed or replaced, e.g. aws_s3_bucket.logs
+    text: str              # two sentences for the change ticket
+
+def parse(plan):
+    m = COUNTS.search(plan)
+    counts = tuple(int(x) for x in m.groups()) if m else None
+    gone = sorted(addr for addr, act in ACTION.findall(plan) if act in ("destroyed", "replaced"))
+    stateful = [a for a in gone if a.split(".")[-2] in STATEFUL]
+    return counts, gone, stateful
+
+agent approve(plan: str, llm):
+    counts, gone, stateful = parse(plan)
+    read s: Summary by llm:
+        Summarize this Terraform plan for a change ticket: how many resources are added, changed and destroyed,
+        which ones are destroyed or replaced, and two plain sentences.
+
+        {plan}
+
+    check plan_parsed: counts is not None, "no 'Plan:' line found in the output"
+    check counts_match: (s.to_add, s.to_change, s.to_destroy) == counts, "summary says {(s.to_add, s.to_change, s.to_destroy)}, plan says {counts}"
+    check destroys_named: sorted(s.destroyed) == gone, "summary names {sorted(s.destroyed)} as destroyed; plan destroys {gone}"
+
+    rule decision:
+        why = [c["detail"] for c in checks.failures()]
+        if stateful:
+            why.append(f"destroys stateful resources: {stateful}")
+        if why:
+            return {"action": "CAB REVIEW", "why": why, "plan_counts": counts}
+        return {"action": "AUTO-APPROVE", "summary": s.text}
+    return decision
+
+main:
+    tags = """# aws_lb.web will be updated in-place
+    # aws_instance.worker[0] will be updated in-place
+    Plan: 0 to add, 2 to change, 0 to destroy."""
+    show("Tag-only change", approve(tags, model({"s": {"to_add": 0, "to_change": 2, "to_destroy": 0, "destroyed": [],
+        "text": "Updates tags on the web load balancer and one worker. Nothing is created or destroyed."}})))
+
+    rekey = """# aws_dynamodb_table.orders must be replaced
+    -/+ resource "aws_dynamodb_table" "orders" { hash_key = "order_id" -> "tenant_id" # forces replacement }
+    # aws_cloudwatch_metric_alarm.orders_throttle will be updated in-place
+    Plan: 1 to add, 1 to change, 1 to destroy."""
+    show("Key change replaces a table; summary glosses it", approve(rekey, model({"s": {"to_add": 0, "to_change": 2,
+        "to_destroy": 0, "destroyed": [], "text": "Updates the orders table key and its throttle alarm. No resources are destroyed."}})))
+
+    queue = """# aws_sqs_queue.retry will be created
+    # aws_sqs_queue.retry_old will be destroyed
+    # aws_iam_policy.retry will be created
+    Plan: 2 to add, 0 to change, 1 to destroy."""
+    show("Model miscounts a harmless plan", approve(queue, model({"s": {"to_add": 1, "to_change": 0, "to_destroy": 1,
+        "destroyed": ["aws_sqs_queue.retry_old"], "text": "Replaces the retry queue. One queue is removed."}})))

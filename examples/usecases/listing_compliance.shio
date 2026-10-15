@@ -1,0 +1,73 @@
+# E-commerce: marketplace listing review. The model reads the seller's price and health claims; code scans the
+# visible listing itself for banned claims (an FDA claim needs a certificate on file) and for every price shown,
+# which must be at or above the brand's minimum advertised price; required fields must be filled.
+
+import re
+from common import model, grounded, visible_text, numbers, show
+
+BANNED = [r"\bcures?\b", r"\bfda[- ]approved\b", r"\bclinically proven\b", r"\bmiracle\b", r"\bno side effects\b"]
+CERTIFICATES = {"SKU-BP220": "FDA 510(k) K261187"}        # certificates the compliance team holds, by SKU
+MAP = {"SKU-JF100": 19.99, "SKU-BP220": 54.00, "SKU-SL030": 29.00}   # minimum advertised price, USD
+REQUIRED = ("sku", "title", "brand", "country_of_origin", "ingredients")
+
+type Claim:
+    text: str              # the claim in a few words
+    quote: str             # the listing sentence it comes from, copied exactly
+
+type Listing:
+    price: float           # the selling price shown in the listing, USD
+    price_quote: str       # the words showing that price, copied exactly
+    claims: list[Claim]    # every health or performance claim
+
+def banned_in(text, sku):
+    hits = [m.group(0) for p in BANNED for m in re.finditer(p, text, re.I)]
+    return [h for h in hits if not (re.match(r"fda", h, re.I) and sku in CERTIFICATES)]
+
+agent review(fields: dict, html: str, llm):
+    seen = visible_text(html)
+    sku = fields.get("sku", "")
+    found = banned_in(seen, sku)                    # code reads the listing for banned words; the model is not asked
+    missing = [f for f in REQUIRED if not str(fields.get(f, "")).strip()]
+    shown = [float(x) for x in re.findall(r"\$\s*(\d+(?:\.\d+)?)", seen)]     # every dollar price on the page
+    read item: Listing by llm:
+        Read this marketplace listing: its price and every health or performance claim.
+
+        {html}
+
+    check price_grounded: grounded(item.price_quote, seen) and item.price in numbers(item.price_quote), "price {item.price} is not written in the listing"
+    check at_or_above_map: sku in MAP and item.price >= MAP[sku] and all(p >= MAP[sku] for p in shown), "prices shown {shown} go below the {MAP.get(sku)} minimum advertised price"
+    check claims_grounded: all(grounded(c.quote, seen) for c in item.claims), "a claim the model reported is not in the listing"
+    check no_banned_claims: not found, "banned claims in the listing: {found}"
+    check fields_complete: not missing, "required fields missing: {missing}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "FIX", "sku": sku, "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "PUBLISH", "sku": sku, "price": item.price, "claims": [c.text for c in item.claims]}
+    return decision
+
+main:
+    base = {"title": "Joint Flex Turmeric Capsules", "brand": "Verdan", "country_of_origin": "USA",
+            "ingredients": "turmeric root extract, black pepper extract"}
+    jf = dict(base, sku="SKU-JF100")
+    html = "<h2>Joint Flex</h2><p>Supports healthy joints after exercise.</p><p>Price: $24.99 for 60 capsules</p>"
+    good = {"item": {"price": 24.99, "price_quote": "$24.99 for 60 capsules",
+                     "claims": [{"text": "supports joint health", "quote": "Supports healthy joints after exercise."}]}}
+    show("Compliant listing", review(jf, html, model(good)))
+
+    loud = html.replace("Supports healthy joints after exercise.", "Cures arthritis in 7 days. FDA approved formula.")
+    soft = {"item": {"price": 24.99, "price_quote": "$24.99 for 60 capsules",
+                     "claims": [{"text": "supports joint comfort", "quote": "Cures arthritis in 7 days."}]}}
+    show("Banned claims the model softened", review(jf, loud, model(soft)))
+
+    bp = dict(base, sku="SKU-BP220", title="Cuffwell Blood Pressure Monitor", ingredients="n/a")
+    bp_html = "<h2>Cuffwell BP Monitor</h2><p>FDA approved upper-arm monitor.</p><p>Price: $59.00</p>"
+    cleared = {"item": {"price": 59.0, "price_quote": "Price: $59.00",
+                        "claims": [{"text": "FDA approved", "quote": "FDA approved upper-arm monitor."}]}}
+    show("FDA claim with a certificate on file", review(bp, bp_html, model(cleared)))
+
+    sl = {"sku": "SKU-SL030", "title": "Dreamwell Sleep Gummies", "brand": "Verdan", "country_of_origin": ""}
+    sl_html = "<h2>Dreamwell</h2><p>Helps you wind down.</p><p>Flash price: $9.99</p>"
+    misread = {"item": {"price": 39.99, "price_quote": "Flash price: $9.99",
+                        "claims": [{"text": "helps relaxation", "quote": "Helps you wind down."}]}}
+    show("Price misread, below MAP, fields missing", review(sl, sl_html, model(misread)))

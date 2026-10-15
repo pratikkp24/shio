@@ -1,0 +1,81 @@
+# Workflow: business trip settlement. Check each expense claim against its receipt (expense.shio) and the flight delay
+# claim (flight_delay_claim.shio); the booked itinerary is read here. Cross-step check: every receipt is dated inside
+# the booked trip, and the delayed flight is one of the trip's flights. REIMBURSE or REVIEW.
+# (meeting_scheduler.shio is not chained: it only books future slots, and this trip is already over.)
+
+from common import model, grounded, show
+from uses import use, step_ok
+
+expense = use("expense")
+flight_delay_claim = use("flight_delay_claim")
+
+type Leg:
+    flight: str            # e.g. ZX 233
+    date: str              # YYYY-MM-DD
+
+type Trip:
+    start: str             # first day of the booked trip, YYYY-MM-DD
+    end: str               # last day, YYYY-MM-DD
+    flights: list[Leg]
+
+type Dated:
+    date: str              # the date printed on the receipt, YYYY-MM-DD
+
+agent settle(itinerary: str, claims: dict, receipts: dict, policy_no: str, letter: str, exp_llms: dict, delay_llm, llm):
+    read t: Trip by llm:
+        Read the booked trip: its dates and every flight.
+
+        {itinerary}
+    check trip_read: t.start in itinerary and t.end in itinerary and all(l.flight in itinerary and l.date in itinerary for l in t.flights), "trip dates or flights are not on the itinerary"
+    paid = 0.0
+    for k in claims:
+        exp = expense.expense(claims[k], receipts[k], exp_llms[k])
+        paid += exp.get("amount", 0)
+        read d[k]: Dated by llm:
+            What date is printed on this receipt?
+
+            {receipts[k]}
+        check expense_ok[k]: step_ok(exp, "PAY"), "{k}: {exp.get('status')} {exp.get('why', '')}"
+        check during_trip[k]: d.date in receipts[k] and t.start <= d.date <= t.end, "{k}: receipt dated {d.date}, booked trip is {t.start} to {t.end}"
+    delay = flight_delay_claim.delay_claim(policy_no, letter, delay_llm)
+    read f: Leg by llm:
+        Which flight, on which scheduled date, is this delay letter about?
+
+        {letter}
+    check delay_ok: step_ok(delay, "PAY"), "delay claim: {delay.get('action')} {delay.get('why', '')}"
+    check trips_flight: f.flight in letter and any(l.flight == f.flight and l.date == f.date for l in t.flights), "delay claim is for {f.flight} on {f.date}, not a flight of this trip"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "REIMBURSE", "expenses": round(paid, 2), "delay_payout": delay["amount"]}
+    return decision
+
+main:
+    itinerary = ("Trip TR-5512, Anil Rao, 2026-10-06 to 2026-10-09\nZX 120 2026-10-06 Mumbai-Muscat\n"
+                 "ZX 233 2026-10-07 Muscat-Kochi\nZX 140 2026-10-09 Kochi-Mumbai")
+    legs = [{"flight": "ZX 120", "date": "2026-10-06"}, {"flight": "ZX 233", "date": "2026-10-07"}, {"flight": "ZX 140", "date": "2026-10-09"}]
+    dinner = "BLUE DOOR BISTRO  2026-10-07\nPasta 24.00\nSalad 12.50\nTip 7.30\nTOTAL 43.80"
+    d_read = {"r": {"merchant": "Blue Door Bistro", "date": "2026-10-07", "total": 43.80, "category": "meals", "line_items": [24.00, 12.50, 7.30]}}
+    letter = ("Zephyr Air confirms that flight ZX 233 Muscat-Kochi of 7 October 2026, scheduled to arrive at 21:05, arrived at "
+              "Kochi at 01:50 local time (Asia/Kolkata) on 2026-10-08. The delay was 4.75 hours.")
+    late = model({"l": {"flight": "ZX 233", "date": "2026-10-07", "actual_arrival": "2026-10-08 01:50", "actual_tz": "Asia/Kolkata",
+                        "actual_quote": "Kochi at 01:50 local time (Asia/Kolkata) on 2026-10-08", "stated_delay_hours": 4.75}})
+    me = lambda dates, f: model({"t": {"start": "2026-10-06", "end": "2026-10-09", "flights": legs}, "d": {k: {"date": v} for k, v in dates.items()}, "f": f})
+    zx233 = {"flight": "ZX 233", "date": "2026-10-07"}
+    show("Receipts and delayed flight on the booked trip", settle(itinerary, {"E1": {"amount": 43.80}}, {"E1": dinner}, "TRV-88122", letter,
+         {"E1": model(d_read)}, late, me({"E1": "2026-10-07"}, zx233)))
+
+    early = dinner.replace("2026-10-07", "2026-10-05")
+    show("Both steps pass, dinner the night before the trip", settle(itinerary, {"E1": {"amount": 43.80}}, {"E1": early}, "TRV-88122", letter,
+         {"E1": model({"r": dict(d_read["r"], date="2026-10-05")})}, late, me({"E1": "2026-10-05"}, zx233)))
+
+    holiday = """Zephyr Air confirms that flight ZX 418 Dubai-London of 3 October 2026, scheduled to arrive at 12:40 London
+    time, arrived at London Heathrow at 18:05 UTC on 2026-10-03 owing to a technical fault. We regret a delay of 6.4 hours."""
+    zx418 = model({"l": {"flight": "ZX 418", "date": "2026-10-03", "actual_arrival": "2026-10-03 18:05", "actual_tz": "UTC",
+                         "actual_quote": "arrived at London Heathrow at 18:05 UTC on 2026-10-03", "stated_delay_hours": 6.4}})
+    show("Both steps pass, delay claim for a flight not on this trip", settle(itinerary, {"E1": {"amount": 43.80}}, {"E1": dinner}, "TRV-88123",
+         holiday, {"E1": model(d_read)}, zx418, me({"E1": "2026-10-07"}, {"flight": "ZX 418", "date": "2026-10-03"})))
+
+    show("Expense claimed as 143.80", settle(itinerary, {"E1": {"amount": 143.80}}, {"E1": dinner}, "TRV-88122", letter,
+         {"E1": model(d_read)}, late, me({"E1": "2026-10-07"}, zx233)))

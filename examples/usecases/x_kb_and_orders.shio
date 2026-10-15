@@ -1,0 +1,51 @@
+# Workflow: an employee's HR question and leave request answered in one reply. cited_answer answers the policy
+# question from the knowledge base; leave_request books the leave. Cross-step: the carry-over number the policy answer
+# gives is what the leave system will actually do for this employee's contract. (cited_answer's knowledge base is HR
+# policy, so this pairs it with the HR system of record, leave_request, rather than the order bot.)
+
+from common import model, numbers, show
+from uses import use, step_ok, why
+
+kb = use("cited_answer")
+leaves = use("leave_request")
+
+CARRY_OVER = {"t.okafor@northwind.example": 5, "j.berg@northwind.example": 3}   # days the leave system carries into 2027, by contract
+
+agent hr_reply(question: str, email: str, sender: str, kb_llm, leave_llm):
+    answer = kb.ask(question, kb_llm)
+    booked = leaves.leave(email, sender, leave_llm)
+
+    check answered: "sources" in answer, "policy answer held back: {why(answer)}"
+    check leave_ok: step_ok(booked, "APPROVE"), "leave: {booked.get('action')} {why(booked)}"
+    check same_number after answered: CARRY_OVER.get(sender) in numbers(answer["answer"]), "the policy answer says {numbers(answer['answer'])} days carry over; the leave system carries {CARRY_OVER.get(sender)} for {sender}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "ESCALATE", "to": "HR", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "REPLY", "answer": answer["answer"], "sources": answer["sources"],
+                "leave": f"{booked['days']} days {booked['kind']} leave approved, {booked['from']} to {booked['to']}"}
+    return decision
+
+main:
+    q = "How much unused leave can I carry over into next year?"
+    kb_ok = model({"a": {"text": "You can carry over up to 5 days of unused leave.",
+                         "citations": [{"doc": "hr-14", "quote": "Unused leave of up to 5 days may be carried into the next calendar year"}]}})
+
+    tomi = "Hi Sam, I'd like annual leave from 2026-11-02 to 2026-11-06, leaving at noon on the Friday. That's 4.5 days. Thanks, Tomi"
+    tomi_read = model({"r": {"start": "2026-11-02", "end": "2026-11-06", "half_days": ["2026-11-06"], "kind": "annual",
+                             "days_stated": 4.5, "quote": "annual leave from 2026-11-02 to 2026-11-06"}})
+    show("Policy and leave system agree", hr_reply(q, tomi, "t.okafor@northwind.example", kb_ok, tomi_read))
+
+    jonas = "Could I take annual leave on 2026-11-20? 1 day. Jonas"
+    jonas_read = model({"r": {"start": "2026-11-20", "end": "2026-11-20", "half_days": [], "kind": "annual",
+                              "days_stated": 1, "quote": "annual leave on 2026-11-20"}})
+    show("Both steps pass, but his contract carries 3 days, not 5", hr_reply(q, jonas, "j.berg@northwind.example", kb_ok, jonas_read))
+
+    invented = model({"a": {"text": "You can carry over up to 10 days, or 15 with manager approval.",
+                            "citations": [{"doc": "hr-14", "quote": "Unused leave of up to 5 days may be carried"}]}})
+    show("Policy answer invents a number", hr_reply(q, tomi, "t.okafor@northwind.example", invented, tomi_read))
+
+    busy = "Could I take 2026-11-11 to 2026-11-13 as annual leave? 3 days. Tomi"
+    busy_read = model({"r": {"start": "2026-11-11", "end": "2026-11-13", "half_days": [], "kind": "annual",
+                             "days_stated": 3, "quote": "2026-11-11 to 2026-11-13 as annual leave"}})
+    show("Policy answer fine, but the leave clashes with team cover", hr_reply(q, busy, "t.okafor@northwind.example", kb_ok, busy_read))

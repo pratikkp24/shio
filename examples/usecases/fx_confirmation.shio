@@ -1,0 +1,63 @@
+# Treasury operations: FX trade confirmation matching. The model reads the counterparty's confirmation email; code
+# matches it field by field against our booking, checks the figures are in the email, and that the rate is within
+# today's market range. Any difference is a BREAK for the middle office, never an automatic amendment.
+
+from common import model, numbers, parse_date, TODAY, show
+
+BOOKINGS = {
+    "FX-55120": {"pair": "EUR/USD", "we_buy": "EUR", "notional": 5_000_000, "rate": 1.0842, "value_date": "2026-10-20"},
+    "FX-55127": {"pair": "GBP/USD", "we_buy": "USD", "notional": 500_000, "rate": 1.2615, "value_date": "2026-10-20"},
+    "FX-55133": {"pair": "USD/JPY", "we_buy": "JPY", "notional": 2_000_000, "rate": 141.20, "value_date": "2026-10-19"},
+}
+MARKET = {"EUR/USD": (1.0815, 1.0870), "GBP/USD": (1.2580, 1.2660), "USD/JPY": (149.80, 150.90)}   # today's low/high
+RATE_TOL = 0.00005
+
+type Confirmation:
+    trade_ref: str         # our reference as quoted, e.g. FX-55120
+    pair: str              # e.g. EUR/USD
+    we_buy: str            # the currency WE buy (the counterparty sells), e.g. EUR
+    notional: float        # the notional amount as written
+    rate: float
+    value_date: str        # YYYY-MM-DD
+
+def booked(c, field):
+    return BOOKINGS.get(c.trade_ref, {}).get(field)
+
+agent confirm(email: str, llm):
+    read c: Confirmation by llm:
+        Read this FX trade confirmation from the counterparty.
+
+        {email}
+
+    check known_trade: c.trade_ref in BOOKINGS, "no booking {c.trade_ref}"
+    check pair: c.pair == booked(c, "pair"), "pair {c.pair}, booked {booked(c, 'pair')}"
+    check direction: c.we_buy == booked(c, "we_buy"), "they say we buy {c.we_buy}, booked {booked(c, 'we_buy')}"
+    check notional: c.notional == booked(c, "notional"), "notional {c.notional:,.0f}, booked {booked(c, 'notional'):,.0f}"
+    check rate: abs(c.rate - booked(c, "rate")) <= RATE_TOL, "rate {c.rate}, booked {booked(c, 'rate')}"
+    check value_date: c.value_date == booked(c, "value_date"), "value date {c.value_date}, booked {booked(c, 'value_date')}"
+    check figures_in_email: c.notional in numbers(email) and c.rate in numbers(email), "notional or rate is not written in the email"
+    check at_market: c.pair in MARKET and MARKET[c.pair][0] <= c.rate <= MARKET[c.pair][1], "rate {c.rate} is outside today's {c.pair} range {MARKET.get(c.pair)}"
+    check settles_ahead: parse_date(c.value_date) >= TODAY and parse_date(c.value_date).weekday() < 5, "value date {c.value_date} is past or not a business day"
+
+    rule match:
+        if checks.failures():
+            return {"status": "BREAK", "trade": c.trade_ref, "why": [x["detail"] for x in checks.failures()], "to": "middle office"}
+        return {"status": "MATCHED", "trade": c.trade_ref, "settles": c.value_date}
+    return match
+
+main:
+    email = ("Northgate Bank FX confirmation. Your ref FX-55120. We sell EUR 5,000,000.00 / buy USD at 1.0842. "
+             "Value date 20 Oct 2026. Please confirm by return.")
+    ok = {"trade_ref": "FX-55120", "pair": "EUR/USD", "we_buy": "EUR", "notional": 5000000, "rate": 1.0842, "value_date": "2026-10-20"}
+    show("Matches the booking", confirm(email, model({"c": ok})))
+
+    other_rate = email.replace("1.0842", "1.0824")
+    show("Counterparty confirms a different rate", confirm(other_rate, model({"c": dict(ok, rate=1.0824)})))
+
+    small = ("Harbourline Securities: ref FX-55127, we buy GBP 500,000 against USD at 1.2615, value 2026-10-20.")
+    show("Model adds a zero to the notional", confirm(small, model({"c": {"trade_ref": "FX-55127", "pair": "GBP/USD",
+         "we_buy": "USD", "notional": 5000000, "rate": 1.2615, "value_date": "2026-10-20"}})))
+
+    off = "Ostmark Capital confirms FX-55133: you sell USD 2,000,000 and buy JPY at 141.20, value date 2026-10-19."
+    show("Both sides agree, but the rate is off-market", confirm(off, model({"c": {"trade_ref": "FX-55133", "pair": "USD/JPY",
+         "we_buy": "JPY", "notional": 2000000, "rate": 141.20, "value_date": "2026-10-19"}})))

@@ -1,0 +1,57 @@
+# Workflow: a customer review goes into a promo email. review_moderation decides whether the review may be published,
+# email_campaign_compliance pre-checks the email that quotes it. Cross-step: the quoted words are the published
+# review's own, and they make no claim the listing itself may not make (listing_compliance's banned-claims list).
+# A gushing review can pass moderation and still be a banned claim once the brand puts it in an ad.
+
+import re
+from common import model, grounded, visible_text, show
+from uses import use, step_ok, why
+
+reviews = use("review_moderation")
+emails = use("email_campaign_compliance")
+listings = use("listing_compliance")          # only its banned-claims rule; the review is not a listing
+
+QUOTE = re.compile(r"<blockquote>(.*?)</blockquote>", re.S)
+FOOTER = ('<p><a href="https://corvel.example/unsubscribe?u=58812">Unsubscribe</a> | '
+          'Corvel Home Goods, 88 Harbor Street, Portland, ME 04101</p>')
+
+agent feature(customer: str, sku: str, review: str, campaign: str, html: str, mod_llm, mail_llm):
+    published = reviews.moderate(customer, sku, review, mod_llm)
+    mail = emails.precheck(campaign, html, mail_llm)
+    m = QUOTE.search(html)
+    quoted = visible_text(m.group(1)).strip() if m else ""      # code finds what the email quotes
+    banned = listings.banned_in(quoted, sku)
+
+    check review_published: step_ok(published, "PUBLISH"), "review: {published.get('status')} {why(published)}"
+    check email_ok: step_ok(mail, "SEND"), "email: {mail.get('verdict')} {why(mail)}"
+    check quote_is_review: grounded(quoted, review), "the email quotes '{quoted}', which is not in the review"
+    check no_banned_claim: not banned, "the quoted review says {banned}, a claim the listing itself may not make"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "PUBLISH", "campaign": campaign, "quote": quoted, "labels": published["labels"]}
+    return decision
+
+def email(quote):
+    return f"<h1>25% off all kettles</h1><blockquote>{quote}</blockquote><p>Offer ends 31 Oct 2026.</p>" + FOOTER
+
+def mail_read(quote):
+    return model({"e": {"discount_pct": 25, "terms_quote": "Offer ends 31 Oct 2026",
+                        "claims": [{"text": "25% off kettles", "quote": "25% off all kettles", "is_free": False},
+                                   {"text": "customer review", "quote": quote, "is_free": False}]}})
+
+main:
+    ok = model({"r": {"sentiment": "positive", "competitor": None, "off_topic": False, "off_topic_quote": ""}})
+
+    good = "Quiet, quick, and the lid opens wide enough to clean properly. Five stars."
+    show("Genuine review quoted word for word", feature("cust-311", "KTL-09", good, "FALL-26", email(good), ok, mail_read(good)))
+
+    gush = "A miracle kettle. Quick, quiet and the handle never gets hot."
+    show("Passes moderation, but 'miracle' is a banned claim in an ad", feature("cust-542", "KTL-09", gush, "FALL-26",
+         email(gush), ok, mail_read(gush)))
+
+    edited = "The best kettle I have ever owned."
+    show("Marketing rewrote the review", feature("cust-311", "KTL-09", good, "FALL-26", email(edited), ok, mail_read(edited)))
+
+    show("Reviewer never bought it", feature("cust-999", "KTL-09", good, "FALL-26", email(good), ok, mail_read(good)))

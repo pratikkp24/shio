@@ -1,0 +1,66 @@
+# E-commerce: product review moderation. The model reads sentiment, competitor mentions and whether the review is
+# about the product; code checks the purchase record, near-duplicate text against published reviews, link and phone
+# spam, and adds the "received free product" label itself. Sentiment is recorded, never used: bad reviews publish.
+
+import re
+from difflib import SequenceMatcher
+from common import model, grounded, norm, show
+
+PURCHASES = {("cust-311", "KTL-09"), ("cust-542", "KTL-09"), ("cust-778", "KTL-09")}     # verified orders
+PUBLISHED = ["Boils a full litre in under three minutes and the handle stays cool. Very happy with it.",
+             "Lid broke after two weeks, customer service replaced it quickly though."]
+SPAM = re.compile(r"https?://|www\.|\b[\w-]+\.(?:com|net|shop|xyz)\b|\+?\d[\d\s().-]{8,}\d")
+INCENTIVE = re.compile(r"free (?:product|sample|unit)|in exchange for (?:an? |my )?(?:honest )?review|received (?:this|it) (?:for )?free", re.I)
+
+type Review:
+    sentiment: "positive" | "mixed" | "negative"      # recorded for analytics only
+    competitor: str?       # a competing brand named in the review; null if none
+    off_topic: bool        # true if the review is not about this product or its delivery
+    off_topic_quote: str   # the words that are off topic, copied exactly; empty if none
+
+def near_duplicate(text):
+    """The largest share of any published review that reappears in this text."""
+    def covered(p):
+        return sum(b.size for b in SequenceMatcher(None, norm(p), norm(text)).get_matching_blocks()) / len(norm(p))
+    return max((covered(p) for p in PUBLISHED), default=0)
+
+agent moderate(customer: str, sku: str, text: str, llm):
+    similar = round(near_duplicate(text), 2)
+    read r: Review by llm:
+        Read this product review for a kettle.
+
+        {text}
+
+    check verified_purchase: (customer, sku) in PURCHASES, "{customer} has no order for {sku}"
+    check original: similar < 0.85, "{similar:.0%} of a published review is copied into this one"
+    check no_spam: not SPAM.search(text), "contains a link or phone number: {SPAM.search(text).group(0) if SPAM.search(text) else ''}"
+    when off_topic: r.off_topic and grounded(r.off_topic_quote, text)
+
+    rule decision:
+        labels = ["Received free product"] if INCENTIVE.search(text) else []
+        labels += ["Verified purchase"] if verified_purchase else []
+        if checks.failures():
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        if off_topic:
+            return {"status": "HOLD", "why": [f"off topic: '{r.off_topic_quote}'"]}
+        return {"status": "PUBLISH", "labels": labels, "sentiment": r.sentiment}
+    return decision
+
+main:
+    honest = "Loud, and the lid sticks after a month. Two stars."
+    show("Negative but genuine", moderate("cust-542", "KTL-09", honest,
+         model({"r": {"sentiment": "negative", "competitor": None, "off_topic": False, "off_topic_quote": ""}})))
+
+    gift = "I received this for free in exchange for an honest review. Heats fast, cord is short."
+    missed = {"r": {"sentiment": "mixed", "competitor": None, "off_topic": False, "off_topic_quote": ""}}
+    show("Free-product review: code adds the label", moderate("cust-778", "KTL-09", gift, model(missed)))
+
+    spam = ("Boils a full litre in under three minutes and the handle stays cool. Very happy!! "
+            "Cheaper at kettledeals.shop or WhatsApp +44 7700 900123")
+    fooled = {"r": {"sentiment": "positive", "competitor": None, "off_topic": False, "off_topic_quote": ""}}
+    show("Copied text with a link and phone, no order", moderate("cust-999", "KTL-09", spam, model(fooled)))
+
+    rant = "Kettle is fine. Mostly writing because the Brewmaster store on Main St refused my return on a toaster."
+    show("Off topic rant about a competitor", moderate("cust-311", "KTL-09", rant,
+         model({"r": {"sentiment": "negative", "competitor": "Brewmaster", "off_topic": True,
+                      "off_topic_quote": "the Brewmaster store on Main St refused my return on a toaster"}})))

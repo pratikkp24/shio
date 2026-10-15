@@ -1,0 +1,64 @@
+# Workflow: import shipment. Classify the customs line (customs_hs), accept the carrier's ETA notice (shipment_eta)
+# and audit the freight invoice for the container's inland leg (freight_audit). Cross-step checks no single step can
+# make: the container the freight invoice bills is the container on the ETA notice, and the goods declared to customs
+# are the goods the booking says were shipped in that container. CLEAR or HOLD.
+
+from common import model, show
+from uses import use, step_ok
+
+customs = use("customs_hs")
+eta = use("shipment_eta")
+freight = use("freight_audit")
+
+BOOKED_GOODS = {"TRLU4821070": "6403.99", "MRVU7712055": "8471.30"}    # booking record: container -> HS of the cargo
+
+type FreightRef:
+    container: str         # the container number the freight invoice bills for, 4 letters + 7 digits, no spaces
+    quote: str             # the invoice words naming it, copied exactly
+
+agent clear(line: dict, notice: str, invoice: str, customs_llm, eta_llm, freight_llm, llm):
+    entry = customs.classify(line, customs_llm)
+    arrival = eta.eta_update(notice, eta_llm)
+    bill = freight.audit(invoice, freight_llm)
+    read ref: FreightRef by llm:
+        Which container does this freight invoice bill for?
+
+        {invoice}
+
+    check filed: step_ok(entry, "FILE"), "customs: {entry.get('action')} {entry.get('why', '')}"
+    check eta_accepted: step_ok(arrival, "UPDATE TMS"), "ETA notice: {arrival.get('action')} {arrival.get('why', '')}"
+    check freight_audited: step_ok(bill, "PAY", "SHORT PAY"), "freight: {bill.get('action')} {bill.get('why', '')}"
+    check ref_on_invoice: ref.quote in invoice and ref.container in ref.quote.replace(" ", ""), "container {ref.container} is not what the invoice says"
+    check same_container after eta_accepted, ref_on_invoice: ref.container == arrival.get("container"), "freight invoice bills {ref.container}, ETA notice is for {arrival.get('container')}"
+    check goods_as_booked after filed, eta_accepted: entry.get("hs_code") is not None and entry.get("hs_code") == BOOKED_GOODS.get(arrival.get("container")), "customs declares {entry.get('hs_code')}, booking for {arrival.get('container')} is {BOOKED_GOODS.get(arrival.get('container'))}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "CLEAR", "container": arrival["container"], "eta": arrival["eta"], "duty": entry["duty"], "freight": bill["pay"]}
+    return decision
+
+main:
+    boots = {"ref": "L1", "value": 4200.0, "description": "Men's leather ankle boots, rubber outsole, 120 pairs, style KR-88"}
+    classified = model({"c": {"hs_code": "6403.99", "description_quote": "leather ankle boots, rubber outsole", "declared_value": 4200.0, "duty": 420.0}})
+    notice = "Dear customer, container TRLU 482107 0 on MV Hallorn Bay is now expected at Rotterdam (NLRTM) on 2026-11-06 due to congestion at the Suez approach."
+    eta_ok = {"s": {"container": "TRLU4821070", "port": "NLRTM", "eta": "2026-11-06", "eta_quote": "expected at Rotterdam (NLRTM) on 2026-11-06"}}
+    inv = ("Ridgeback Freight Lines  PRO-660213  DAL-ATL  1,240 kg  Ex container TRLU4821070 (transload)\nLine haul 384.40\n"
+           "Fuel surcharge 18% 69.19\nLiftgate 75.00\nTOTAL 528.59")
+    audited = {"f": {"pro": "PRO-660213", "line_haul": 384.40, "fuel_pct": 18, "fuel": 69.19, "accessorials": [{"name": "liftgate", "amount": 75.0}], "total": 528.59}}
+    ref = {"ref": {"container": "TRLU4821070", "quote": "Ex container TRLU4821070"}}
+    show("Same container, goods as booked", clear(boots, notice, inv, classified, model(eta_ok), model(audited), model(ref)))
+
+    other = inv.replace("TRLU4821070", "MRVU7712055")
+    show("Freight invoice bills a different container", clear(boots, notice, other, classified, model(eta_ok), model(audited),
+         model({"ref": {"container": "MRVU7712055", "quote": "Ex container MRVU7712055"}})))
+
+    laptops = "Update: MRVU7712055 discharged at Nhava Sheva INNSA, ETA 2026-10-21 (revised)."
+    eta2 = {"s": {"container": "MRVU7712055", "port": "INNSA", "eta": "2026-10-21", "eta_quote": "ETA 2026-10-21"}}
+    inv2 = "Ridgeback Freight Lines  PRO-660251  DAL-PHX  610 kg  Ex container MRVU7712055\nLine haul 201.30\nFuel surcharge 18% 36.23\nTOTAL 237.53"
+    audit2 = {"f": {"pro": "PRO-660251", "line_haul": 201.30, "fuel_pct": 18, "fuel": 36.23, "accessorials": [], "total": 237.53}}
+    show("Boots declared, container booked as laptops", clear(boots, laptops, inv2, classified, model(eta2), model(audit2),
+         model({"ref": {"container": "MRVU7712055", "quote": "Ex container MRVU7712055"}})))
+
+    misread = {"s": dict(eta_ok["s"], container="TRLU4827070")}
+    show("ETA step fails: container digit misread", clear(boots, notice, inv, classified, model(misread), model(audited), model(ref)))

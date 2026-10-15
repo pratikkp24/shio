@@ -1,0 +1,51 @@
+# Workflow: price-match a product, then publish its German listing. Approve the competitor match (price_match) and QA
+# the German translation of the merchandiser's listing copy (translation_qa). Cross-step checks: the English copy and
+# the German listing both show the matched price, and the matched price is not below the brand's minimum advertised
+# price (MAP), which the price-match step does not know about. PUBLISH or FIX.
+
+from common import model, numbers, show
+from uses import use, step_ok
+
+pm = use("price_match")
+tq = use("translation_qa")
+
+MAP = {"TV-55Q": 549.00, "VAC-R7": 279.00}     # brand minimum advertised prices, USD
+
+agent global_listing(sku: str, url: str, page: str, english: str, pm_llm, tq_llm):
+    match = pm.price_match(sku, url, page, pm_llm)
+    german = tq.translate(english, tq_llm)
+    price = match.get("new_price")
+
+    check matched: step_ok(match, "MATCH"), "price match: {match.get('action')} {match.get('why', '')}"
+    check translated: german.get("route") == "PUBLISH", "translation: {german.get('route')} {german.get('why', '')}"
+    check source_price after matched: price in numbers(english), "English copy shows {numbers(english)}, matched price is {price}"
+    check german_price after matched, translated, source_price: price in tq.de_numbers(german["text"]), "German listing shows {tq.de_numbers(german['text'])}, matched price is {price}"
+    check at_or_above_map after matched: price >= MAP[sku], "matched {price} is below the {MAP[sku]} minimum advertised price"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "FIX", "sku": sku, "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "PUBLISH", "sku": sku, "price": price, "retailer": match["retailer"], "de": german["text"]}
+    return decision
+
+main:
+    tv = ("<h1>Aster 55\" QLED TV</h1><p>Model: QX55-8820B</p><p>Now $579.99</p><p>In stock, ships tomorrow</p>"
+          "<p>Sold and shipped by VoltMart</p>")
+    seen = {"c": {"price": 579.99, "price_quote": "Now $579.99", "model_number": "QX55-8820B", "in_stock": True,
+                  "stock_quote": "In stock, ships tomorrow", "seller": "VoltMart"}}
+    en = "Aster 55-inch QLED TV, now $579.99. In stock, ships tomorrow."
+    de = "Aster 55-Zoll-QLED-Fernseher, jetzt 579,99 $. Auf Lager, Versand morgen."
+    url = "https://www.voltmart.example/p/aster-55"
+    show("Matched, translated, above MAP", global_listing("TV-55Q", url, tv, en, model(seen), model({"de": de})))
+
+    stale_en = en.replace("$579.99", "$649.00")
+    show("Copy still shows the old price", global_listing("TV-55Q", url, tv, stale_en, model(seen),
+         model({"de": de.replace("579,99", "649,00")})))
+
+    vac = "<h1>Rova RV7 Pro</h1><p>Model RV7-PRO-2</p><p>$259.00</p><p>In stock</p><p>Sold by Homeline</p>"
+    vac_seen = {"c": {"price": 259.0, "price_quote": "$259.00", "model_number": "RV7-PRO-2", "in_stock": True, "stock_quote": "In stock", "seller": "Homeline"}}
+    show("Valid match, but below MAP", global_listing("VAC-R7", "https://homeline.example/rv7", vac, "Rova RV7 Pro robot vacuum, now $259.00. In stock.",
+         model(vac_seen), model({"de": "Rova RV7 Pro Saugroboter, jetzt 259,00 $. Auf Lager."})))
+
+    show("Translation step fails: price digits swapped", global_listing("TV-55Q", url, tv, en, model(seen),
+         model({"de": de.replace("579,99", "597,99")})))

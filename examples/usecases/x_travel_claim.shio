@@ -1,0 +1,94 @@
+# Workflow: a travel-insurance delay claim with meal costs. Settle the delay from the airline letter
+# (flight_delay_claim), check the meal receipt (expense), verify the claimant (kyc), then check across all three:
+# the passenger on the letter is the verified policyholder, and the meal was bought inside the delay. PAY or REVIEW.
+
+from datetime import datetime, timedelta
+from common import model, grounded, parse_date, show
+from uses import use, step_ok
+
+delay = use("flight_delay_claim")
+expense = use("expense")
+kyc = use("kyc")
+
+POLICIES = {"TRV-88122": {"holder_pan": "ABCPS1234K"}}       # policy -> policyholder's PAN on file
+
+type Passenger:
+    name: str              # the passenger the letter names
+    flight: str            # flight number, e.g. ZX 233
+    date: str              # scheduled date, YYYY-MM-DD
+    quote: str             # the sentence naming the passenger and flight, copied exactly
+
+type Bought:
+    date: str              # the receipt's date, YYYY-MM-DD
+    quote: str             # the words with the date, copied exactly
+
+def window(flight, day, hours):
+    s = delay.SCHEDULE.get((flight, day))
+    if s is None or hours is None:
+        return None
+    start = datetime.strptime(s["arr"], "%Y-%m-%d %H:%M")
+    return (start.date(), (start + timedelta(hours=hours)).date())
+
+def during(day, flight, sched, hours):
+    w, d = window(flight, sched, hours), parse_date(day)
+    return w is not None and d is not None and w[0] <= d <= w[1]
+
+def span(flight, sched, hours):
+    w = window(flight, sched, hours)
+    return "unknown" if w is None else f"{w[0]} to {w[1]}"
+
+agent travel_claim(policy_no: str, letter: str, receipt: str, meal: dict, form: str, id_text: str, delay_llm, meal_llm, kyc_llm, llm):
+    settled = delay.delay_claim(policy_no, letter, delay_llm)
+    paid_meal = expense.expense(meal, receipt, meal_llm)
+    person = kyc.kyc(form, id_text, kyc_llm)
+    read p: Passenger by llm:
+        Who is the passenger on this airline letter, and which flight and date is it about?
+
+        {letter}
+    read b: Bought by llm:
+        What date is printed on this receipt?
+
+        {receipt}
+
+    check delay_paid: step_ok(settled, "PAY"), "delay: {settled.get('action')} {settled.get('why', '')}"
+    check meal_ok: step_ok(paid_meal, "PAY"), "meal: {paid_meal.get('status')} {paid_meal.get('why', '')}"
+    check verified: step_ok(person, "APPROVE"), "identity: {person.get('status')} {person.get('why', '')}"
+    check read_right: grounded(p.quote, letter) and p.name.lower() in p.quote.lower() and p.flight in p.quote and grounded(b.quote, receipt) and b.date in b.quote, "passenger, flight or receipt date not as written"
+    check policyholder after verified: POLICIES.get(policy_no, {}).get("holder_pan") == person.get("pan"), "verified PAN {person.get('pan')} is not the holder of {policy_no}"
+    check is_passenger after verified: kyc.same_name(p.name, person.get("name", "")), "letter names {p.name}, verified claimant is {person.get('name')}"
+    check in_delay after delay_paid: during(b.date, p.flight, p.date, settled.get("delay_hours")), "meal bought {b.date}, the delay ran {span(p.flight, p.date, settled.get('delay_hours'))}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "REVIEW", "policy": policy_no, "to": "claims handler", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "PAY", "policy": policy_no, "delay": settled["amount"], "meal": paid_meal["amount"],
+                "total": round(settled["amount"] + paid_meal["amount"], 2)}
+    return decision
+
+main:
+    letter = """Zephyr Air confirms that passenger PRIYA R SHARMA was booked on flight ZX 233 Muscat-Kochi of 7 October 2026,
+    which arrived at Kochi at 03:30 local time (Asia/Kolkata) on 2026-10-08, a delay of 6.4 hours."""
+    l_ok = {"l": {"flight": "ZX 233", "date": "2026-10-07", "actual_arrival": "2026-10-08 03:30", "actual_tz": "Asia/Kolkata",
+                  "actual_quote": "arrived at Kochi at 03:30 local time (Asia/Kolkata) on 2026-10-08", "stated_delay_hours": 6.4}}
+    p_ok = {"name": "PRIYA R SHARMA", "flight": "ZX 233", "date": "2026-10-07",
+            "quote": "passenger PRIYA R SHARMA was booked on flight ZX 233"}
+    receipt = "MUSCAT AIRPORT FOOD COURT  2026-10-07\nThali 14.00\nWater 2.50\nTOTAL 16.50"
+    r_ok = {"r": {"merchant": "Muscat Airport Food Court", "date": "2026-10-07", "total": 16.50, "category": "meals", "line_items": [14.00, 2.50]}}
+    form = "Name: Priya R. Sharma\nDate of birth: 1994-03-07\nPAN: ABCPS1234K"
+    card = "INCOME TAX DEPARTMENT\nPRIYA R SHARMA\nDOB 07/03/1994\nPermanent Account Number ABCPS1234K"
+    me = {"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1234K"}
+    ids = {"applied": dict(me, name="Priya R. Sharma"), "card": me, "card_again": me}
+    b_ok = {"date": "2026-10-07", "quote": "2026-10-07"}
+    show("Delayed, meal during the delay, policyholder verified", travel_claim("TRV-88122", letter, receipt, {"amount": 16.50}, form, card,
+         model(l_ok), model(r_ok), model(ids), model({"p": p_ok, "b": b_ok})))
+
+    early = receipt.replace("2026-10-07", "2026-10-06")
+    show("Every step passes, but the meal was the day before the flight", travel_claim("TRV-88122", letter, early, {"amount": 16.50}, form, card,
+         model(l_ok), model({"r": dict(r_ok["r"], date="2026-10-06")}), model(ids), model({"p": p_ok, "b": {"date": "2026-10-06", "quote": "2026-10-06"}})))
+
+    friend = letter.replace("PRIYA R SHARMA", "NEHA KAPOOR")
+    show("Letter is for a travel companion, not the policyholder", travel_claim("TRV-88122", friend, receipt, {"amount": 16.50}, form, card,
+         model(l_ok), model(r_ok), model(ids), model({"p": dict(p_ok, name="NEHA KAPOOR", quote="passenger NEHA KAPOOR was booked on flight ZX 233"), "b": b_ok})))
+
+    show("Model misreads the claimant's PAN on the card", travel_claim("TRV-88122", letter, receipt, {"amount": 16.50}, form, card,
+         model(l_ok), model(r_ok), model(dict(ids, card=dict(me, pan="ABCPS1284K"))), model({"p": p_ok, "b": b_ok})))

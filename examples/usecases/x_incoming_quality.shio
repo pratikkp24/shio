@@ -1,0 +1,63 @@
+# Workflow: incoming quality to settlement. Inspect the lot (quality_inspection), vet the supplier's certificate
+# (supplier_certificate), and match the supplier's credit note for a rejected lot (credit_note). Cross-step checks:
+# the credit reverses the lot's own invoice for the full lot value, and the certificate was vetted for the category
+# of part this lot is. SETTLE, or REVIEW with the reasons.
+
+from common import model, show
+from uses import use, step_ok
+
+qi = use("quality_inspection")
+certs = use("supplier_certificate")
+credits = use("credit_note")
+
+LOTS = {   # goods receipt: lot -> supplier, part category, the invoice it was billed on, lot value (net)
+    "LOT-3308": {"supplier": "SUP-118", "part": "machined aluminium parts", "invoice": "INV-30455", "value": 4800.00},
+    "LOT-3310": {"supplier": "SUP-118", "part": "injection moulded housings", "invoice": "INV-30502", "value": 9500.00},
+}
+
+agent settle(lot: str, report: str, cert_text: str, note_text: str, qi_llm, cert_llm, cn_llm):
+    rec = LOTS[lot]
+    inspection = qi.inspect_lot(lot, report, qi_llm)
+    vetted = certs.vet(rec["supplier"], cert_text, cert_llm)
+    credit = credits.match_credit(note_text, cn_llm)
+
+    check rejected: step_ok(inspection, "REJECT"), "inspection: {inspection.get('action')}, nothing to settle"
+    check supplier_approved: step_ok(vetted, "APPROVED SUPPLIER"), "certificate: {vetted.get('status')} {vetted.get('why', '')}"
+    check credit_matched: step_ok(credit, "POST"), "credit note: {credit.get('status')} {credit.get('why', '')}"
+    check lot_invoice after credit_matched: credit["against"] == rec["invoice"], "credit reverses {credit.get('against')}, {lot} was billed on {rec['invoice']}"
+    check full_value after credit_matched: abs(credit["net"] - rec["value"]) <= 0.005, "credit {credit.get('net')} for a rejected lot worth {rec['value']}"
+    check cert_covers_part after supplier_approved: certs.SUPPLIERS[rec["supplier"]]["buys"] == rec["part"], "certificate was vetted for {certs.SUPPLIERS[rec['supplier']]['buys']}, {lot} is {rec['part']}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "REVIEW", "lot": lot, "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "SETTLE", "lot": lot, "defects": inspection["defects"], "credit_note": credit["note"], "net": credit["net"]}
+    return decision
+
+main:
+    good = [(12.01, 80.05), (11.98, 79.92), (12.03, 80.10), (12.00, 80.00), (11.97, 80.12), (12.02, 79.95), (12.04, 80.08), (11.99, 80.02)]
+    bad = good[:2] + [(12.09, 80.05), (12.08, 80.01), (11.93, 80.00)] + good[5:]
+    report, ans = qi.report_and_answers(bad)
+    cert = """CERTIFICATE No. NCL-Q-40917
+    Norvale Certification Ltd certifies that Ostrava Precision Components s.r.o. operates a quality management
+    system that complies with ISO 9001:2015.
+    Scope: CNC machining and anodising of aluminium parts for industrial equipment.
+    Issued: 2025-03-14  Expiry date: 2028-03-13"""
+    c_ok = {"c": {"standard": "ISO 9001:2015", "holder": "Ostrava Precision Components s.r.o.", "issuer": "Norvale Certification Ltd",
+                  "scope": "CNC machining and anodising of aluminium parts for industrial equipment", "expiry": "2028-03-13"}}
+    note = "CREDIT NOTE CN-1340 for account C-0088\nAgainst invoice INV-30455: lot LOT-3308 rejected at incoming inspection\nNet 4,800.00  GST 12% 576.00  Total 5,376.00"
+    cn = {"number": "CN-1340", "invoice_ref": "INV-30455", "customer": "C-0088", "net": 4800, "tax_rate": 0.12, "tax": 576, "total": 5376}
+    show("Rejected lot, full credit, certified supplier", settle("LOT-3308", report, cert, note, model({"m": ans}), model(c_ok), model({"cn": cn})))
+
+    part = note.replace("4,800.00  GST 12% 576.00  Total 5,376.00", "3,000.00  GST 12% 360.00  Total 3,360.00")
+    show("Supplier credits only part of the lot", settle("LOT-3308", report, cert, part, model({"m": ans}), model(c_ok),
+         model({"cn": dict(cn, net=3000, tax=360, total=3360)})))
+
+    housings = ("CREDIT NOTE CN-1344 for account C-0131\nAgainst invoice INV-30502: lot LOT-3310 rejected at incoming inspection\n"
+                "Net 9,500.00  GST 18% 1,710.00  Total 11,210.00")
+    show("Certificate does not cover this part", settle("LOT-3310", report, cert, housings, model({"m": ans}), model(c_ok),
+         model({"cn": {"number": "CN-1344", "invoice_ref": "INV-30502", "customer": "C-0131", "net": 9500, "tax_rate": 0.18, "tax": 1710, "total": 11210}})))
+
+    sister = cert.replace("Ostrava Precision Components s.r.o.", "Ostrava Precision Holdings a.s.")
+    show("Certificate step fails: sister company's certificate", settle("LOT-3308", report, sister, note, model({"m": ans}),
+         model({"c": dict(c_ok["c"], holder="Ostrava Precision Holdings a.s.")}), model({"cn": cn})))

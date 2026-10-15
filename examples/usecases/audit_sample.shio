@@ -1,0 +1,59 @@
+# Internal audit: testing a sample of journal entries against their supporting documents. For each entry the model
+# reads the document; code checks the amount, the date, that the approval is really on the document, and the
+# approver's authority limit. Each entry gets PASS or EXCEPTION; the auditor reviews every exception.
+
+from common import model, grounded, money_eq, parse_date, show
+
+JOURNALS = {   # the sample drawn from the general ledger
+    "JE-4410": {"amount": 18500.00, "posted": "2026-08-14", "approver": "R. Okafor", "account": "6100 Consulting"},
+    "JE-4417": {"amount": 7800.00, "posted": "2026-08-22", "approver": "T. Imai", "account": "6420 Travel"},
+    "JE-4423": {"amount": 14250.00, "posted": "2026-09-03", "approver": "R. Okafor", "account": "6100 Consulting"},
+    "JE-4431": {"amount": 62000.00, "posted": "2026-09-19", "approver": "D. Lindqvist", "account": "1600 Equipment"},
+}
+AUTHORITY = {"T. Imai": 5000, "R. Okafor": 25000, "D. Lindqvist": 100000}    # approval limits, from the delegation matrix
+
+type Support:
+    amount: float          # the amount on the document
+    date: str              # the document date, YYYY-MM-DD
+    approver: str?         # who signed the approval on the document; null if no approval is shown
+    approval_quote: str    # the approval line, copied exactly; empty if none
+
+agent audit(docs: dict, llm):
+    results = {}
+    for je in JOURNALS:
+        entry = JOURNALS[je]
+        read doc[je]: Support by llm blind:
+            Read the supporting document for a journal entry.
+
+            {docs[je]}
+
+        check amount_agrees[je]: money_eq(doc.amount, entry["amount"]), "document shows {doc.amount:,.2f}, ledger {entry['amount']:,.2f}"
+        check dated_before_posting[je]: parse_date(doc.date) <= parse_date(entry["posted"]), "document dated {doc.date}, after posting on {entry['posted']}"
+        check approval_on_document[je]: doc.approver is not None and grounded(doc.approval_quote, docs[je]) and doc.approver in doc.approval_quote, "no approval by {doc.approver} on the document"
+        check approver_matches[je]: doc.approver == entry["approver"], "ledger approver {entry['approver']}, document {doc.approver}"
+        check within_authority[je]: entry["amount"] <= AUTHORITY.get(entry["approver"], 0), "{entry['approver']} may approve up to {AUTHORITY.get(entry['approver'], 0):,}, entry is {entry['amount']:,.2f}"
+
+        rule verdict[je]:
+            failed = [c["detail"] for c in checks.failures(je)]
+            return {"result": "EXCEPTION", "account": entry["account"], "why": failed} if failed else {"result": "PASS", "account": entry["account"]}
+        results[je] = verdict
+    return results
+
+main:
+    docs = {
+        "JE-4410": "Northfield Advisory invoice NA-0912, 2026-08-10, consulting fees 18,500.00. Approved for payment: R. Okafor",
+        "JE-4417": "Corporate travel agency statement 2026-08-20, total 7,800.00. Approved: T. Imai",
+        "JE-4423": "Northfield Advisory invoice NA-0938, 2026-08-29, consulting fees 12,450.00. Approved for payment: R. Okafor",
+        "JE-4431": "Purchase order PO-5520 for lab equipment, 2026-09-12, 62,000.00. Approval: (blank)",
+    }
+    answers = {"doc": {
+        "JE-4410": {"amount": 18500, "date": "2026-08-10", "approver": "R. Okafor", "approval_quote": "Approved for payment: R. Okafor"},
+        "JE-4417": {"amount": 7800, "date": "2026-08-20", "approver": "T. Imai", "approval_quote": "Approved: T. Imai"},
+        "JE-4423": {"amount": 12450, "date": "2026-08-29", "approver": "R. Okafor", "approval_quote": "Approved for payment: R. Okafor"},
+        "JE-4431": {"amount": 62000, "date": "2026-09-12", "approver": "D. Lindqvist", "approval_quote": "Approval: D. Lindqvist"},
+    }}
+    titles = {"JE-4410": "Consulting invoice, approved within limit", "JE-4417": "Travel approved above the approver's limit",
+              "JE-4423": "Ledger 14,250 vs document 12,450 (transposed)", "JE-4431": "Model fills in an approval that is blank"}
+    results = audit(docs, model(answers))
+    for je in JOURNALS:
+        show(f"{je}: {titles[je]}", results[je])

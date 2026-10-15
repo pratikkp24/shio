@@ -1,0 +1,76 @@
+# Workflow: inbound lead to NDA. lead_qualify routes the demo request, sanctions_screening screens the company's
+# directors and owners, nda_review checks the NDA against the playbook. Cross-step: the NDA's counterparty is the
+# qualified company (same name, notice email on the lead's own domain) and the screening was of that company.
+
+import re
+from common import model, grounded, norm, domain, show
+from uses import use, step_ok, why
+
+leads = use("lead_qualify")
+sanctions = use("sanctions_screening")
+ndas = use("nda_review")
+
+type Party:
+    name: str              # the other party's company name as the NDA gives it
+    email: str             # the other party's notice email address
+    quote: str             # the sentence naming them, copied exactly
+
+def company_key(s):
+    return re.sub(r"\b(inc|ltd|llc|limited|plc|gmbh)\b\.?", "", norm(s)).strip(" ,.")
+
+agent lead_to_nda(form: dict, website: str, docs: str, nda: str, lead_llm, screen_llm, nda_llm, llm):
+    lead = leads.qualify(form, website, lead_llm)
+    screen = sanctions.screening(docs, screen_llm)
+    terms = ndas.review(nda, nda_llm)
+    read party: Party by llm:
+        Who is the other party to this NDA (not Aonami Technologies), and where do notices go?
+
+        {nda}
+
+    check qualified: lead.get("route") == "SALES", "lead: {lead.get('route')} {why(lead)}"
+    check screened_clear: step_ok(screen, "CLEAR"), "screening: {screen.get('status')} {why(screen)}"
+    check nda_in_playbook: step_ok(terms, "SIGN"), "NDA: {terms.get('action')} {terms.get('flags')} {terms.get('unverified')}"
+    check party_quoted: grounded(party.quote, nda) and grounded(party.name, party.quote) and grounded(party.email, nda), "the counterparty is not quoted from the NDA"
+    check same_company after qualified: company_key(party.name) == company_key(lead["company"]), "NDA is with {party.name}, the qualified lead is {lead['company']}"
+    check same_domain: domain(party.email) == domain(form["email"]), "NDA notices go to {domain(party.email)}, the lead wrote from {domain(form['email'])}"
+    check screened_this_company after qualified: grounded(lead["company"], docs), "the screening documents are not about {lead['company']}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "SEND NDA", "counterparty": party.name, "notices": party.email, "term_years": terms["term_years"]}
+    return decision
+
+main:
+    site = "<h1>Brightfold Logistics</h1><p>Brightfold is a team of 240 people running cold-chain freight across Ohio.</p>"
+    form = {"name": "Lena Ortiz", "email": "lena.ortiz@brightfold.io", "website": "https://www.brightfold.io",
+            "company": "Brightfold Logistics", "budget": "45,000 USD a year", "timeline": "next 3 months"}
+    lead = model({"lead": {"company": "Brightfold Logistics", "employees": 240, "size_quote": "Brightfold is a team of 240 people",
+                           "budget": 45000, "timeline_months": 3}})
+    docs = "Company: Brightfold Logistics Inc. Director: Marta Velasquez-Orr, born 03/11/1982. Shareholder: Tobias Lindgren, born 19/06/1975."
+    people = model({"o": {"people": [{"name": "Marta Velasquez-Orr", "aliases": [], "dob": "1982-11-03"},
+                                     {"name": "Tobias Lindgren", "aliases": [], "dob": "1975-06-19"}]}})
+    body = ("1. Each party may disclose Confidential Information to the other, and each party shall protect what it receives.\n"
+            "6. The obligations in this Agreement last for two (2) years from the date of disclosure.\n"
+            "11. This Agreement is governed by the laws of Ireland.")
+    terms = model({"t": {"duration": {"value": "2 years", "number": 2, "clause": "last for two (2) years from the date of disclosure"},
+                         "direction": {"value": "mutual", "number": None, "clause": "Each party may disclose Confidential Information to the other"},
+                         "non_solicit": {"value": None, "number": None, "clause": ""},
+                         "governing_law": {"value": "Ireland", "number": None, "clause": "governed by the laws of Ireland"}}})
+    def nda(company, email):
+        return f"This Agreement is between Aonami Technologies and {company} (notices to {email}).\n" + body
+    def party(company, email):
+        return model({"party": {"name": company, "email": email, "quote": f"between Aonami Technologies and {company}"}})
+
+    good = nda("Brightfold Logistics Inc.", "legal@brightfold.io")
+    show("Qualified, screened, NDA with the same company", lead_to_nda(form, site, docs, good, lead, people, terms,
+         party("Brightfold Logistics Inc.", "legal@brightfold.io")))
+
+    other = nda("Brightfold Freight Ltd", "contracts@brightfold-freight.net")
+    show("Every step passes, but the NDA names a look-alike company", lead_to_nda(form, site, docs, other, lead, people, terms,
+         party("Brightfold Freight Ltd", "contracts@brightfold-freight.net")))
+
+    owner = docs + " Beneficial owner: Dimitri Volkanov (born 12/04/1971), 60% via Seabright Holdings."
+    hit = model({"o": {"people": [{"name": "Dimitri Volkanov", "aliases": [], "dob": "1971-04-12"}]}})
+    show("Owner is a possible sanctions match", lead_to_nda(form, site, owner, good, lead, hit, terms,
+         party("Brightfold Logistics Inc.", "legal@brightfold.io")))

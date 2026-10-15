@@ -1,0 +1,58 @@
+# Workflow: treasury payment release. Match the FX deal that funds the payment (fx_confirmation.shio), screen the
+# beneficiary (sanctions_screening.shio) and approve its account (vendor_bank_change.shio). Cross-step check: the
+# beneficiary on the account is the party that was screened, and the currency bought is the account's currency.
+
+from common import model, norm, show
+from uses import use, step_ok
+
+fx_confirmation = use("fx_confirmation")
+sanctions_screening = use("sanctions_screening")
+vendor_bank_change = use("vendor_bank_change")
+
+IBAN_CURRENCY = {"DE": "EUR", "FR": "EUR", "NL": "EUR", "GB": "GBP", "CH": "CHF"}
+
+def beneficiary(vendor_id):
+    return next((name for name, v in vendor_bank_change.VENDORS.items() if v["id"] == vendor_id), None)
+
+agent release(fx_email: str, kyb_docs: str, letter: str, sender: str, fx_llm, screen_llm, bank_llm):
+    deal = fx_confirmation.confirm(fx_email, fx_llm)
+    screened = sanctions_screening.screening(kyb_docs, screen_llm)
+    account = vendor_bank_change.bank_change(letter, sender, bank_llm)
+    bought = fx_confirmation.BOOKINGS.get(deal.get("trade"), {}).get("we_buy")
+    payee = beneficiary(account.get("vendor"))
+    pays_in = IBAN_CURRENCY.get(str(account.get("iban"))[:2])
+
+    check deal_ok: step_ok(deal, "MATCHED"), "FX deal: {deal.get('status')} {deal.get('why', '')}"
+    check screen_ok: step_ok(screened, "CLEAR"), "screening: {screened.get('status')} {screened.get('why', '')}"
+    check account_ok: step_ok(account, "UPDATE"), "account: {account.get('action')} {account.get('why', '')}"
+    check payee_screened after screen_ok: payee is not None and norm(payee) in [norm(n) for n in screened["screened"]], "beneficiary {payee} is not a screened party {screened.get('screened')}"
+    check same_currency after deal_ok: pays_in is not None and bought == pays_in, "deal buys {bought}, beneficiary account {account.get('iban')} is in {pays_in}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()], "to": "treasury operations"}
+        return {"status": "RELEASE", "beneficiary": payee, "iban": account["iban"], "currency": bought, "funded_by": deal["trade"]}
+    return decision
+
+main:
+    eur = ("Northgate Bank FX confirmation. Your ref FX-55120. We sell EUR 5,000,000.00 / buy USD at 1.0842. "
+           "Value date 20 Oct 2026. Please confirm by return.")
+    eur_deal = {"trade_ref": "FX-55120", "pair": "EUR/USD", "we_buy": "EUR", "notional": 5000000, "rate": 1.0842, "value_date": "2026-10-20"}
+    kyb = "Beneficiary: Kestrel Office Supplies. Director: Tobias Lindgren, born 19/06/1975."
+    people = [{"name": "Kestrel Office Supplies", "aliases": [], "dob": None}, {"name": "Tobias Lindgren", "aliases": [], "dob": "1975-06-19"}]
+    letter = "Kestrel Office Supplies has moved banks. From 1 November please remit to DE68210501700012345678. Accounts team"
+    acct = model({"req": {"vendor": "Kestrel Office Supplies", "new_iban": "DE68210501700012345678",
+                          "iban_quote": "please remit to DE68210501700012345678", "says_preapproved": False}})
+    sender = "accounts@kestreloffice.com"
+    show("EUR bought, EUR account, screened beneficiary", release(eur, kyb, letter, sender, model({"c": eur_deal}), model({"o": {"people": people}}), acct))
+
+    usd = "Harbourline Securities: ref FX-55127, we buy GBP 500,000 against USD at 1.2615, value 2026-10-20."
+    usd_deal = {"trade_ref": "FX-55127", "pair": "GBP/USD", "we_buy": "USD", "notional": 500000, "rate": 1.2615, "value_date": "2026-10-20"}
+    show("All steps pass, USD deal funds a EUR account", release(usd, kyb, letter, sender, model({"c": usd_deal}), model({"o": {"people": people}}), acct))
+
+    other = kyb.replace("Kestrel Office Supplies", "Kestrel Office Solutions Ltd")
+    show("All steps pass, a different company was screened", release(eur, other, letter, sender, model({"c": eur_deal}),
+         model({"o": {"people": [dict(people[0], name="Kestrel Office Solutions Ltd"), people[1]]}}), acct))
+
+    show("Counterparty confirms a different rate", release(eur.replace("1.0842", "1.0824"), kyb, letter, sender,
+         model({"c": dict(eur_deal, rate=1.0824)}), model({"o": {"people": people}}), acct))

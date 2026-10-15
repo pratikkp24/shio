@@ -1,0 +1,61 @@
+# Workflow: paying a supplier after a bank-detail change. Check the change letter (vendor_bank_change), screen the
+# supplier's directors and owners (sanctions_screening), and read the payment approver's attestation (policy_attestation).
+# Cross-step check: the approver has no role at the supplier being paid: code searches the attestation text for the
+# supplier (disclosed or merely mentioned) and the supplier's owners for the approver. PAY / COMPLIANCE / HOLD.
+
+from common import model, norm, show
+from uses import use, step_ok
+
+bank = use("vendor_bank_change")
+sanctions = use("sanctions_screening")
+attestation = use("policy_attestation")
+
+agent pay(letter: str, sender: str, docs: str, approver: str, answers: str, bank_llm, sanc_llm, att_llm):
+    change = bank.bank_change(letter, sender, bank_llm)
+    screened = sanctions.screening(docs, sanc_llm)
+    attested = attestation.attest(answers, att_llm)
+    vendor = next((name for name, v in bank.VENDORS.items() if v["id"] == change.get("vendor")), "")
+
+    check bank_updated: step_ok(change, "UPDATE"), "bank change: {change.get('action')} {change.get('why', '')}"
+    check sanctions_clear: step_ok(screened, "CLEAR"), "sanctions: {screened.get('why')}"
+    check attested_clear: step_ok(attested, "CLEAR"), "attestation: {attested.get('why')}"
+    check no_role_at_payee after bank_updated: norm(vendor) not in norm(answers), "{approver}'s attestation names {vendor}, the supplier being paid ({attested.get('status')})"
+    check not_an_owner after sanctions_clear: norm(approver) not in [norm(p) for p in screened["screened"]], "{approver} is named in {vendor}'s ownership documents but approves its payments"
+
+    rule decision:
+        conflict = [c["detail"] for c in checks.failures() if c["name"] in ("no_role_at_payee", "not_an_owner")]
+        if conflict:
+            return {"action": "COMPLIANCE", "why": conflict, "note": "another approver signs off; compliance reviews the conflict"}
+        if checks.failures():
+            return {"action": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "PAY", "vendor": change["vendor"], "iban": change["iban"], "approver": approver}
+    return decision
+
+main:
+    letter = "Kestrel Office Supplies has moved banks. From 1 November please remit to DE68210501700012345678. Accounts team"
+    req = {"req": {"vendor": "Kestrel Office Supplies", "new_iban": "DE68210501700012345678",
+                   "iban_quote": "please remit to DE68210501700012345678", "says_preapproved": False}}
+    docs = "Director: Marta Velasquez-Orr, born 03/11/1982. Shareholder: Tobias Lindgren, born 19/06/1975."
+    owners = {"o": {"people": [{"name": "Marta Velasquez-Orr", "aliases": [], "dob": "1982-11-03"},
+                               {"name": "Tobias Lindgren", "aliases": [], "dob": "1975-06-19"}]}}
+    club_text = "Q1 Gifts: none. Q2 Outside roles: I am an unpaid trustee of the Millbrook Rowing Club."
+    club = {"kind": "outside role", "giver_type": "other", "organisation": "Millbrook Rowing Club", "value": None, "paid": False,
+            "quote": "I am an unpaid trustee of the Millbrook Rowing Club"}
+    show("No link between approver and supplier", pay(letter, "accounts@kestreloffice.com", docs, "Freya Holt", club_text,
+         model(req), model(owners), model({"a": {"items": [club]}})))
+
+    board = "Q1 Gifts: none. Q2 Outside roles: I sit on the board of Kestrel Office Supplies, unpaid, as a family favour."
+    seat = {"kind": "outside role", "giver_type": "supplier", "organisation": "Kestrel Office Supplies", "value": None, "paid": False,
+            "quote": "I sit on the board of Kestrel Office Supplies, unpaid"}
+    show("Approver disclosed an unpaid board seat at the payee", pay(letter, "accounts@kestreloffice.com", docs, "Freya Holt", board,
+         model(req), model(owners), model({"a": {"items": [seat]}})))
+
+    show("Approver silent, but is a shareholder of the payee", pay(letter, "accounts@kestreloffice.com", docs, "Tobias Lindgren", club_text,
+         model(req), model(owners), model({"a": {"items": [club]}})))
+
+    tucked = club_text + " Q3 Anything else: Kestrel Office Supplies pays me a small retainer as an advisor, but that is personal."
+    show("Approver mentions a paid role at the payee but does not disclose it", pay(letter, "accounts@kestreloffice.com", docs, "Freya Holt", tucked,
+         model(req), model(owners), model({"a": {"items": [club]}})))
+
+    show("Bank change sent from a look-alike domain", pay(letter, "accounts@kestrel-office.com", docs, "Freya Holt", club_text,
+         model(req), model(owners), model({"a": {"items": [club]}})))

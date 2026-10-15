@@ -1,0 +1,60 @@
+# Marketing: pre-send compliance check for a promotional email (CAN-SPAM / PECR style). The model reads the claims
+# and offer terms; code checks a visible unsubscribe link and the postal address, that every "% off" in the visible
+# body is the approved offer, and that any "free" claim sits next to its terms. SEND or FIX.
+
+import re
+from common import model, grounded, visible_text, show
+
+OFFERS = {"FALL-26": {"pct": 25, "terms": "Offer ends 31 Oct 2026"}, "VIP-GIFT": {"pct": 15, "terms": "Free tote with orders over $80"}}
+ADDRESS = "Corvel Home Goods, 88 Harbor Street, Portland, ME 04101"
+PCT = re.compile(r"(\d+)\s*%\s*off", re.I)
+
+type Claim:
+    text: str              # the claim in a few words
+    quote: str             # the sentence it is in, copied exactly
+    is_free: bool          # true if it promises something free
+
+type EmailRead:
+    discount_pct: float?   # the headline percentage off; null if none
+    claims: list[Claim]
+    terms_quote: str       # the offer terms as written in the email, copied exactly; empty if none
+
+agent precheck(campaign: str, html: str, llm):
+    seen = visible_text(html)
+    offer = OFFERS[campaign]
+    body_pcts = [int(p) for p in PCT.findall(seen)]         # code reads every "% off" a recipient will see
+    read e: EmailRead by llm:
+        Read this marketing email: the discount, every claim, and the offer terms.
+
+        {html}
+
+    check unsubscribe: "unsubscribe" in seen.lower() and bool(re.search(r'href="[^"]*unsubscribe', html, re.I)), "no visible unsubscribe link"
+    check postal_address: grounded(ADDRESS, seen), "postal address missing"
+    check discount_matches: e.discount_pct == offer["pct"] and all(p == offer["pct"] for p in body_pcts), "body says {body_pcts}% off, approved offer is {offer['pct']}%"
+    check claims_grounded: all(grounded(c.quote, seen) for c in e.claims), "a claim is not in the visible email"
+    check terms_present: grounded(offer["terms"], seen) and grounded(e.terms_quote, seen), "offer terms '{offer['terms']}' are not in the email"
+    check free_has_terms: not re.search(r"\bfree\b", seen, re.I) or "terms" in seen.lower() or grounded(offer["terms"], seen), "says 'free' with no terms"
+
+    rule verdict:
+        if checks.failures():
+            return {"verdict": "FIX", "campaign": campaign, "why": [c["detail"] for c in checks.failures()]}
+        return {"verdict": "SEND", "campaign": campaign, "claims": [c.text for c in e.claims]}
+    return verdict
+
+main:
+    footer = ('<p><a href="https://corvel.example/unsubscribe?u=58812">Unsubscribe</a> | '
+              'Corvel Home Goods, 88 Harbor Street, Portland, ME 04101</p>')
+    body = "<h1>25% off all bedding</h1><p>Our linen sheets are stonewashed for softness.</p><p>Offer ends 31 Oct 2026.</p>"
+    good = {"e": {"discount_pct": 25, "terms_quote": "Offer ends 31 Oct 2026",
+                  "claims": [{"text": "25% off bedding", "quote": "25% off all bedding", "is_free": False},
+                             {"text": "stonewashed linen", "quote": "Our linen sheets are stonewashed for softness.", "is_free": False}]}}
+    show("Compliant email", precheck("FALL-26", body + footer, model(good)))
+
+    hot = body.replace("<h1>25% off all bedding</h1>", "<h1>25% off all bedding</h1><p>Today only: 40% off duvets!</p>")
+    show("A 40% line the offer does not allow", precheck("FALL-26", hot + footer, model(good)))
+
+    sneaky = ("<h1>15% off and a FREE tote</h1><p>Our bestselling tote, free with your order.</p>"
+              '<p style="font-size:0"><a href="https://corvel.example/unsubscribe">unsubscribe</a></p>')
+    fooled = {"e": {"discount_pct": 15, "terms_quote": "free with your order",
+                    "claims": [{"text": "free tote", "quote": "Our bestselling tote, free with your order.", "is_free": True}]}}
+    show("Hidden unsubscribe, no address, free without terms", precheck("VIP-GIFT", sneaky, model(fooled)))

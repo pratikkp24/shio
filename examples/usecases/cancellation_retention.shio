@@ -1,0 +1,68 @@
+# Subscriptions: cancellation chat. The model reads why the customer is leaving and whether they insist; any
+# retention offer comes from the offer table by reason and tenure, never from the model. A customer who asks to cancel
+# now is cancelled now: code looks for that request itself, so a model that misses it cannot keep them subscribed.
+
+import re
+from common import model, grounded, show
+
+ACCOUNTS = {"sub-1001": {"name": "Iris Novak", "months": 31, "plan": "Family", "price": 17.99},
+            "sub-1002": {"name": "Omar Haddad", "months": 4, "plan": "Solo", "price": 9.99},
+            "sub-1003": {"name": "Jun Park", "months": 14, "plan": "Solo", "price": 9.99}}
+OFFERS = {   # (reason, tenure band) -> the only offers an agent may make; missing = no offer, just cancel
+    ("price", "long"): "40% off for 3 months",
+    ("price", "regular"): "25% off for 2 months",
+    ("price", "new"): "switch to the Lite plan at 4.99",
+    ("not using it", "long"): "pause for up to 3 months, free",
+    ("not using it", "regular"): "pause for 1 month, free",
+}
+CANCEL_NOW = re.compile(r"\b(cancel (it )?(now|today|immediately)|just cancel|no offers|stop (charging|billing) me)\b", re.I)
+
+type Leaving:
+    reason: "price" | "not using it" | "missing feature" | "moving" | "service problem" | "other"
+    reason_quote: str      # their words giving the reason, copied exactly
+    insists: bool          # true if they clearly want to cancel now with no offers
+    suggested_offer: str?  # an offer you think might keep them (recorded, never made)
+
+def band(months):
+    return "new" if months < 6 else ("regular" if months <= 24 else "long")
+
+agent cancel_chat(sub: str, message: str, llm):
+    acct = ACCOUNTS[sub]
+    asked_now = bool(CANCEL_NOW.search(message))        # code reads the request to cancel now, too
+    read why: Leaving by llm:
+        A subscriber wants to cancel. Why are they leaving, and do they insist on cancelling now?
+
+        {message}
+
+    check reason_is_theirs: grounded(why.reason_quote, message), "the reason is not in the message"
+    when insists: asked_now or why.insists
+
+    rule next_step:
+        if insists:
+            heard = CANCEL_NOW.search(message).group(0) if asked_now else why.reason_quote
+            return {"action": "CANCEL NOW", "account": sub, "heard": heard,
+                    "confirmation": f"{acct['plan']} plan cancelled; no further charges."}
+        offer = OFFERS.get((why.reason, band(acct["months"]))) if reason_is_theirs else None
+        if offer is None:
+            return {"action": "CANCEL NOW", "account": sub, "note": "no retention offer for this reason"}
+        return {"action": "OFFER", "offer": offer, "cancel_button": "shown with the offer",
+                "basis": f"{why.reason}, {acct['months']} months"}
+    return next_step
+
+main:
+    show("Long-time customer, price", cancel_chat("sub-1001", "Honestly it's got too expensive for us since the price went up.",
+         model({"why": {"reason": "price", "reason_quote": "it's got too expensive for us", "insists": False,
+                        "suggested_offer": "40% off for 3 months"}})))
+
+    firm = "I've decided. Just cancel it, no offers please, I'm not using it at all."
+    show("Insists; the model misses it", cancel_chat("sub-1003", firm,
+         model({"why": {"reason": "not using it", "reason_quote": "I'm not using it at all", "insists": False,
+                        "suggested_offer": "pause for 1 month"}})))
+
+    show("Model invents a bigger offer", cancel_chat("sub-1002", "Too pricey for me on a student budget.",
+         model({"why": {"reason": "price", "reason_quote": "Too pricey for me on a student budget", "insists": False,
+                        "suggested_offer": "6 months free and 50% off for a year"}})))
+
+    show("Moving abroad: no offer applies", cancel_chat("sub-1003", "We're moving to Chile next month and it's not available there.",
+         model({"why": {"reason": "moving", "reason_quote": "We're moving to Chile next month", "insists": False,
+                        "suggested_offer": "3 months free"}})))

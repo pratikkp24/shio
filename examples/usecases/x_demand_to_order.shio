@@ -1,0 +1,55 @@
+# Workflow: demand to order. Review the sales rep's forecast override (forecast_override), then enter the customer's
+# emailed order (po_from_email). Cross-step check, per planning item: what is already booked this week plus this
+# order stays within the forecast as accepted (the override if it was accepted, else the statistical forecast), so
+# orders do not consume supply that was never planned. CREATE ORDER or PLANNER REVIEW.
+
+from statistics import mean
+from common import model, show
+from uses import use, step_ok
+
+fc = use("forecast_override")
+orders = use("po_from_email")
+
+PLANNED_AS = {"BRK-2210": "GLD-500", "BRK-2215": "GLD-500", "HNG-0480": "ORB-120"}   # catalog SKU -> planning item
+BOOKED = {"GLD-500": 180, "ORB-120": 30}                                             # units already booked this week
+
+def plan(override, item):
+    if override.get("action") == "ACCEPT" and override.get("sku") == item:
+        return override["qty"]
+    return round(mean(fc.HISTORY[item]))
+
+def ordered(entry, item):
+    return sum(q for sku, q in entry.get("lines", []) if PLANNED_AS.get(sku) == item)
+
+agent demand_to_order(note: str, email: str, sender: str, fc_llm, po_llm):
+    override = fc.review(note, fc_llm)
+    entry = orders.order_entry(email, sender, po_llm)
+
+    check forecast_accepted: step_ok(override, "ACCEPT"), "forecast override: {override.get('action')} {override.get('why', '')}"
+    check order_valid: step_ok(entry, "CREATE ORDER"), "order entry: {entry.get('action')} {entry.get('why', '')}"
+    check planned_items: all(sku in PLANNED_AS for sku, q in entry.get("lines", [])), "SKUs with no planning item: {[s for s, q in entry.get('lines', []) if s not in PLANNED_AS]}"
+    for item in BOOKED:
+        check within_plan[item] after forecast_accepted, order_valid: BOOKED[item] + ordered(entry, item) <= plan(override, item), "{item}: {BOOKED[item]} booked + {ordered(entry, item)} on this order is over the accepted forecast of {plan(override, item)}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "PLANNER REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "CREATE ORDER", "lines": entry["lines"], "value": entry["value"],
+                "left_this_week": {i: plan(override, i) - BOOKED[i] - ordered(entry, i) for i in BOOKED}}
+    return decision
+
+main:
+    buyer = "purchasing@hallworth-fittings.example"
+    note = "GLD-500: plan 440 next week, distributor restocking after the long weekend."
+    accepted = {"o": {"sku": "GLD-500", "qty": 440, "reason": "seasonal", "reason_quote": "distributor restocking after the long weekend", "evidence_ref": None}}
+    email = "Hi, please send 200 x BRK-2210 and 48 x HNG-0480 to our Leeds site by Friday. Thanks, Imogen Hale"
+    lines = {"o": {"lines": [{"sku": "BRK-2210", "qty": 200, "quote": "200 x BRK-2210"}, {"sku": "HNG-0480", "qty": 48, "quote": "48 x HNG-0480"}]}}
+    show("Order fits the accepted forecast", demand_to_order(note, email, buyer, model(accepted), model(lines)))
+
+    bulk = "Hi, we need 700 x BRK-2210 this week please. Imogen"
+    show("Valid order, but beyond the forecast", demand_to_order(note, bulk, buyer, model(accepted),
+         model({"o": {"lines": [{"sku": "BRK-2210", "qty": 700, "quote": "700 x BRK-2210"}]}})))
+
+    gut = "ORB-120 should be 260 a week from now on, I have a feeling Q4 is going to be huge."
+    hunch = {"o": {"sku": "ORB-120", "qty": 260, "reason": "gut feel", "reason_quote": "I have a feeling Q4 is going to be huge", "evidence_ref": None}}
+    show("Forecast step fails: override on a hunch", demand_to_order(gut, email, buyer, model(hunch), model(lines)))

@@ -1,0 +1,57 @@
+# Operations: meeting notes to action items. Code splits the notes by agenda item; the model reads the action in each.
+# An item is sent to its owner only if the owner was in the meeting, the due date parses and falls after the meeting,
+# and the task is quoted from the notes. Anything else is dropped with the reason, for the chair to fix by hand.
+
+import re
+from common import model, grounded, norm, parse_date, show
+
+type Action:
+    has_action: bool       # does this agenda item assign a task to someone?
+    owner: str?            # the person who will do it, full name as written; null if none
+    task: str?             # the task in a few words; null if none
+    due: str?              # the due date as YYYY-MM-DD; null if no date is given
+    quote: str             # the sentence in the notes that assigns it, copied exactly; empty if none
+
+def sections(notes):
+    return [s.strip() for s in re.split(r"\n(?=\d+\.\s)", notes.strip()) if s.strip()]
+
+agent actions(notes: str, attendees: list, held: str, llm):
+    people = {norm(p) for p in attendees}
+    kept, dropped = [], []
+    for k, part in enumerate(sections(notes)):
+        read a[k]: Action by llm:
+            From this agenda item of meeting notes, read the action assigned, if any.
+
+            {part}
+        when assigns[k]: a.has_action
+        if assigns:
+            check owner_attended[k]: norm(a.owner) in people, "{a.owner} was not at the meeting"
+            check due_parses[k]: parse_date(a.due) is not None, "due date '{a.due}' is not a date"
+            check due_after[k]: parse_date(a.due) is not None and parse_date(a.due) > parse_date(held), "due {a.due} is not a date after the meeting on {held}"
+            check in_notes[k]: grounded(a.quote, part) and norm(a.owner).split()[0] in norm(a.quote), "the task is not in this part of the notes"
+            rule item[k]:
+                bad = [c["detail"] for c in checks.failures(key=k)]
+                return {"drop": bad, "task": a.task} if bad else {"keep": {"owner": a.owner, "task": a.task, "due": a.due}}
+            (dropped if "drop" in item else kept).append(item)
+    return {"status": "SEND TO OWNERS" if not dropped else "SEND, CHAIR TO FIX DROPPED",
+            "items": [i["keep"] for i in kept], "dropped": [f"{i['task']}: {'; '.join(i['drop'])}" for i in dropped]}
+
+main:
+    team = ["Lena Hart", "Omar Diallo", "Keiko Tan"]
+    notes = ("1. Q4 hiring plan. Omar Diallo to circulate the revised headcount sheet by 2026-10-23.\n"
+             "2. Office move. Discussion only; no decision.\n"
+             "3. Vendor contract. Keiko Tan will send the redlined MSA to procurement by 2026-10-30.")
+    good = {"a": {0: {"has_action": True, "owner": "Omar Diallo", "task": "circulate headcount sheet", "due": "2026-10-23",
+                      "quote": "Omar Diallo to circulate the revised headcount sheet by 2026-10-23"},
+                  1: {"has_action": False, "owner": None, "task": None, "due": None, "quote": ""},
+                  2: {"has_action": True, "owner": "Keiko Tan", "task": "send redlined MSA", "due": "2026-10-30",
+                      "quote": "Keiko Tan will send the redlined MSA to procurement by 2026-10-30"}}}
+    show("Clean notes", actions(notes, team, "2026-10-16", model(good)))
+
+    misread = {"a": {**good["a"], 2: dict(good["a"][2], due="2026-09-30")}}
+    show("Model misreads a due date as before the meeting", actions(notes, team, "2026-10-16", model(misread)))
+
+    messy = notes.replace("Discussion only; no decision.", "Someone should get quotes from movers before the lease ends.")
+    invented = {"a": {**good["a"], 1: {"has_action": True, "owner": "Raj Patel", "task": "get mover quotes", "due": "end of lease",
+                                             "quote": "Raj Patel to get quotes from movers"}}}
+    show("Model invents an owner who was not there", actions(messy, team, "2026-10-16", model(invented)))

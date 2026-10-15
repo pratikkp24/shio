@@ -1,0 +1,77 @@
+# Workflow: SME loan to a director's company. KYC the director (kyc.shio), take income from their bank statement
+# (bank_statement_income.shio) and test the company's covenants (covenant_check.shio). Cross-step check: the
+# statement's account holder is the KYC'd person, and the borrower in the covenant pack is the applicant's company.
+
+from common import model, grounded, norm, show
+from uses import use, step_ok
+
+kyc = use("kyc")
+bank_statement_income = use("bank_statement_income")
+covenant_check = use("covenant_check")
+
+type Applicant:
+    company: str           # the company the loan is for, as written on the form
+
+type Holder:
+    name: str              # the account holder's name as printed on the statement header
+
+agent sme_loan(form: str, id_text: str, header: str, stmt: str, employer: str, accounts: str, facility: str, kyc_llm, inc_llm, cov_llm, llm):
+    identity = kyc.kyc(form, id_text, kyc_llm)
+    income = bank_statement_income.income(stmt, employer, 0, inc_llm)
+    cov = covenant_check.covenants(accounts, facility, cov_llm)
+    read app: Applicant by llm:
+        Which company is this loan application for?
+
+        {form}
+    read acct: Holder by llm:
+        Whose account is this statement for?
+
+        {header}
+
+    check identity_ok: step_ok(identity, "APPROVE"), "KYC: {identity.get('status')} {identity.get('why', '')}"
+    check income_ok: step_ok(income, "ELIGIBLE (underwriter to sign)"), "income: {income.get('status')} {income.get('why', '')}"
+    check covenants_ok: step_ok(cov, "COMPLIANT"), "covenants: {cov.get('status')} {cov.get('why', cov.get('breaches', ''))}"
+    check read_from_documents: grounded(app.company, form) and grounded(acct.name, header), "company or account holder is not on the documents"
+    check holder_is_applicant after identity_ok: kyc.same_name(acct.name, identity["name"]), "statement is in the name of {acct.name}, KYC'd applicant is {identity.get('name')}"
+    check borrower_is_company: norm(app.company) == norm(covenant_check.COVENANTS[facility]["borrower"]), "application is for {app.company}, covenant pack is for {covenant_check.COVENANTS[facility]['borrower']}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "REFER", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "SANCTION (credit officer to sign)", "borrower": cov["borrower"], "guarantor": identity["name"],
+                "guarantor_income": income["monthly_income"], "leverage": cov["leverage"]}
+    return decision
+
+def statement():
+    rows = [("2026-07-01", "OPENING BALANCE", "", "", "15,000.00"), ("2026-07-01", "NEFT SAL TIDEMARK LOGISTICS PLC", "", "92,000.00", "107,000.00"),
+            ("2026-07-06", "UPI RENT", "30,000.00", "", "77,000.00"), ("2026-08-01", "NEFT SAL TIDEMARK LOGISTICS PLC", "", "92,000.00", "169,000.00"),
+            ("2026-09-01", "NEFT SAL TIDEMARK LOGISTICS PLC", "", "92,000.00", "261,000.00")]
+    return "\n".join(" | ".join(r) for r in rows)
+
+def salaries(stmt):
+    lines = [l for l in stmt.splitlines() if "SAL" in l]
+    return model({"sal": {"employer": "Tidemark Logistics", "credits": [{"date": l[:10], "amount": 92000, "line": l} for l in lines]}})
+
+main:
+    form = "Name: Priya R. Sharma\nDate of birth: 1994-03-07\nPAN: ABCPS1234K\nLoan for: Tidemark Logistics plc (director)"
+    card = "INCOME TAX DEPARTMENT\nPRIYA R SHARMA\nDOB 07/03/1994\nPermanent Account Number ABCPS1234K"
+    p = {"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1234K"}
+    ids = model({"applied": dict(p, name="Priya R. Sharma"), "card": p, "card_again": p})
+    stmt = statement()
+    good = covenant_check.statement(31.0, 12.0, 43.0, 168.0, 22.0, 146.0, 8.2)
+    header = "HDFC Bank savings account 50100231187  Account holder: PRIYA R SHARMA"
+    me = model({"app": {"company": "Tidemark Logistics plc"}, "acct": {"name": "PRIYA R SHARMA"}})
+    show("Director verified, income and covenants fine", sme_loan(form, card, header, stmt, "Tidemark Logistics", good, "FAC-2209",
+         ids, salaries(stmt), model(covenant_check.reads(good)), me))
+
+    spouse = header.replace("PRIYA R SHARMA", "RAHUL K SHARMA")
+    show("All steps pass, statement is someone else's account", sme_loan(form, card, spouse, stmt, "Tidemark Logistics", good, "FAC-2209",
+         ids, salaries(stmt), model(covenant_check.reads(good)), model({"app": {"company": "Tidemark Logistics plc"}, "acct": {"name": "RAHUL K SHARMA"}})))
+
+    freight = form.replace("Tidemark Logistics plc", "Tidemark Freight Ltd")
+    show("All steps pass, covenant pack is for another company", sme_loan(freight, card, header, stmt, "Tidemark Logistics", good, "FAC-2209",
+         ids, salaries(stmt), model(covenant_check.reads(good)), model({"app": {"company": "Tidemark Freight Ltd"}, "acct": {"name": "PRIYA R SHARMA"}})))
+
+    tight = covenant_check.statement(26.0, 11.5, 37.5, 171.0, 15.0, 156.0, 9.8)
+    show("Company breaches its leverage covenant", sme_loan(form, card, header, stmt, "Tidemark Logistics", tight, "FAC-2209",
+         ids, salaries(stmt), model(covenant_check.reads(tight)), me))

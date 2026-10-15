@@ -1,0 +1,60 @@
+# Workflow: landed cost of an import bought through a merchant importer. Audit the freight invoice (freight_audit),
+# classify the customs line (customs_hs), and validate the importer's GST invoice to us (gst_invoice). Cross-step
+# checks recomputed by code: the value declared to customs is CIF (goods + the audited freight, not the billed
+# freight), and the GST base is that assessable value plus duty at the notified rate. BOOK or REVIEW.
+
+from common import model, money_eq, show
+from uses import use, step_ok
+
+freight = use("freight_audit")
+customs = use("customs_hs")
+gst = use("gst_invoice")
+
+USD_INR = 83.50            # illustrative notified customs exchange rate for the week
+
+agent landed(fob: float, freight_invoice: str, line: dict, gst_text: str, f_llm, c_llm, g_llm):
+    bill = freight.audit(freight_invoice, f_llm)
+    entry = customs.classify(line, c_llm)
+    tax = gst.gst_check(gst_text, g_llm)
+    cif = round(fob + bill.get("pay", 0), 2)
+    duty = round(cif * customs.TARIFF.get(entry.get("hs_code"), {"rate": 0})["rate"], 2)
+    igst = round(round((cif + duty) * USD_INR, 2) * 0.18, 2)
+
+    check freight_audited: step_ok(bill, "PAY", "SHORT PAY"), "freight: {bill.get('action')} {bill.get('why', '')}"
+    check filed: step_ok(entry, "FILE"), "customs: {entry.get('action')} {entry.get('why', '')}"
+    check gst_valid: step_ok(tax, "ACCEPT"), "GST invoice: {tax.get('status')} {tax.get('why', '')}"
+    check cif_declared after freight_audited, filed: money_eq(line["value"], cif, 0.01), "customs value {line['value']}, but goods {fob} + audited freight {bill.get('pay')} = {cif}"
+    check gst_on_landed_value after cif_declared, gst_valid: money_eq(tax["itc"], igst, 1.0), "IGST {tax.get('itc')}; on (CIF {cif} + duty {duty}) x {USD_INR} it is {igst}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "BOOK", "cif_usd": cif, "duty_usd": duty, "landed_inr": round((cif + duty) * USD_INR, 2), "itc_inr": tax["itc"]}
+    return decision
+
+def importer_invoice(taxable, igst, total):
+    return ("SAHYADRI TRADE IMPORTS PVT LTD, Bengaluru  GSTIN 29AAKCS5512L1ZW\nBill to: Velora Retail  GSTIN 27AADCT9045H1Z3\n"
+            f"Place of supply: 27-Maharashtra\nLeather ankle boots, 120 pairs  Taxable {taxable:,.2f}\nIGST 18% {igst:,.2f}\nTotal {total:,.2f}")
+
+def igst_read(taxable, igst, total):
+    return model({"inv": {"supplier_gstin": "29AAKCS5512L1ZW", "recipient_gstin": "27AADCT9045H1Z3", "place_of_supply": "27",
+                          "taxable": taxable, "rate": 18, "cgst": 0, "sgst": 0, "igst": igst, "total": total}})
+
+main:
+    inv = "Ridgeback Freight Lines  PRO-660213  DAL-ATL  1,240 kg\nLine haul 384.40\nFuel surcharge 18% 69.19\nLiftgate 75.00\nTOTAL 528.59"
+    audited = model({"f": {"pro": "PRO-660213", "line_haul": 384.40, "fuel_pct": 18, "fuel": 69.19, "accessorials": [{"name": "liftgate", "amount": 75.0}], "total": 528.59}})
+    boots = {"ref": "L1", "value": 4200.0, "description": "Men's leather ankle boots, rubber outsole, 120 pairs, style KR-88"}
+    c = {"hs_code": "6403.99", "description_quote": "leather ankle boots, rubber outsole", "declared_value": 4200.0, "duty": 420.0}
+    show("CIF declared, GST on value plus duty", landed(3671.41, inv, boots, importer_invoice(385770, 69438.60, 455208.60),
+         audited, model({"c": c}), igst_read(385770, 69438.60, 455208.60)))
+
+    fob_only = dict(boots, value=3671.41)
+    show("Customs value leaves the freight out", landed(3671.41, inv, fob_only, importer_invoice(337218.92, 60699.41, 397918.33),
+         audited, model({"c": dict(c, declared_value=3671.41, duty=367.14)}), igst_read(337218.92, 60699.41, 397918.33)))
+
+    show("GST charged on goods value without duty", landed(3671.41, inv, boots, importer_invoice(350700, 63126, 413826),
+         audited, model({"c": c}), igst_read(350700, 63126, 413826)))
+
+    show("Freight step fails: total misread", landed(3671.41, inv, boots, importer_invoice(385770, 69438.60, 455208.60),
+         model({"f": {"pro": "PRO-660213", "line_haul": 384.40, "fuel_pct": 18, "fuel": 69.19, "accessorials": [{"name": "liftgate", "amount": 75.0}], "total": 582.59}}),
+         model({"c": c}), igst_read(385770, 69438.60, 455208.60)))

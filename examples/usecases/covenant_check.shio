@@ -1,0 +1,76 @@
+# Corporate lending: quarterly covenant compliance. The model reads figures from the borrower's financial statement,
+# each with the line it came from; code checks every figure is in the statement, ties the subtotals out, and computes
+# leverage and interest cover against the facility's covenants. A breach goes to the credit officer.
+
+from common import model, grounded, numbers, money_eq, show
+
+COVENANTS = {"FAC-2209": {"borrower": "Tidemark Logistics plc", "max_leverage": 3.5, "min_interest_cover": 4.0}}
+FIELDS = ("operating_profit", "depreciation", "ebitda", "borrowings", "cash", "net_debt", "interest")
+
+type Figure:
+    value: float           # in millions, as printed
+    line: str              # the statement line it is read from, copied exactly
+
+type Financials:
+    operating_profit: Figure
+    depreciation: Figure   # depreciation and amortisation
+    ebitda: Figure         # reported EBITDA, last twelve months
+    borrowings: Figure     # total borrowings
+    cash: Figure           # cash and cash equivalents
+    net_debt: Figure
+    interest: Figure       # net interest expense, last twelve months
+
+agent covenants(statement: str, facility: str, llm):
+    cov = COVENANTS[facility]
+    read f: Financials by llm:
+        Read these figures from the borrower's quarterly statement (last twelve months, in millions).
+
+        {statement}
+
+    for name in FIELDS:
+        check grounded_in_statement[name]: grounded(getattr(f, name).line, statement) and getattr(f, name).value in numbers(getattr(f, name).line), "{name}: {getattr(f, name).value} is not on the line quoted from the statement"
+    check ebitda_ties: money_eq(f.operating_profit.value + f.depreciation.value, f.ebitda.value, 0.05), "operating profit + D&A = {f.operating_profit.value + f.depreciation.value:.1f}, EBITDA read as {f.ebitda.value}"
+    check net_debt_ties: money_eq(f.borrowings.value - f.cash.value, f.net_debt.value, 0.05), "borrowings - cash = {f.borrowings.value - f.cash.value:.1f}, net debt read as {f.net_debt.value}"
+
+    rule compliance:
+        if checks.failures():
+            return {"status": "REVIEW", "why": [c["detail"] for c in checks.failures()], "note": "figures not verified; no covenant view given"}
+        leverage = round(f.net_debt.value / f.ebitda.value, 2)
+        cover = round(f.ebitda.value / f.interest.value, 2)
+        breaches = ([f"leverage {leverage}x above {cov['max_leverage']}x"] if leverage > cov["max_leverage"] else []) + \
+                   ([f"interest cover {cover}x below {cov['min_interest_cover']}x"] if cover < cov["min_interest_cover"] else [])
+        if breaches:
+            return {"status": "BREACH: TO CREDIT OFFICER", "borrower": cov["borrower"], "breaches": breaches}
+        return {"status": "COMPLIANT", "borrower": cov["borrower"], "leverage": leverage, "interest_cover": cover}
+    return compliance
+
+def statement(op, da, ebitda, debt, cash, nd, interest):
+    return f"""TIDEMARK LOGISTICS PLC  Quarterly report, Q3 2026 (GBP m, last twelve months)
+    Operating profit {op}
+    Depreciation and amortisation {da}
+    EBITDA {ebitda}
+    Adjusted EBITDA (management view, before restructuring costs) {ebitda + 9.0}
+    Total borrowings {debt}
+    Cash and cash equivalents {cash}
+    Net debt {nd}
+    Net interest expense {interest}"""
+
+def reads(s, **override):
+    keys = {"operating_profit": "Operating profit", "depreciation": "Depreciation and amortisation", "ebitda": "EBITDA",
+            "borrowings": "Total borrowings", "cash": "Cash and cash equivalents", "net_debt": "Net debt", "interest": "Net interest expense"}
+    lines = {k: next(l.strip() for l in s.splitlines() if l.strip().startswith(v + " ")) for k, v in keys.items()}
+    out = {k: {"value": numbers(l)[-1], "line": l} for k, l in lines.items()}
+    return {"f": {**out, **override}}
+
+main:
+    good = statement(31.0, 12.0, 43.0, 168.0, 22.0, 146.0, 8.2)
+    show("Within covenants", covenants(good, "FAC-2209", model(reads(good))))
+
+    tight = statement(26.0, 11.5, 37.5, 171.0, 15.0, 156.0, 9.8)
+    show("Leverage above 3.5x", covenants(tight, "FAC-2209", model(reads(tight))))
+
+    adjusted = {"ebitda": {"value": 46.5, "line": "Adjusted EBITDA (management view, before restructuring costs) 46.5"}}
+    show("Model uses management's adjusted EBITDA", covenants(tight, "FAC-2209", model(reads(tight, **adjusted))))
+
+    invented = {"net_debt": {"value": 120.0, "line": "Net debt 120.0"}}
+    show("Model invents a lower net debt", covenants(tight, "FAC-2209", model(reads(tight, **invented))))

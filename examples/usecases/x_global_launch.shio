@@ -1,0 +1,58 @@
+# Workflow: launching a promotion in two markets. listing_compliance reviews the marketplace listing, translation_qa
+# checks the German campaign copy against the English, and email_campaign_compliance pre-checks the promo email.
+# Cross-step: the same price and the same discount appear in the listing, the German copy and the email. Each step
+# only compares its text with itself, so a stale English source translated faithfully passes all three.
+
+import re
+from common import model, visible_text, show
+from uses import use, step_ok, why
+
+listings = use("listing_compliance")
+translation = use("translation_qa")
+emails = use("email_campaign_compliance")
+
+PCT = re.compile(r"(\d+)\s*%\s*off", re.I)
+DOLLAR = re.compile(r"\$\s*(\d+(?:\.\d+)?)")
+
+agent launch(fields: dict, listing_html: str, english: str, campaign: str, email_html: str, list_llm, tr_llm, mail_llm):
+    item = listings.review(fields, listing_html, list_llm)
+    de = translation.translate(english, tr_llm)
+    mail = emails.precheck(campaign, email_html, mail_llm)
+    listing_pct = sorted({int(p) for p in PCT.findall(visible_text(listing_html))})      # code reads the pages
+    email_prices = sorted({float(p) for p in DOLLAR.findall(visible_text(email_html))})
+    email_pct = emails.OFFERS[campaign]["pct"]
+
+    check listing_ok: step_ok(item, "PUBLISH"), "listing: {item.get('status')} {why(item)}"
+    check german_ok: de.get("route") == "PUBLISH", "German copy: {de.get('route')} {why(de)}"
+    check email_ok: step_ok(mail, "SEND"), "email: {mail.get('verdict')} {why(mail)}"
+    check same_price after listing_ok: email_prices == [item["price"]] and item["price"] in translation.de_numbers(de.get("text", "")), "listing price {item['price']}, email shows {email_prices}, German copy has {translation.de_numbers(de.get('text', ''))}"
+    check same_discount: listing_pct == [email_pct] and email_pct in translation.de_numbers(de.get("text", "")), "listing says {listing_pct}% off, the email's offer is {email_pct}%, German copy has {translation.de_numbers(de.get('text', ''))}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "FIX", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "LAUNCH", "sku": item["sku"], "price": item["price"], "discount_pct": email_pct}
+    return decision
+
+main:
+    jf = {"sku": "SKU-JF100", "title": "Joint Flex Turmeric Capsules", "brand": "Verdan", "country_of_origin": "USA",
+          "ingredients": "turmeric root extract, black pepper extract"}
+    page = "<h2>Joint Flex</h2><p>Supports healthy joints after exercise.</p><p>Price: $24.99 for 60 capsules</p><p>25% off this month</p>"
+    item = {"item": {"price": 24.99, "price_quote": "$24.99 for 60 capsules",
+                     "claims": [{"text": "supports joint health", "quote": "Supports healthy joints after exercise."}]}}
+    en = "Hi {first_name}, Joint Flex is now $24.99, 25% off until 31 Oct. Shop now: https://shop.corvel.example/joint-flex"
+    de = "Hallo {first_name}, Joint Flex kostet jetzt 24,99 $, 25 % Rabatt bis zum 31. Oktober. Jetzt kaufen: https://shop.corvel.example/joint-flex"
+    mail = ("<h1>25% off Joint Flex</h1><p>Now $24.99 for 60 capsules.</p><p>Offer ends 31 Oct 2026.</p>"
+            '<p><a href="https://corvel.example/unsubscribe?u=58812">Unsubscribe</a> | Corvel Home Goods, 88 Harbor Street, Portland, ME 04101</p>')
+    read_mail = {"e": {"discount_pct": 25, "terms_quote": "Offer ends 31 Oct 2026",
+                       "claims": [{"text": "25% off Joint Flex", "quote": "25% off Joint Flex", "is_free": False}]}}
+
+    show("Same price and discount everywhere", launch(jf, page, en, "FALL-26", mail, model(item), model({"de": de}), model(read_mail)))
+
+    stale_en, stale_de = en.replace("24.99", "29.99"), de.replace("24,99", "29,99")
+    show("English copy still has last month's price, translated faithfully", launch(jf, page, stale_en, "FALL-26", mail,
+         model(item), model({"de": stale_de}), model(read_mail)))
+
+    loud = page.replace("Supports healthy joints after exercise.", "Cures arthritis in 7 days.")
+    soft = {"item": dict(item["item"], claims=[{"text": "supports joint comfort", "quote": "Cures arthritis in 7 days."}])}
+    show("Listing has a banned claim", launch(jf, loud, en, "FALL-26", mail, model(soft), model({"de": de}), model(read_mail)))

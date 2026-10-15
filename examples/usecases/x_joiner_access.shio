@@ -1,0 +1,62 @@
+# Workflow: a new joiner's first access request. Verify the last job with the previous employer (background_check),
+# take the code-of-conduct attestation (policy_attestation), and only then run the access request (access_request).
+# Cross-step check: the role asked for fits the job title the previous employer verified, not just the title HR typed
+# into the staff record. Code decides PROVISION or HOLD.
+
+from common import model, show
+from uses import use, step_ok
+
+background = use("background_check")
+attestation = use("policy_attestation")
+access = use("access_request")
+
+ROLES_FOR_TITLE = {        # verified title (normalized) -> the system/role grants it may start with
+    "senior engineer": {"build-cluster/deploy"},
+    "junior engineer": set(),
+    "senior data analyst": {"ledgerdb/read"},
+}
+
+agent joiner(resume: str, letter: str, answers: str, ticket: dict, bg_llm, att_llm, acc_llm):
+    verified = background.verify(resume, letter, bg_llm)
+    attested = attestation.attest(answers, att_llm)
+    ready = step_ok(verified, "VERIFIED") and step_ok(attested, "CLEAR")
+    granted = access.access(ticket, acc_llm) if ready else {"action": "NOT RUN", "why": ["waits for verification and attestation"]}
+
+    check employment_verified: step_ok(verified, "VERIFIED"), "background check: {verified.get('why')}"
+    check attested_clear: step_ok(attested, "CLEAR"), "attestation: {attested.get('why')}"
+    check access_granted: step_ok(granted, "GRANT"), "access request: {granted.get('action')} {granted.get('why', '')}"
+    check role_fits_title after employment_verified, access_granted: granted["access"] in ROLES_FOR_TITLE.get(background.title(verified["title"]), set()), "{granted.get('access')} is not a starting grant for a verified '{verified.get('title')}'"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "PROVISION", "user": granted["user"], "access": granted["access"], "verified_title": verified["title"]}
+    return decision
+
+main:
+    resume = "Experience\nSenior Engineer, Halden Robotics Ltd, Jan 2022 - Aug 2026: CI/CD for the fleet services."
+    letter = "Halden Robotics confirms that Tomas Varga was employed as Senior Engineer from 10 January 2022 to 31 August 2026."
+    bg = {"claim": {"employer": "Halden Robotics Ltd", "title": "Senior Engineer", "start": "2022-01", "end": "2026-08",
+                    "quote": "Senior Engineer, Halden Robotics Ltd, Jan 2022 - Aug 2026"},
+          "conf": {"employer": "Halden Robotics", "title": "Senior Engineer", "start": "2022-01", "end": "2026-08",
+                   "quote": "employed as Senior Engineer from 10 January 2022 to 31 August 2026"}}
+    answers = "Q1 Gifts: none. Q2 Outside roles: I am an unpaid trustee of the Millbrook Rowing Club."
+    club = {"a": {"items": [{"kind": "outside role", "giver_type": "other", "organisation": "Millbrook Rowing Club", "value": None,
+                             "paid": False, "quote": "I am an unpaid trustee of the Millbrook Rowing Club"}]}}
+    ticket = {"requester": "u-3307", "description": "Need deploy on build-cluster to ship the billing service hotfix this sprint.",
+              "comments": [{"author": "u-1502", "text": "Approved for the hotfix work."}]}
+    req = {"r": {"system": "build-cluster", "role": "deploy", "justification": "to ship the billing service hotfix this sprint",
+                 "approval_quote": "Approved for the hotfix work."}}
+    show("Verified senior engineer, attested, deploy approved", joiner(resume, letter, answers, ticket, model(bg), model(club), model(req)))
+
+    jr_resume = resume.replace("Senior Engineer", "Jr. Engineer")
+    jr_letter = letter.replace("Senior Engineer", "Junior Engineer")
+    jr = {"claim": dict(bg["claim"], title="Jr. Engineer", quote="Jr. Engineer, Halden Robotics Ltd, Jan 2022 - Aug 2026"),
+          "conf": dict(bg["conf"], title="Junior Engineer", quote="employed as Junior Engineer from 10 January 2022 to 31 August 2026")}
+    show("Staff record says Senior Engineer; the employer verified Junior", joiner(jr_resume, jr_letter, answers, ticket, model(jr), model(club), model(req)))
+
+    gift = answers.replace("Q1 Gifts: none.", "Q1 Gifts: Fenwick Paper, a supplier, sent me two Wimbledon tickets worth £450.")
+    tickets = {"kind": "gift", "giver_type": "supplier", "organisation": "Fenwick Paper", "value": 450, "paid": False,
+               "quote": "sent me two Wimbledon tickets worth £450"}
+    show("Attestation goes to compliance; access waits", joiner(resume, letter, gift, ticket, model(bg),
+         model({"a": {"items": [tickets] + club["a"]["items"]}}), model(req)))

@@ -1,0 +1,67 @@
+# Workflow: screen the resume (screening), verify the last job with the previous employer from the candidate's
+# background-check form (background_check), and screen the candidate against the sanctions list (sanctions_screening).
+# Cross-step check: the employer and title the screened resume claims are the ones the employer's letter verified,
+# and the person screened is the person on the resume. Code decides OFFER or HOLD.
+
+from common import model, grounded, norm, show
+from uses import use, step_ok
+
+screening = use("screening")
+background = use("background_check")
+sanctions = use("sanctions_screening")
+
+type Claim:
+    name: str              # the candidate's name at the top of the resume
+    employer: str          # employer of the most recent job, as written
+    title: str             # title of the most recent job, as written
+    quote: str             # the resume line with that title and employer, copied exactly
+
+agent hire(resume: str, form: str, letter: str, docs: str, screen_llm, bg_llm, sanc_llm, llm):
+    shortlist = screening.screen(resume, screen_llm)
+    verified = background.verify(form, letter, bg_llm)
+    screened = sanctions.screening(docs, sanc_llm)
+    read cv: Claim by llm:
+        Whose resume is this, and what is their most recent job (employer and title)?
+
+        {resume}
+
+    check passed_screen: step_ok(shortlist, "SHORTLIST"), "screening: {shortlist.get('decision')} {shortlist.get('missing', '')}"
+    check employment_verified: step_ok(verified, "VERIFIED"), "background check: {verified.get('why')}"
+    check sanctions_clear: step_ok(screened, "CLEAR"), "sanctions: {screened.get('why')}"
+    check claim_quoted: grounded(cv.quote, resume) and grounded(cv.title, cv.quote), "the resume's job line is not in the resume"
+    check same_employer after employment_verified: background.company(cv.employer) == background.company(verified["employer"]), "resume says {cv.employer}, letter is from {verified.get('employer')}"
+    check same_title after employment_verified: background.title(cv.title) == background.title(verified["title"]), "resume claims '{cv.title}', employer verified '{verified.get('title')}'"
+    check same_person after sanctions_clear: norm(cv.name) in [norm(n) for n in screened["screened"]], "screened {screened.get('screened')}, resume is {cv.name}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "OFFER", "name": cv.name, "verified_as": f"{verified['title']}, {verified['employer']}"}
+    return decision
+
+main:
+    resume = ("Imogen Achterberg - Data Analyst\n"
+              "2021-2024  Senior Data Analyst, Pelham & Rowe: built Airflow pipelines in Python, SQL pricing models")
+    skills = {"p": {"skills": [{"skill": "python", "quote": "built Airflow pipelines in Python"}, {"skill": "airflow", "quote": "built Airflow pipelines"},
+                               {"skill": "sql", "quote": "SQL pricing models"}],
+                    "jobs": [{"title": "Senior Data Analyst", "start_year": 2021, "end_year": 2024, "quote": "2021-2024  Senior Data Analyst"}], "rating": 8}}
+    form = "Experience\nSr. Data Analyst, Pelham & Rowe Ltd, Mar 2021 - Jun 2024: pricing models for retail clients."
+    letter = "Pelham & Rowe confirms that Imogen Achterberg was employed as Senior Data Analyst from 1 March 2021 to 28 June 2024."
+    bg = {"claim": {"employer": "Pelham & Rowe Ltd", "title": "Sr. Data Analyst", "start": "2021-03", "end": "2024-06",
+                    "quote": "Sr. Data Analyst, Pelham & Rowe Ltd, Mar 2021 - Jun 2024"},
+          "conf": {"employer": "Pelham & Rowe", "title": "Senior Data Analyst", "start": "2021-03", "end": "2024-06",
+                   "quote": "employed as Senior Data Analyst from 1 March 2021 to 28 June 2024"}}
+    docs = "Candidate: Imogen Achterberg, born 14/02/1990."
+    clear = {"o": {"people": [{"name": "Imogen Achterberg", "aliases": [], "dob": "1990-02-14"}]}}
+    cv = {"cv": {"name": "Imogen Achterberg", "employer": "Pelham & Rowe", "title": "Senior Data Analyst",
+                 "quote": "Senior Data Analyst, Pelham & Rowe"}}
+    show("Screened, verified, clear", hire(resume, form, letter, docs, model(skills), model(bg), model(clear), model(cv)))
+
+    inflated = resume.replace("Senior Data Analyst", "Head of Analytics")
+    up = {"p": dict(skills["p"], jobs=[dict(skills["p"]["jobs"][0], title="Head of Analytics", quote="2021-2024  Head of Analytics")])}
+    show("Resume sent to the hiring team inflates the title; the background form does not", hire(inflated, form, letter, docs, model(up), model(bg), model(clear),
+         model({"cv": dict(cv["cv"], title="Head of Analytics", quote="Head of Analytics, Pelham & Rowe")})))
+
+    hit_docs = "Candidate: Imogen Achterberg, also known as D. Volkanov, born 12/04/1971."
+    hit = {"o": {"people": [{"name": "Imogen Achterberg", "aliases": ["D. Volkanov"], "dob": "1971-04-12"}]}}
+    show("Sanctions screening escalates", hire(resume, form, letter, hit_docs, model(skills), model(bg), model(hit), model(cv)))

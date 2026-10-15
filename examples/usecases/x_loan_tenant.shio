@@ -1,0 +1,73 @@
+# Workflow: tenant referencing with a bank statement. Check the payslips and employer reference (rental_application.shio)
+# and the salary credits on the bank statement (bank_statement_income.shio). Cross-step check: each month's payslip net
+# pay is the salary that actually reached the account, which catches payslips edited to clear the rent ratio.
+
+from common import model, numbers, money_eq, show
+from uses import use, step_ok
+
+rental_application = use("rental_application")
+bank_statement_income = use("bank_statement_income")
+
+type Month:
+    month: str             # YYYY-MM
+    payslip_net: float     # net pay on that month's payslip
+    credited: float        # the salary credit for that month on the bank statement
+
+type PayVsBank:
+    months: list[Month]
+
+agent tenant(payslips: str, reference: str, rent: float, statement: str, employer: str, let_llm, inc_llm, llm):
+    application = rental_application.apply(payslips, reference, rent, let_llm)
+    income = bank_statement_income.income(statement, employer, 0, inc_llm)
+    read pay: PayVsBank by llm:
+        For each month, give the net pay on the payslip and the salary credit on the bank statement.
+
+        Payslips:
+        {payslips}
+
+        Bank statement:
+        {statement}
+
+    check let_ok: step_ok(application, "APPROVE"), "tenancy: {application.get('action')} {application.get('why', application.get('rent_to_income', ''))}"
+    check income_ok: step_ok(income, "ELIGIBLE (underwriter to sign)"), "statement: {income.get('status')} {income.get('why', '')}"
+    check three_months: len(pay.months) >= 3, "only {len(pay.months)} month(s) compared"
+    for i, m in enumerate(pay.months):
+        check printed[i]: m.payslip_net in numbers(payslips) and m.credited in numbers(statement), "{m.month}: {m.payslip_net} or {m.credited} is not printed"
+        check paid_in[i] after printed: money_eq(m.payslip_net, m.credited, 0.01), "{m.month}: payslip net {m.payslip_net:,.2f}, statement credit {m.credited:,.2f}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "REFER", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "APPROVE", "rent_to_income": application["rent_to_income"], "salary_seen": income["monthly_income"]}
+    return decision
+
+def payslips(nets):
+    gross, ytd = (5600, 5600, 5850), (39200, 44800, 50650)
+    return "\n".join(f"CORVID ANALYTICS LTD  Payslip 2026-{m:02d}  Gross {g:,.2f}  Net {n:,.2f}  YTD gross {y:,.2f}"
+                     for m, g, n, y in zip((7, 8, 9), gross, nets, ytd))
+
+def reads(nets, email="hr@corvid-analytics.example"):
+    p = [{"month": f"2026-{m:02d}", "gross": g, "net": n, "ytd_gross": y} for m, g, n, y in zip((7, 8, 9), (5600, 5600, 5850), nets, (39200, 44800, 50650))]
+    return model({"a": {"employer": "Corvid Analytics Ltd", "payslips": p, "reference_email": email}})
+
+def compare(nets):
+    return model({"pay": {"months": [{"month": f"2026-{m:02d}", "payslip_net": n, "credited": c}
+                                     for m, n, c in zip((7, 8, 9), nets, (4210.40, 4210.40, 4377.90))]}})
+
+main:
+    stmt = "\n".join(["2026-07-01 | OPENING BALANCE | | | 2,150.00", "2026-07-31 | NEFT SAL CORVID ANALYTICS LTD | | 4,210.40 | 6,360.40",
+                      "2026-08-03 | DD RENT | 1,200.00 | | 5,160.40", "2026-08-31 | NEFT SAL CORVID ANALYTICS LTD | | 4,210.40 | 9,370.80",
+                      "2026-09-30 | NEFT SAL CORVID ANALYTICS LTD | | 4,377.90 | 13,748.70"])
+    sal = model({"sal": {"employer": "Corvid Analytics", "credits": [{"date": l[:10], "amount": numbers(l.split("|")[3])[0], "line": l}
+                                                                     for l in stmt.splitlines() if "SAL" in l]}})
+    ref = "From: hr@corvid-analytics.example\nWe confirm Nadia Ferreira has been employed as Senior Analyst since 2023."
+    real = (4210.40, 4210.40, 4377.90)
+    show("Payslips match the salary credits", tenant(payslips(real), ref, 1350, stmt, "Corvid Analytics", reads(real), sal, compare(real)))
+
+    forged = (4910.40, 4910.40, 5077.90)
+    show("Both steps pass, payslip nets edited up to clear the rent", tenant(payslips(forged), ref, 1600, stmt, "Corvid Analytics",
+         reads(forged), sal, compare(forged)))
+
+    gmail = "From: corvid.hr.team@gmail.example\nTo whom it may concern: Nadia is a valued Senior Analyst."
+    show("Reference from a personal address", tenant(payslips(real), gmail, 1350, stmt, "Corvid Analytics",
+         reads(real, "corvid.hr.team@gmail.example"), sal, compare(real)))

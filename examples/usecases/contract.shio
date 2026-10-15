@@ -1,0 +1,62 @@
+# Legal: contract risk review. Every term the model extracts must come with the clause it was read from, and the
+# number in that clause must be the number it reports. Risk flags are code against the company's playbook.
+
+from common import model, grounded, numbers, show
+
+PLAYBOOK = {"min_notice_days": 30, "max_cap_multiple": 2.0, "law": {"England and Wales", "India", "Singapore"}}
+
+type Term:
+    value: str?            # the term in a few words; null if the contract does not say
+    number: float?         # the number in it (days, multiple of fees); null if none
+    clause: str            # the sentence it comes from, copied exactly; empty if not stated
+
+type Terms:
+    auto_renews: Term      # does it renew automatically, and the notice to stop it (days)
+    liability_cap: Term    # the cap, as a multiple of annual fees; null number if uncapped
+    governing_law: Term
+
+agent review(contract: str, llm):
+    read t: Terms by llm:
+        Extract these terms from the contract, each with the exact clause.
+
+        {contract}
+
+    for name in ("auto_renews", "liability_cap", "governing_law"):
+        check cited[name]: getattr(t, name).value is None or grounded(getattr(t, name).clause, contract), "{name}: clause not found in the contract"
+        check number_matches[name]: getattr(t, name).number is None or getattr(t, name).number in numbers(getattr(t, name).clause), "{name}: {getattr(t, name).number} is not in its clause"
+
+    rule risks:
+        flags = []
+        if t.auto_renews.value and (t.auto_renews.number or 0) < PLAYBOOK["min_notice_days"]:
+            flags.append(f"auto-renews with only {t.auto_renews.number:.0f} days' notice")
+        if t.liability_cap.value is None or t.liability_cap.number is None:
+            flags.append("no liability cap found")
+        elif t.liability_cap.number > PLAYBOOK["max_cap_multiple"]:
+            flags.append(f"liability cap {t.liability_cap.number}x fees is above {PLAYBOOK['max_cap_multiple']}x")
+        if t.governing_law.value not in PLAYBOOK["law"]:
+            flags.append(f"governing law '{t.governing_law.value}' is not on the approved list")
+        if checks.failures():
+            return {"verdict": "LAWYER", "unverified": [c["detail"] for c in checks.failures()], "flags": flags}
+        return {"verdict": "SIGN" if not flags else "NEGOTIATE", "flags": flags}
+    return risks
+
+main:
+    contract = """12.1 This Agreement renews automatically for successive one-year terms unless either party gives
+    15 days' written notice before the renewal date.
+    14.2 Each party's total liability is limited to 1.5 times the fees paid in the preceding twelve months.
+    19. This Agreement is governed by the laws of Singapore."""
+    good = {"t": {"auto_renews": {"value": "yes, 15 days' notice", "number": 15, "clause": "unless either party gives 15 days' written notice"},
+                  "liability_cap": {"value": "1.5x annual fees", "number": 1.5, "clause": "limited to 1.5 times the fees paid"},
+                  "governing_law": {"value": "Singapore", "number": None, "clause": "governed by the laws of Singapore"}}}
+    show("Short notice period", review(contract, model(good)))
+
+    wrong = {"t": dict(good["t"], liability_cap={"value": "1x annual fees", "number": 1.0, "clause": "limited to the fees paid"})}
+    show("Model softens the liability cap", review(contract, model(wrong)))
+
+    clean = """3. Either party may end this Agreement on 60 days' written notice; it renews automatically each year.
+    9. Liability of each party is limited to 1 times the annual fees.
+    11. Governing law: India."""
+    fine = {"t": {"auto_renews": {"value": "yes, 60 days' notice", "number": 60, "clause": "may end this Agreement on 60 days' written notice"},
+                  "liability_cap": {"value": "1x annual fees", "number": 1, "clause": "limited to 1 times the annual fees"},
+                  "governing_law": {"value": "India", "number": None, "clause": "Governing law: India"}}}
+    show("Within the playbook", review(clean, model(fine)))

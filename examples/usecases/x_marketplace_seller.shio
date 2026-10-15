@@ -1,0 +1,63 @@
+# Workflow: onboarding a marketplace seller. kyc verifies the sole proprietor's identity, listing_compliance reviews
+# their first listing, vendor_bank_change validates the payout account letter. Cross-step: the payout account's holder
+# is the person KYC verified; a valid IBAN from the right domain can still pay someone else.
+
+from common import model, grounded, visible_text, show
+from uses import use, step_ok, why
+
+identity = use("kyc")
+listings = use("listing_compliance")
+payouts = use("vendor_bank_change")
+
+type Payee:
+    holder: str            # the account holder's name the letter gives
+    quote: str             # the sentence giving the holder, copied exactly
+
+agent onboard(form: str, id_text: str, fields: dict, html: str, letter: str, sender: str, kyc_llm, list_llm, bank_llm, llm):
+    seller = identity.kyc(form, id_text, kyc_llm)
+    item = listings.review(fields, html, list_llm)
+    bank = payouts.bank_change(letter, sender, bank_llm)
+    read payee: Payee by llm:
+        Who is the holder of the bank account in this letter?
+
+        {letter}
+
+    check verified: step_ok(seller, "APPROVE"), "KYC: {seller.get('status')} {why(seller)}"
+    check listing_ok: step_ok(item, "PUBLISH"), "listing: {item.get('status')} {why(item)}"
+    check payout_ok: step_ok(bank, "UPDATE"), "payout account: {bank.get('action')} {why(bank)}"
+    check holder_quoted: grounded(payee.quote, visible_text(letter)) and grounded(payee.holder, payee.quote), "account holder {payee.holder} is not quoted from the letter"
+    check holder_is_seller after verified: identity.same_name(payee.holder, seller["name"]), "payout account is held by {payee.holder}; KYC verified {seller['name']}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "GO LIVE", "seller": seller["name"], "sku": item["sku"], "payout": bank["iban"]}
+    return decision
+
+main:
+    form = "Name: Priya R. Sharma\nDate of birth: 1994-03-07\nPAN: ABCPS1234K"
+    card = "INCOME TAX DEPARTMENT\nPRIYA R SHARMA\nDOB 07/03/1994\nPermanent Account Number ABCPS1234K"
+    who = {"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1234K"}
+    ok_id = {"applied": dict(who, name="Priya R. Sharma"), "card": who, "card_again": who}
+    fields = {"sku": "SKU-JF100", "title": "Joint Flex Turmeric Capsules", "brand": "Verdan", "country_of_origin": "USA",
+              "ingredients": "turmeric root extract, black pepper extract"}
+    html = "<h2>Joint Flex</h2><p>Supports healthy joints after exercise.</p><p>Price: $24.99 for 60 capsules</p>"
+    item = model({"item": {"price": 24.99, "price_quote": "$24.99 for 60 capsules",
+                           "claims": [{"text": "supports joint health", "quote": "Supports healthy joints after exercise."}]}})
+    bank = model({"req": {"vendor": "Kestrel Office Supplies", "new_iban": "DE68210501700012345678",
+                          "iban_quote": "please remit to DE68210501700012345678", "says_preapproved": False}})
+    def letter(holder):
+        return f"Kestrel Office Supplies has moved banks. From 1 November please remit to DE68210501700012345678, account holder {holder}. Accounts team"
+    def payee(holder):
+        return model({"payee": {"holder": holder, "quote": f"account holder {holder}"}})
+    sender = "accounts@kestreloffice.com"
+
+    show("Verified seller, compliant listing, own account", onboard(form, card, fields, html, letter("Priya R Sharma"), sender,
+         model(ok_id), item, bank, payee("Priya R Sharma")))
+
+    show("Every step passes, but the account is someone else's", onboard(form, card, fields, html, letter("Neha Kapoor"), sender,
+         model(ok_id), item, bank, payee("Neha Kapoor")))
+
+    misread = dict(ok_id, card=dict(who, pan="ABCPS1284K"))
+    show("KYC misreads a digit on the card", onboard(form, card, fields, html, letter("Priya R Sharma"), sender,
+         model(misread), item, bank, payee("Priya R Sharma")))

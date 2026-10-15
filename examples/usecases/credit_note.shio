@@ -1,0 +1,59 @@
+# Accounts receivable: matching a credit note to the invoice it reverses. The model reads the credit note; code
+# checks the referenced invoice exists for that customer, the credit fits in what is left to credit, the tax rate is
+# the invoice's own, and the tax arithmetic holds. Only then is it posted against the invoice.
+
+from common import model, money_eq, numbers, show
+
+INVOICES = {   # the sales ledger: net value, GST rate, and net already credited
+    "INV-30418": {"customer": "C-0088", "net": 12000.00, "rate": 0.18, "credited": 2000.00},
+    "INV-30455": {"customer": "C-0088", "net": 4800.00, "rate": 0.12, "credited": 0.00},
+    "INV-30502": {"customer": "C-0131", "net": 9500.00, "rate": 0.18, "credited": 0.00},
+}
+
+type CreditNote:
+    number: str            # the credit note number
+    invoice_ref: str       # the invoice it says it reverses, e.g. INV-30418
+    customer: str          # the customer account code, e.g. C-0088
+    net: float             # net amount credited, before tax
+    tax_rate: float        # as a fraction, 0.18 for 18%
+    tax: float
+    total: float
+
+def remaining(ref):
+    inv = INVOICES.get(ref, {"net": 0.0, "credited": 0.0})
+    return inv["net"] - inv["credited"]
+
+agent match_credit(note_text: str, llm):
+    read cn: CreditNote by llm:
+        Read this customer credit note.
+
+        {note_text}
+
+    check ref_on_note: cn.invoice_ref in note_text, "{cn.invoice_ref} is not the reference printed on the credit note"
+    check invoice_exists: cn.invoice_ref in INVOICES, "no invoice {cn.invoice_ref} in the sales ledger"
+    check same_customer: cn.invoice_ref in INVOICES and INVOICES[cn.invoice_ref]["customer"] == cn.customer, "{cn.invoice_ref} was not billed to {cn.customer}"
+    check within_remaining: cn.invoice_ref in INVOICES and cn.net <= remaining(cn.invoice_ref) + 0.005, "credits {cn.net:.2f}, only {remaining(cn.invoice_ref):.2f} left on {cn.invoice_ref}"
+    check same_rate: cn.invoice_ref in INVOICES and money_eq(cn.tax_rate, INVOICES[cn.invoice_ref]["rate"], 0.0001), "tax rate {cn.tax_rate}, invoice rate {INVOICES.get(cn.invoice_ref, {}).get('rate')}"
+    check tax_arithmetic: money_eq(cn.net * cn.tax_rate, cn.tax, 0.01) and money_eq(cn.net + cn.tax, cn.total, 0.01), "net {cn.net} + tax {cn.tax} does not give {cn.total}"
+    check total_printed: cn.total in numbers(note_text), "total {cn.total} is not on the credit note"
+
+    rule posting:
+        if checks.failures():
+            return {"status": "REVIEW", "note": cn.number, "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "POST", "note": cn.number, "against": cn.invoice_ref, "net": cn.net,
+                "left_to_credit": round(remaining(cn.invoice_ref) - cn.net, 2)}
+    return posting
+
+main:
+    good = "CREDIT NOTE CN-1207 for customer C-0088\nAgainst invoice INV-30418: 40 units returned damaged\nNet 3,000.00  GST 18% 540.00  Total 3,540.00"
+    ok = {"number": "CN-1207", "invoice_ref": "INV-30418", "customer": "C-0088", "net": 3000, "tax_rate": 0.18, "tax": 540, "total": 3540}
+    show("Partial credit on an invoice", match_credit(good, model({"cn": ok})))
+
+    big = "CREDIT NOTE CN-1211 for customer C-0088\nAgainst invoice INV-30418: full reversal\nNet 12,000.00  GST 18% 2,160.00  Total 14,160.00"
+    show("Full reversal of a part-credited invoice", match_credit(big, model({"cn": dict(ok, number="CN-1211", net=12000, tax=2160, total=14160)})))
+
+    rate = "CREDIT NOTE CN-1215 for customer C-0088\nAgainst invoice INV-30455: price correction\nNet 1,000.00  GST 18% 180.00  Total 1,180.00"
+    show("Credit at 18% on a 12% invoice", match_credit(rate, model({"cn": dict(ok, number="CN-1215", invoice_ref="INV-30455", net=1000, tax=180, total=1180)})))
+
+    typo = "CREDIT NOTE CN-1219 for customer C-0088\nAgainst invoice INV-3O418 (rebate)\nNet 500.00  GST 18% 90.00  Total 590.00"
+    show("Model 'corrects' a bad reference to another customer's invoice", match_credit(typo, model({"cn": dict(ok, number="CN-1219", invoice_ref="INV-30502", net=500, tax=90, total=590)})))

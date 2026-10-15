@@ -1,0 +1,60 @@
+# Workflow: maintenance parts. A technician's note becomes a work order that needs parts bought in (work_order); the
+# spares dealer's GST tax invoice is validated before input tax credit (gst_invoice). Cross-step check, line by
+# line: every part invoiced is a part the work order needed, in no greater quantity, so nothing extra rides along on
+# a maintenance invoice. PAY or HOLD.
+
+from common import model, grounded, numbers, show
+from uses import use, step_ok
+
+wo = use("work_order")
+gst = use("gst_invoice")
+
+type PartLine:
+    part_no: str           # the stores part number on the invoice line, e.g. BELT-B68
+    qty: int               # units invoiced
+    quote: str             # the invoice line, copied exactly
+
+type PartsBill:
+    lines: list[PartLine]
+
+agent parts_invoice(note: str, invoice: str, wo_llm, gst_llm, llm):
+    job = wo.work_order(note, wo_llm)
+    tax = gst.gst_check(invoice, gst_llm)
+    needed = dict(job.get("parts", []))
+    read bill: PartsBill by llm:
+        List every part line on this invoice: part number, quantity, and the line as printed.
+
+        {invoice}
+
+    check parts_ordered: step_ok(job, "ORDER PARTS"), "work order: {job.get('action')} {job.get('why', '')}"
+    check gst_valid: step_ok(tax, "ACCEPT"), "GST invoice: {tax.get('status')} {tax.get('why', '')}"
+    check has_lines: len(bill.lines) > 0, "no part lines read from the invoice"
+    for i, line in enumerate(bill.lines):
+        check line_read[i]: grounded(line.quote, invoice) and line.part_no in line.quote and line.qty in numbers(line.quote), "line {i + 1}: {line.part_no} x {line.qty} is not what '{line.quote}' says"
+        check on_work_order[i] after line_read: line.part_no in needed, "{line.part_no} is invoiced but not on the work order for {job.get('asset')}"
+        check within_need[i] after line_read, on_work_order: line.qty <= needed[line.part_no], "{line.part_no}: {line.qty} invoiced, work order needs {needed.get(line.part_no)}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "PAY", "asset": job["asset"], "parts": job["parts"], "itc": tax["itc"]}
+    return decision
+
+main:
+    belt = "CNV-0233 belt frayed along the edge and tracking off. Replace with 2x BELT-B68."
+    job = {"j": {"asset_id": "CNV-0233", "fault": "frayed belt", "fault_quote": "belt frayed along the edge", "parts": [{"part_no": "BELT-B68", "qty": 2}]}}
+    inv = ("MEHTA INDUSTRIAL SPARES PVT LTD  GSTIN 27AAPCM4821K1Z1\nBill to: Velora Retail Pvt Ltd  GSTIN 27AABCV7731Q1ZN\n"
+           "Place of supply: 27-Maharashtra\nBELT-B68 conveyor belt 2 x 4,500.00 = 9,000.00\nTaxable 9,000.00\n"
+           "CGST 9% 810.00  SGST 9% 810.00\nTotal 10,620.00")
+    tax = {"supplier_gstin": "27AAPCM4821K1Z1", "recipient_gstin": "27AABCV7731Q1ZN", "place_of_supply": "27",
+           "taxable": 9000, "rate": 18, "cgst": 810, "sgst": 810, "igst": 0, "total": 10620}
+    lines = {"bill": {"lines": [{"part_no": "BELT-B68", "qty": 2, "quote": "BELT-B68 conveyor belt 2 x 4,500.00 = 9,000.00"}]}}
+    show("Invoice is exactly the work order's parts", parts_invoice(belt, inv, model(job), model({"inv": tax}), model(lines)))
+
+    extra = inv.replace("Taxable 9,000.00\nCGST 9% 810.00  SGST 9% 810.00\nTotal 10,620.00",
+                        "HOSE-12-900 hydraulic hose 1 x 2,100.00 = 2,100.00\nTaxable 11,100.00\nCGST 9% 999.00  SGST 9% 999.00\nTotal 13,098.00")
+    both = {"bill": {"lines": lines["bill"]["lines"] + [{"part_no": "HOSE-12-900", "qty": 1, "quote": "HOSE-12-900 hydraulic hose 1 x 2,100.00 = 2,100.00"}]}}
+    show("A hose rides along on the belt invoice", parts_invoice(belt, extra, model(job), model({"inv": dict(tax, taxable=11100, cgst=999, sgst=999, total=13098)}), model(both)))
+
+    over = inv.replace("810.00  SGST 9% 810.00\nTotal 10,620.00", "1,080.00  SGST 9% 1,080.00\nTotal 11,160.00")
+    show("GST step fails: tax charged at 24%", parts_invoice(belt, over, model(job), model({"inv": dict(tax, cgst=1080, sgst=1080, total=11160)}), model(lines)))

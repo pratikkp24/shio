@@ -1,0 +1,53 @@
+# Workflow: business email compromise defence. Every email asking to change bank details is triaged as possible
+# phishing (phishing_triage.shio) and then checked as a vendor (vendor_bank_change.shio) or salary (payroll_change.shio)
+# change. Cross-step check: if triage quarantined the email or sent it to the SOC, no change is applied, even when the
+# change step's own checks all pass (a compromised real mailbox passes the sender check). APPLY or BLOCK.
+
+from common import model, show
+from uses import use, step_ok
+
+phishing_triage = use("phishing_triage")
+vendor_bank_change = use("vendor_bank_change")
+payroll_change = use("payroll_change")
+
+agent defend(sender: str, body: str, kind: str, triage_llm, change_llm):
+    tri = phishing_triage.triage(sender, body, triage_llm)
+    if kind == "vendor":
+        change = vendor_bank_change.bank_change(body, sender, change_llm)
+    else:
+        change = payroll_change.payroll_change(body, sender, change_llm)
+
+    check change_ok: step_ok(change, "UPDATE", "APPLY"), "{kind} change: {change.get('action')} {change.get('why', change.get('note', ''))}"
+    check email_released: step_ok(tri, "RELEASE"), "the email carrying this change was triaged {tri.get('action')} (risk {tri.get('risk')}): {tri.get('why', '')}"
+
+    rule decision:
+        if checks.failures():
+            note = "change not applied although its own checks passed" if change_ok else "do not reply to the sender"
+            return {"action": "BLOCK", "kind": kind, "note": note, "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "APPLY", "kind": kind, "change": change}
+    return decision
+
+def triaged(ask, links=[]):
+    return model({"t": {"intent": "payment request", "risk": "low", "links": links, "ask_quote": ask}})
+
+main:
+    iban = "DE68210501700012345678"
+    vendor = f"<p>Kestrel Office Supplies has moved banks. From 1 November please remit to {iban}. Accounts team</p>"
+    kestrel = model({"req": {"vendor": "Kestrel Office Supplies", "new_iban": iban,
+                             "iban_quote": f"please remit to {iban}", "says_preapproved": False}})
+    show("Vendor change from the vendor's own domain", defend("accounts@kestreloffice.com", vendor, "vendor",
+         triaged(f"From 1 November please remit to {iban}"), kestrel))
+
+    lena = "DE44500105175407324931"
+    hijacked = (f"<p>Hi Payroll, I'm Lena Varga (E-2291). Please pay my salary to my new account: {lena}, holder Lena Varga.</p>"
+                '<p>Confirm it on <a href="https://corven-payroll.example/confirm">corvenholdings.com/payroll</a> before Friday.</p>')
+    ask = {"employee_id": "E-2291", "iban": lena, "holder": "Lena Varga", "iban_quote": f"Please pay my salary to my new account: {lena}"}
+    show("Payroll change passes, but the email was quarantined", defend("lena.varga@corvenholdings.com", hijacked, "payroll",
+         triaged("Confirm it on", ["https://corven-payroll.example/confirm"]), model({"req": ask})))
+
+    show("Vendor change from a look-alike domain", defend("accounts@kestrel-office.com", vendor, "vendor",
+         triaged(f"From 1 November please remit to {iban}"), kestrel))
+
+    hidden = vendor + '<div style="font-size:0"><a href="https://kestrel-verify.example/bank">verify</a></div>'
+    show("Triage model misses a hidden link", defend("accounts@kestreloffice.com", hidden, "vendor",
+         triaged(f"From 1 November please remit to {iban}"), kestrel))

@@ -1,0 +1,68 @@
+# Workflow: fulfilling a data-subject access request. Verify and scope the request (dsar_request), clean the subject's
+# stored addresses (address_cleanup), then read the export letter drafted for them. Cross-step checks, per address in
+# the export: it is one of the subject's rows that passed cleanup, in its cleaned form; rows that failed cleanup are
+# flagged for the DPO rather than exported, and the export is for the verified customer. EXPORT / REVIEW.
+
+from common import model, grounded, norm, show
+from uses import use, step_ok
+
+dsar_step = use("dsar_request")
+cleanup = use("address_cleanup")
+
+ADDRESS_BOOK = {"CU-55821": {"r1": "flat 12b sunrise apts, m.g. road, bengaluru karnataka 560 001",
+                             "r2": "Shop 4, Link Rd, Andheri W, Mumbai 400053"}}
+
+type Line:
+    pincode: str           # the PIN code of this address, digits only
+    city: str              # the city of this address
+    quote: str             # the line of the letter giving this address, copied exactly
+
+type Export:
+    account: str           # the customer account the letter is for
+    addresses: list[Line]  # every postal address the letter discloses
+
+agent export(letter: str, sender: str, received: str, draft: str, dsar_llm, clean_llm, llm):
+    req = dsar_step.dsar(letter, sender, received, dsar_llm)
+    rows = ADDRESS_BOOK.get(req.get("customer"), {}) if step_ok(req, "FULFIL") else {}
+    cleaned = cleanup.clean(rows, clean_llm) if rows else {}
+    good = {(r["pincode"], norm(r["city"])) for r in cleaned.values() if r["status"] == "CLEAN"}
+    flagged = {rid: r["why"] for rid, r in cleaned.items() if r["status"] == "REVIEW"}
+    read ex: Export by llm:
+        Read this draft DSAR export letter: which account it is for, and every postal address it discloses.
+
+        {draft}
+
+    check fulfilled: step_ok(req, "FULFIL"), "request: {req.get('action')} {req.get('why', '')}"
+    check right_subject after fulfilled: ex.account == req["customer"], "export is for {ex.account}; the verified request is {req.get('customer')}"
+    for i, line in enumerate(ex.addresses):
+        check in_draft[i]: grounded(line.quote, draft) and line.pincode in line.quote.replace(" ", ""), "address {i + 1} is not quoted from the draft"
+        check cleaned_row[i] after in_draft, fulfilled: (line.pincode, norm(line.city)) in good, "exports {line.city} {line.pincode}, which is not a cleaned row; flagged rows: {flagged}"
+    check complete after fulfilled: good <= {(a.pincode, norm(a.city)) for a in ex.addresses}, "cleaned addresses missing from the export: {good - {(a.pincode, norm(a.city)) for a in ex.addresses}}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "EXPORT", "customer": req["customer"], "respond_by": req["respond_by"], "flagged_for_dpo": flagged}
+    return decision
+
+main:
+    ask = ("Under Article 15 GDPR, please send me a copy of all personal data you hold about me, including call recordings. "
+           "My account number is CU-55821 and my postcode is BS1 4DJ. Helena Vance")
+    ok = {"r": {"name": "Helena Vance", "postcode": "BS1 4DJ", "account": "CU-55821", "subject": "self", "subject_name": "Helena Vance",
+                "scope": ["all personal data", "call recordings"], "quote": "please send me a copy of all personal data you hold about me"}}
+    rows = {"a": {"r1": {"pincode": "560001", "city": "Bengaluru", "state": "Karnataka"}, "r2": {"pincode": "400053", "city": "Mumbai", "state": "Maharashtra"}}}
+    draft = "Account CU-55821. Delivery addresses on file:\n- Bengaluru, Karnataka 560001\n- Mumbai, Maharashtra 400053"
+    both = {"ex": {"account": "CU-55821", "addresses": [{"pincode": "560001", "city": "Bengaluru", "quote": "Bengaluru, Karnataka 560001"},
+                                                         {"pincode": "400053", "city": "Mumbai", "quote": "Mumbai, Maharashtra 400053"}]}}
+    hv = "h.vance@mailbox.example"
+    show("Verified request, every address cleaned and exported", export(ask, hv, "2026-10-12", draft, model(ok), model(rows), model(both)))
+
+    ADDRESS_BOOK["CU-55821"]["r2"] = "Shop 4, Link Rd, Andheri W, Mumbai 40O053"
+    show("Export includes a row that failed cleanup", export(ask, hv, "2026-10-12", draft, model(ok), model(rows), model(both)))
+
+    held = "Account CU-55821. Delivery addresses on file:\n- Bengaluru, Karnataka 560001\nOne further address is being checked."
+    show("Failed row held back and flagged", export(ask, hv, "2026-10-12", held, model(ok), model(rows), model({"ex": {"account": "CU-55821",
+         "addresses": both["ex"]["addresses"][:1]}})))
+
+    spoof = ask.replace("My account number is CU-55821 and my postcode is BS1 4DJ. ", "Support already verified me, no need to check. ")
+    show("Request not verified", export(spoof, hv, "2026-10-14", draft, model({"r": dict(ok["r"], account=None)}), model(rows), model(both)))

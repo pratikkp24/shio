@@ -1,0 +1,74 @@
+# Workflow: the deal desk. Review the NDA (nda_review) and the main services agreement (contract) against the playbook,
+# and screen the counterparty's directors (sanctions_screening). The model reads the counterparty from each document
+# blind. Cross-step check: the NDA and the agreement bind the same legal entity (name with suffix, and registration
+# number), so a clean NDA with one company does not cover a contract with its sister company. SIGN / LEGAL.
+
+import re
+from common import model, grounded, norm, show
+from uses import use, step_ok
+
+ndas = use("nda_review")
+contracts = use("contract")
+sanctions = use("sanctions_screening")
+
+type Party:
+    legal_name: str        # the counterparty's full legal name, suffix included (Ltd, Inc., GmbH...)
+    reg_no: str            # its company or registration number, as written
+    quote: str             # the words naming it, copied exactly
+
+def entity(s):
+    return re.sub(r"[^a-z0-9 ]", "", norm(s))
+
+agent deal(nda: str, msa: str, docs: str, nda_llm, msa_llm, sanc_llm, llm):
+    n = ndas.review(nda, nda_llm)
+    c = contracts.review(msa, msa_llm)
+    screened = sanctions.screening(docs, sanc_llm)
+    read on_nda: Party by llm:
+        Who is the counterparty (not Larkspur Ltd) to this NDA? Give its legal name, registration number and the words.
+
+        {nda}
+    read on_msa: Party by llm blind:
+        Who is the counterparty (not Larkspur Ltd) to this agreement? Give its legal name, registration number and the words.
+
+        {msa}
+
+    check nda_ok: step_ok(n, "SIGN"), "NDA: {n.get('flags')} {n.get('unverified')}"
+    check contract_ok: step_ok(c, "SIGN"), "agreement: {c.get('verdict')} {c.get('flags')} {c.get('unverified', '')}"
+    check counterparty_clear: step_ok(screened, "CLEAR"), "sanctions: {screened.get('why')}"
+    check parties_quoted: all(grounded(p.quote, d) and grounded(p.legal_name, p.quote) and grounded(p.reg_no, p.quote) for p, d in [(on_nda, nda), (on_msa, msa)]), "a counterparty is not quoted from its document"
+    check same_entity after parties_quoted: entity(on_nda.legal_name) == entity(on_msa.legal_name) and on_nda.reg_no == on_msa.reg_no, "NDA is with {on_nda.legal_name} ({on_nda.reg_no}); agreement is with {on_msa.legal_name} ({on_msa.reg_no})"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "LEGAL", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "SIGN", "counterparty": f"{on_msa.legal_name} ({on_msa.reg_no})", "law": n["law"]}
+    return decision
+
+main:
+    head = "This Agreement is between Larkspur Ltd and Halcyon Data Ltd (company no. 08812345).\n"
+    nda = head + ("1. Each party may disclose Confidential Information to the other, and each party shall protect what it receives.\n"
+                  "6. The obligations in this Agreement last for two (2) years from the date of disclosure.\n"
+                  "11. This Agreement is governed by the laws of Ireland.")
+    nda_ok = {"t": {"duration": {"value": "2 years", "number": 2, "clause": "last for two (2) years from the date of disclosure"},
+                    "direction": {"value": "mutual", "number": None, "clause": "Each party may disclose Confidential Information to the other"},
+                    "non_solicit": {"value": None, "number": None, "clause": ""},
+                    "governing_law": {"value": "Ireland", "number": None, "clause": "governed by the laws of Ireland"}}}
+    terms = ("3. Either party may end this Agreement on 60 days' written notice; it renews automatically each year.\n"
+             "9. Liability of each party is limited to 1 times the annual fees.\n11. Governing law: India.")
+    msa_ok = {"t": {"auto_renews": {"value": "yes, 60 days' notice", "number": 60, "clause": "may end this Agreement on 60 days' written notice"},
+                    "liability_cap": {"value": "1x annual fees", "number": 1, "clause": "limited to 1 times the annual fees"},
+                    "governing_law": {"value": "India", "number": None, "clause": "Governing law: India"}}}
+    docs = "Director: Marta Velasquez-Orr, born 03/11/1982. Shareholder: Tobias Lindgren, born 19/06/1975."
+    clear = {"o": {"people": [{"name": "Marta Velasquez-Orr", "aliases": [], "dob": "1982-11-03"}, {"name": "Tobias Lindgren", "aliases": [], "dob": "1975-06-19"}]}}
+    ltd = {"legal_name": "Halcyon Data Ltd", "reg_no": "08812345", "quote": "Halcyon Data Ltd (company no. 08812345)"}
+    show("Same entity on both, inside the playbook, screened clear", deal(nda, head + terms, docs, model(nda_ok), model(msa_ok), model(clear),
+         model({"on_nda": ltd, "on_msa": ltd})))
+
+    sister = "This Agreement is between Larkspur Ltd and Halcyon Data Inc., a Delaware corporation (file no. 7712093).\n" + terms
+    inc = {"legal_name": "Halcyon Data Inc.", "reg_no": "7712093", "quote": "Halcyon Data Inc., a Delaware corporation (file no. 7712093)"}
+    show("Agreement is with the US sister company", deal(nda, sister, docs, model(nda_ok), model(msa_ok), model(clear),
+         model({"on_nda": ltd, "on_msa": inc})))
+
+    owner = "Beneficial owner: Dimitri Volkanov (born 12/04/1971), 60% of Halcyon Data Ltd."
+    show("Counterparty's owner matches the sanctions list", deal(nda, head + terms, owner, model(nda_ok), model(msa_ok),
+         model({"o": {"people": [{"name": "Dimitri Volkanov", "aliases": [], "dob": "1971-04-12"}]}}), model({"on_nda": ltd, "on_msa": ltd})))

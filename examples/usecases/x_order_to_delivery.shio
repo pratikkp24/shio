@@ -1,0 +1,51 @@
+# Workflow: order to delivery. Enter the customer's emailed order (po_from_email), accept the carrier's ETA notice for
+# the container it ships in (shipment_eta), then answer the customer's "where is it?" chat (order_status_bot).
+# Cross-step check: the date the bot is about to tell the customer is the ETA the TMS update just accepted, for the
+# container that order is in. NOTIFY sends the bot's reply; HOLD keeps it back.
+
+import re
+from common import model, show
+from uses import use, step_ok
+
+orders = use("po_from_email")
+eta = use("shipment_eta")
+bot = use("order_status_bot")
+
+PORTAL = {"purchasing@hallworth-fittings.example": "cust-208"}     # email address -> portal account
+SHIPS_IN = {"W-4401": "MRVU7712055"}                                # order -> container (warehouse dispatch record)
+
+agent order_to_delivery(email: str, sender: str, notice: str, chat: str, order_id: str, po_llm, eta_llm, bot_llm):
+    entry = orders.order_entry(email, sender, po_llm)
+    arrival = eta.eta_update(notice, eta_llm)
+    answer = bot.where_is(PORTAL.get(sender, "unknown"), chat, bot_llm)
+    told = re.findall(r"\d{4}-\d{2}-\d{2}", answer.get("reply", ""))
+
+    check order_created: step_ok(entry, "CREATE ORDER"), "order entry: {entry.get('action')} {entry.get('why', '')}"
+    check eta_accepted: step_ok(arrival, "UPDATE TMS"), "ETA notice: {arrival.get('action')} {arrival.get('why', '')}"
+    check bot_answered: "why" not in answer and order_id in answer.get("reply", ""), "bot: {answer.get('reply')} {answer.get('why', '')}"
+    check right_container after eta_accepted: SHIPS_IN.get(order_id) == arrival.get("container"), "{order_id} ships in {SHIPS_IN.get(order_id)}, ETA notice is for {arrival.get('container')}"
+    check same_eta after eta_accepted, bot_answered: told == [arrival.get("eta")], "bot tells the customer {told}, TMS now says {arrival.get('eta')}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "NOTIFY", "order": order_id, "lines": entry["lines"], "reply": answer["reply"]}
+    return decision
+
+main:
+    buyer = "purchasing@hallworth-fittings.example"
+    email = "Hi, please send 200 x BRK-2210 and 48 x HNG-0480 to our Leeds site by Friday. Thanks, Imogen Hale"
+    lines = {"o": {"lines": [{"sku": "BRK-2210", "qty": 200, "quote": "200 x BRK-2210"}, {"sku": "HNG-0480", "qty": 48, "quote": "48 x HNG-0480"}]}}
+    notice = "Update: MRVU7712055 discharged at Nhava Sheva INNSA, ETA 2026-10-18 (revised)."
+    eta_ok = {"s": {"container": "MRVU7712055", "port": "INNSA", "eta": "2026-10-18", "eta_quote": "ETA 2026-10-18"}}
+    chat = "Hi, where's my order W-4401? It's been a week."
+    ask = {"ask": {"intent": "order status", "order_id": "W-4401", "draft_reply": "It should be with you soon!"}}
+    show("Bot's date is the TMS date", order_to_delivery(email, buyer, notice, chat, "W-4401", model(lines), model(eta_ok), model(ask)))
+
+    later = notice.replace("2026-10-18", "2026-10-20")
+    show("ETA slipped two days, order record not updated", order_to_delivery(email, buyer, later, chat, "W-4401", model(lines),
+         model({"s": dict(eta_ok["s"], eta="2026-10-20", eta_quote="ETA 2026-10-20")}), model(ask)))
+
+    big = "Urgent: 600 x BRK-2215 and 96 x HNG-0480 for the Q4 refit. Imogen"
+    over = {"o": {"lines": [{"sku": "BRK-2215", "qty": 600, "quote": "600 x BRK-2215"}, {"sku": "HNG-0480", "qty": 96, "quote": "96 x HNG-0480"}]}}
+    show("Order step fails: over the credit limit", order_to_delivery(big, buyer, notice, chat, "W-4401", model(over), model(eta_ok), model(ask)))

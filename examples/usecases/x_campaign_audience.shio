@@ -1,0 +1,60 @@
+# Workflow: a promo email goes out while privacy requests are open. email_campaign_compliance pre-checks the email;
+# dsar_request logs each data-subject request with its deadline. Cross-step: the recipient list excludes everyone
+# whose request asks for erasure or objects to marketing. Code reads that from the letters and cross-checks the list,
+# whether or not the request's identity check has cleared yet: an objection to marketing stops marketing either way.
+
+import re
+from common import model, show
+from uses import use, step_ok, why
+
+emails = use("email_campaign_compliance")
+privacy = use("dsar_request")
+
+OPT_OUT = re.compile(r"\b(eras(e|ure)|delet(e|ion)|right to be forgotten|object(ion)?\b|stop (sending|emailing))", re.I)
+
+agent send(campaign: str, html: str, recipients: list, requests: list, mail_llm, dsar_llms: list):
+    mail = emails.precheck(campaign, html, mail_llm)
+    logged = [privacy.dsar(letter, sender, received, m) for (letter, sender, received), m in zip(requests, dsar_llms)]
+    opted_out = sorted({sender for letter, sender, received in requests if OPT_OUT.search(letter)})
+    still_on = [r for r in recipients if r.strip().lower() in opted_out]
+
+    check email_ok: step_ok(mail, "SEND"), "email: {mail.get('verdict')} {why(mail)}"
+    check requests_logged: all(x.get("respond_by") for x in logged), "a privacy request has no response deadline"
+    check audience_clean: not still_on, "recipients include people who asked for erasure or objected to marketing: {still_on}"
+
+    rule decision:
+        privacy_queue = [{"action": x["action"], "respond_by": x["respond_by"]} for x in logged]
+        if not audience_clean:
+            return {"status": "FIX AUDIENCE", "remove": still_on, "why": [c["detail"] for c in checks.failures()]}
+        if checks.failures():
+            return {"status": "FIX EMAIL", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "SEND", "recipients": len(recipients), "suppressed": opted_out, "privacy_queue": privacy_queue}
+    return decision
+
+main:
+    footer = ('<p><a href="https://corvel.example/unsubscribe?u=58812">Unsubscribe</a> | '
+              'Corvel Home Goods, 88 Harbor Street, Portland, ME 04101</p>')
+    body = "<h1>25% off all bedding</h1><p>Our linen sheets are stonewashed for softness.</p><p>Offer ends 31 Oct 2026.</p>"
+    read_mail = model({"e": {"discount_pct": 25, "terms_quote": "Offer ends 31 Oct 2026",
+                             "claims": [{"text": "25% off bedding", "quote": "25% off all bedding", "is_free": False}]}})
+    erase = ("Under Article 17 GDPR, please erase all personal data you hold about me and stop sending me marketing. "
+             "My account number is CU-55821 and my postcode is BS1 4DJ. Helena Vance")
+    erase_read = model({"r": {"name": "Helena Vance", "postcode": "BS1 4DJ", "account": "CU-55821", "subject": "self",
+                              "subject_name": "Helena Vance", "scope": ["erasure", "stop marketing"],
+                              "quote": "please erase all personal data you hold about me"}})
+    requests = [(erase, "h.vance@mailbox.example", "2026-10-12")]
+    clean = ["o.brandt@mailbox.example", "k.ito@mailbox.example"]
+
+    show("Erasure request honoured, email compliant", send("FALL-26", body + footer, clean, requests, read_mail, [erase_read]))
+
+    show("Email passes, but the list still has her", send("FALL-26", body + footer, clean + ["H.Vance@mailbox.example"],
+         requests, read_mail, [erase_read]))
+
+    unverified = "I object to you using my data for marketing. Stop sending me these emails. Oskar"
+    oskar_read = model({"r": {"name": "Oskar", "postcode": None, "account": None, "subject": "self", "subject_name": "Oskar",
+                              "scope": ["objection to marketing"], "quote": "I object to you using my data for marketing"}})
+    show("Objection not yet identity-verified still suppresses him", send("FALL-26", body + footer, clean,
+         requests + [(unverified, "o.brandt@mailbox.example", "2026-10-15")], read_mail, [erase_read, oskar_read]))
+
+    hot = body.replace("</h1>", "</h1><p>Today only: 40% off duvets!</p>")
+    show("Email offers more than the approved 25%", send("FALL-26", hot + footer, clean, requests, read_mail, [erase_read]))

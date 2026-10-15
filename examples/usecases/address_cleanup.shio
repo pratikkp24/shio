@@ -1,0 +1,69 @@
+# Data quality: Indian postal addresses typed by hand. The model reads pincode, city and state from each messy row;
+# code checks the pincode is six digits and actually written in the row, that its first digit belongs to the state's
+# postal zone, and that the city is in the row's own words. A model that "fixes" a typo is sent to review.
+
+import re
+from common import model, grounded, norm, show
+
+PIN = re.compile(r"^[1-9][0-9]{5}$")
+ZONE = {                                   # first digit of an Indian PIN code -> states in that postal zone
+    "1": {"delhi", "haryana", "punjab", "himachal pradesh", "jammu and kashmir", "chandigarh"},
+    "2": {"uttar pradesh", "uttarakhand"},
+    "3": {"rajasthan", "gujarat"},
+    "4": {"maharashtra", "madhya pradesh", "chhattisgarh", "goa"},
+    "5": {"andhra pradesh", "telangana", "karnataka"},
+    "6": {"kerala", "tamil nadu", "puducherry"},
+    "7": {"west bengal", "odisha", "assam", "meghalaya", "tripura", "sikkim"},
+    "8": {"bihar", "jharkhand"},
+}
+
+type Address:
+    pincode: str           # the 6-digit PIN code as written, digits only
+    city: str              # the city or town, as written in the address
+    state: str             # the state, full name (may be inferred if not written)
+
+def digits(s):
+    return re.sub(r"\s", "", str(s or ""))
+
+def in_zone(pin, state):
+    return PIN.match(pin or "") is not None and norm(state) in ZONE.get(pin[0], set())
+
+agent clean(rows: dict, llm):
+    out = {}
+    for rid, raw in rows.items():
+        read a[rid]: Address by llm:
+            Read the PIN code, city and state from this Indian postal address.
+
+            {raw}
+
+        check pin_format[rid]: bool(PIN.match(a.pincode)), "PIN '{a.pincode}' is not six digits starting 1-8"
+        check pin_written[rid]: a.pincode in digits(raw), "PIN {a.pincode} is not written in the row"
+        check pin_zone[rid]: in_zone(a.pincode, a.state), "PIN {a.pincode} is not in the postal zone for {a.state}"
+        check city_written[rid]: grounded(a.city, raw), "city '{a.city}' is not in the row"
+
+        rule row[rid]:
+            bad = [c["detail"] for c in checks.failures() if c.get("key") == rid]
+            if a is None or bad:
+                return {"status": "REVIEW", "raw": raw, "why": bad or ["unreadable"]}
+            return {"status": "CLEAN", "pincode": a.pincode, "city": a.city.title(), "state": a.state.title()}
+        out[rid] = row
+    return out
+
+main:
+    rows = {
+        "r1": "flat 12b sunrise apts, m.g. road, bengaluru karnataka 560 001",
+        "r2": "Shop 4, Link Rd, Andheri W, Mumbai 40O053",
+        "r3": "22 Civil Lines, Jaipur, Rajasthan - 560034",
+        "r4": "Near bus stand, Hosur Rd, 560068",
+    }
+    answers = {"a": {
+        "r1": {"pincode": "560001", "city": "Bengaluru", "state": "Karnataka"},
+        "r2": {"pincode": "400053", "city": "Mumbai", "state": "Maharashtra"},       # silently "fixes" the letter O
+        "r3": {"pincode": "560034", "city": "Jaipur", "state": "Rajasthan"},         # the row itself is inconsistent
+        "r4": {"pincode": "560068", "city": "Bengaluru", "state": "Karnataka"},      # city not in the row
+    }}
+    result = clean(rows, model(answers))
+    show("Clean row", result["r1"])
+    show("Model corrects a typo it should flag", result["r2"])
+    show("PIN from another state's zone", result["r3"])
+    show("City guessed, not written", result["r4"])

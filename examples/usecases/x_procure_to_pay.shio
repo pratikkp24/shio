@@ -1,0 +1,68 @@
+# Workflow: procure to pay. Validate the supplier's GST tax invoice (gst_invoice.shio) and the vendor's account change
+# (vendor_bank_change.shio), then check across them: the supplier GSTIN on the invoice is the vendor master's, and the
+# account the invoice asks to be paid into is the one the bank-change step approved. PAY or HOLD.
+# (three_way_match.shio is not chained: its only PO is for a vendor that the vendor master in vendor_bank_change lacks.)
+
+from common import model, grounded, show
+from uses import use, step_ok
+
+gst_invoice = use("gst_invoice")
+vendor_bank_change = use("vendor_bank_change")
+
+GSTINS = {"V-240": "27AAKCK2240M1ZB"}      # vendor master: the GSTIN registered for each vendor at onboarding
+
+type RemitTo:
+    supplier_gstin: str    # the supplier's GSTIN as printed on the invoice
+    iban: str              # the account the invoice asks to be paid into, no spaces
+    iban_quote: str        # the line giving that account, copied exactly
+
+agent pay(vendor_id: str, invoice: str, letter: str, sender: str, gst_llm, bank_llm, llm):
+    tax = gst_invoice.gst_check(invoice, gst_llm)
+    bank = vendor_bank_change.bank_change(letter, sender, bank_llm)
+    read inv: RemitTo by llm:
+        Which GSTIN issued this invoice, and which account does it ask to be paid into?
+
+        {invoice}
+
+    check invoice_ok: step_ok(tax, "ACCEPT"), "tax invoice: {tax.get('status')} {tax.get('why', '')}"
+    check account_ok: step_ok(bank, "UPDATE") and bank.get("vendor") == vendor_id, "bank change: {bank.get('action')} {bank.get('why', '')}"
+    check read_from_invoice: grounded(inv.iban_quote, invoice) and inv.iban in inv.iban_quote and inv.supplier_gstin in invoice, "remit-to {inv.iban} or GSTIN {inv.supplier_gstin} is not on the invoice"
+    check gstin_is_masters: inv.supplier_gstin == GSTINS.get(vendor_id), "invoice issued by GSTIN {inv.supplier_gstin}, vendor master has {GSTINS.get(vendor_id)}"
+    check account_is_approved after account_ok: inv.iban == bank.get("iban"), "invoice asks for {inv.iban}, the approved account is {bank.get('iban')}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "HOLD", "vendor": vendor_id, "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "PAY", "vendor": vendor_id, "to": inv.iban, "itc": tax["itc"]}
+    return decision
+
+def tax_invoice(gstin, iban):
+    return (f"KESTREL OFFICE SUPPLIES  GSTIN {gstin}\nBill to: Velora Retail Pvt Ltd  GSTIN 27AABCV7731Q1ZN\n"
+            f"Place of supply: 27-Maharashtra\nToner and paper, HSN 4802  Taxable 10,000.00\nCGST 9% 900.00  SGST 9% 900.00\n"
+            f"Total 11,800.00\nRemit to: {iban}")
+
+def gst_read(gstin):
+    return model({"inv": {"supplier_gstin": gstin, "recipient_gstin": "27AABCV7731Q1ZN", "place_of_supply": "27",
+                          "taxable": 10000, "rate": 18, "cgst": 900, "sgst": 900, "igst": 0, "total": 11800}})
+
+def remit(gstin, iban):
+    return model({"inv": {"supplier_gstin": gstin, "iban": iban, "iban_quote": f"Remit to: {iban}"}})
+
+main:
+    good_iban, gstin = "DE68210501700012345678", "27AAKCK2240M1ZB"
+    letter = f"Kestrel Office Supplies has moved banks. From 1 November please remit to {good_iban}. Accounts team"
+    change = model({"req": {"vendor": "Kestrel Office Supplies", "new_iban": good_iban,
+                            "iban_quote": f"please remit to {good_iban}", "says_preapproved": False}})
+    show("Valid invoice, paid into the approved account", pay("V-240", tax_invoice(gstin, good_iban), letter,
+         "accounts@kestreloffice.com", gst_read(gstin), change, remit(gstin, good_iban)))
+
+    other = "GB60BARC20000055779911"
+    show("Both steps pass, invoice asks for a different account", pay("V-240", tax_invoice(gstin, other), letter,
+         "accounts@kestreloffice.com", gst_read(gstin), change, remit(gstin, other)))
+
+    sister = "27AAKCK2290M1Z1"
+    show("Both steps pass, invoice issued by another GSTIN", pay("V-240", tax_invoice(sister, good_iban), letter,
+         "accounts@kestreloffice.com", gst_read(sister), change, remit(sister, good_iban)))
+
+    show("Bank change sent from a look-alike domain", pay("V-240", tax_invoice(gstin, good_iban), letter,
+         "accounts@kestrel-office.com", gst_read(gstin), change, remit(gstin, good_iban)))

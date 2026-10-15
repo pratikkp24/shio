@@ -1,0 +1,78 @@
+# Lending: income from a bank statement. The model lists the salary credits; code checks each one is a real line of
+# the statement with that exact credit, re-adds the running balance to catch an edited statement, and computes the
+# income and the largest loan the EMI cap allows. An underwriter signs off every offer.
+
+from common import model, norm, money_eq, show
+
+POLICY = {"emi_share": 0.40, "rate": 0.105, "months": 60, "min_salaries": 3}
+
+type Credit:
+    date: str              # YYYY-MM-DD
+    amount: float          # the credit amount
+    line: str              # the whole statement line it is on, copied exactly
+
+type Salaries:
+    employer: str          # the employer named in the salary credits
+    credits: list[Credit]
+
+def rows(statement):
+    """Each statement line as (text, debit, credit, balance); the first line is the opening balance."""
+    out = []
+    for raw in statement.strip().splitlines():
+        f = [x.strip().replace(",", "") for x in raw.split("|")]
+        out.append((norm(raw), float(f[2] or 0), float(f[3] or 0), float(f[4])))
+    return out
+
+def balances_tie(statement):
+    r = rows(statement)
+    return all(money_eq(r[i - 1][3] - r[i][1] + r[i][2], r[i][3], 0.01) for i in range(1, len(r)))
+
+def is_credit_line(c, statement):
+    return any(norm(c.line) == t and money_eq(cr, c.amount) for t, _, cr, _ in rows(statement))
+
+def max_loan(income, existing_emi):
+    emi = POLICY["emi_share"] * income - existing_emi
+    r = POLICY["rate"] / 12
+    return max(0, int(emi * (1 - (1 + r) ** -POLICY["months"]) / r // 1000 * 1000))
+
+agent income(statement: str, employer: str, existing_emi: float, llm):
+    ledger_ok = balances_tie(statement)
+    read sal: Salaries by llm:
+        List every salary credit on this bank statement.
+
+        {statement}
+
+    check statement_arithmetic: ledger_ok, "running balance does not re-add: the statement may have been edited"
+    check credits_are_lines: all(is_credit_line(c, statement) for c in sal.credits), "a salary credit is not a statement line with that amount"
+    check from_employer: all(norm(employer) in norm(c.line) for c in sal.credits), "a credit is not from {employer}"
+    check enough_months: len({c.date[:7] for c in sal.credits}) >= POLICY["min_salaries"], "only {len(sal.credits)} salary month(s)"
+
+    rule offer:
+        if checks.failures():
+            return {"status": "REFER", "why": [c["detail"] for c in checks.failures()]}
+        monthly = min(c.amount for c in sal.credits)
+        return {"status": "ELIGIBLE (underwriter to sign)", "monthly_income": monthly, "max_loan": max_loan(monthly, existing_emi)}
+    return offer
+
+main:
+    stmt = """2026-07-01 | OPENING BALANCE | | | 12,400.00
+    2026-07-01 | NEFT SAL ORIONIX TECH PVT LTD | | 58,000.00 | 70,400.00
+    2026-07-05 | UPI RENT | 22,000.00 | | 48,400.00
+    2026-08-01 | NEFT SAL ORIONIX TECH PVT LTD | | 58,000.00 | 106,400.00
+    2026-08-12 | IMPS FROM SELF | | 40,000.00 | 146,400.00
+    2026-09-01 | NEFT SAL ORIONIX TECH PVT LTD | | 58,500.00 | 204,900.00"""
+    sal = lambda m, a: {"date": f"2026-{m}-01", "amount": a, "line": f"2026-{m}-01 | NEFT SAL ORIONIX TECH PVT LTD | | {a:,.2f} | " + {"07": "70,400.00", "08": "106,400.00", "09": "204,900.00"}[m]}
+    good = {"sal": {"employer": "Orionix Tech", "credits": [sal("07", 58000), sal("08", 58000), sal("09", 58500)]}}
+    show("Three salaries, statement ties out", income(stmt, "Orionix Tech", 6000, model(good)))
+
+    inflated = {"sal": {"employer": "Orionix Tech", "credits": [sal("07", 58000), sal("08", 85000), sal("09", 58500)]}}
+    show("Model misreads 58,000 as 85,000", income(stmt, "Orionix Tech", 6000, model(inflated)))
+
+    self_transfer = {"sal": {"employer": "Orionix Tech", "credits": [sal("07", 58000), sal("09", 58500),
+                     {"date": "2026-08-12", "amount": 40000, "line": "2026-08-12 | IMPS FROM SELF | | 40,000.00 | 146,400.00"}]}}
+    show("Model counts a transfer from self as salary", income(stmt, "Orionix Tech", 6000, model(self_transfer)))
+
+    edited = stmt.replace("| 58,500.00 |", "| 98,500.00 |")
+    doctored = {"sal": {"employer": "Orionix Tech", "credits": [sal("07", 58000), sal("08", 58000),
+                dict(sal("09", 98500), line="2026-09-01 | NEFT SAL ORIONIX TECH PVT LTD | | 98,500.00 | 204,900.00")]}}
+    show("Applicant edited September's salary", income(edited, "Orionix Tech", 6000, model(doctored)))

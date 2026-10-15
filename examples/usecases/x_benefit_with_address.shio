@@ -1,0 +1,66 @@
+# Workflow: a welfare benefit application with the applicant's home address. Check eligibility (benefit_eligibility),
+# clean the address (address_cleanup), verify the applicant (kyc), then check across all three: the cleaned PIN code
+# lies in the district the form claims, and the verified person is the applicant. ELIGIBLE or OFFICER REVIEW.
+
+from common import model, grounded, norm, show
+from uses import use, step_ok
+
+benefit = use("benefit_eligibility")
+address = use("address_cleanup")
+kyc = use("kyc")
+
+PIN_DISTRICT = {"344022": "Tilwara", "344024": "Tilwara", "305801": "Kesar Nagar", "302012": "Jaipur"}   # postal directory
+
+type Claimed:
+    district: str          # the district the applicant gives on the form
+    quote: str             # the words giving it, copied exactly
+
+agent apply(form: str, certificate: str, home: str, kyc_form: str, id_text: str, ben_llm, addr_llm, kyc_llm, llm):
+    decision = benefit.eligibility(form, certificate, ben_llm)
+    cleaned = address.clean({"home": home}, addr_llm)["home"]
+    person = kyc.kyc(kyc_form, id_text, kyc_llm)
+    read d: Claimed by llm:
+        Which district does the applicant give on this benefit form?
+
+        {form}
+
+    check eligible: step_ok(decision, "ELIGIBLE"), "eligibility: {decision.get('status')} {decision.get('why', '')}"
+    check address_clean: step_ok(cleaned, "CLEAN"), "address: {cleaned.get('why')}"
+    check verified: step_ok(person, "APPROVE"), "identity: {person.get('status')} {person.get('why', '')}"
+    check district_read: grounded(d.quote, form) and norm(d.district) in norm(d.quote), "district {d.district} is not on the form as read"
+    check lives_there after address_clean: norm(PIN_DISTRICT.get(cleaned.get("pincode"))) == norm(d.district), "address PIN {cleaned.get('pincode')} is in {PIN_DISTRICT.get(cleaned.get('pincode'), 'no district on file')}, form claims {d.district}"
+    check same_person after verified: kyc.same_name(person.get("name", ""), decision.get("applicant", "")), "verified {person.get('name')}, applicant {decision.get('applicant')}"
+
+    rule outcome:
+        if checks.failures():
+            return {"status": "OFFICER REVIEW", "why": [c["detail"] for c in checks.failures()], "note": "an officer decides; nothing is refused here"}
+        return {"status": "ELIGIBLE", "applicant": decision["applicant"], "district": d.district, "pincode": cleaned["pincode"],
+                "income": decision["income"], "household": decision["household"]}
+    return outcome
+
+main:
+    form = "Applicant: Meera Joshi\nHousehold members: 4\nTotal annual income (Rs): 186,000\nDistrict: Tilwara"
+    cert = "OFFICE OF THE TEHSILDAR, TILWARA\nCertificate No. INC/2026/TW/004512   Date: 2026-03-11\nThis is to certify that " \
+           "the annual income of the family of Meera Joshi, resident of Tilwara, is Rs 186,000 from all sources."
+    f_ok = {"applicant": "Meera Joshi", "household_size": 4, "annual_income": 186000, "district": "Tilwara"}
+    c_ok = {"holder": "Meera Joshi", "annual_income": 186000, "income_line": "is Rs 186,000 from all sources",
+            "district": "Tilwara", "issued": "2026-03-11", "cert_no": "INC/2026/TW/004512"}
+    ben = model({"f": f_ok, "c": c_ok})
+    home = "h.no 14, ward 3, station road, tilwara, rajasthan 344 022"
+    a_ok = {"a": {"home": {"pincode": "344022", "city": "Tilwara", "state": "Rajasthan"}}}
+    kform = "Name: Meera Joshi\nDate of birth: 1981-11-23\nPAN: BQRPJ4471M"
+    card = "INCOME TAX DEPARTMENT\nMEERA JOSHI\nDOB 23/11/1981\nPermanent Account Number BQRPJ4471M"
+    meera = {"name": "MEERA JOSHI", "dob": "1981-11-23", "pan": "BQRPJ4471M"}
+    ids = {"applied": dict(meera, name="Meera Joshi"), "card": meera, "card_again": meera}
+    d_ok = {"d": {"district": "Tilwara", "quote": "District: Tilwara"}}
+    show("Eligible, lives in the district, identity verified", apply(form, cert, home, kform, card, ben, model(a_ok), model(ids), model(d_ok)))
+
+    city = "Flat 7, Malviya Nagar, Jaipur, Rajasthan 302012"
+    show("Every step passes, but the address is in Jaipur", apply(form, cert, city, kform, card, ben,
+         model({"a": {"home": {"pincode": "302012", "city": "Jaipur", "state": "Rajasthan"}}}), model(ids), model(d_ok)))
+
+    neha = {"name": "NEHA KAPOOR", "dob": "1996-01-02", "pan": "BCDPK5678L"}
+    show("Verified ID belongs to someone else", apply(form, cert, home, "Name: Neha Kapoor", "NEHA KAPOOR", ben, model(a_ok),
+         model({"applied": dict(neha, name="Neha Kapoor"), "card": neha, "card_again": neha}), model(d_ok)))
+
+    show("Model 'fixes' a typed PIN (O for 0)", apply(form, cert, home.replace("344 022", "344 O22"), kform, card, ben, model(a_ok), model(ids), model(d_ok)))

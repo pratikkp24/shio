@@ -1,0 +1,59 @@
+# Workflow: from meeting notes to a review meeting. Read the action items from the notes (meeting_actions), book the
+# follow-up review from the email thread (meeting_scheduler), and process an owner's leave request (leave_request).
+# Cross-step checks, per action item: it is not due on a day its owner is on approved leave, and it is due by the
+# booked review. Code decides CONFIRM, REASSIGN (an item clashes) or HOLD (a step did not go through).
+
+from common import model, show
+from uses import use, step_ok
+
+minutes = use("meeting_actions")
+scheduler = use("meeting_scheduler")
+leave_step = use("leave_request")
+
+DIRECTORY = {"Tomi Okafor": "t.okafor@northwind.example", "Keiko Tan": "k.tan@northwind.example", "Lena Hart": "l.hart@northwind.example"}
+
+agent follow_through(notes: str, attendees: list, held: str, thread: str, leave_email: str, leave_sender: str, act_llm, cal_llm, hr_llm):
+    acts = minutes.actions(notes, attendees, held, act_llm)
+    review = scheduler.schedule(thread, cal_llm)
+    off = leave_step.leave(leave_email, leave_sender, hr_llm)
+    away = {leave_sender: leave_step.workdays(off["from"], off["to"])} if step_ok(off, "APPROVE") else {}
+    review_day = review.get("start_utc", "")[:10]
+
+    check notes_clean: step_ok(acts, "SEND TO OWNERS"), "action items dropped: {acts.get('dropped')}"
+    check review_booked: step_ok(review, "BOOK"), "review meeting: {review.get('why')}"
+    for i, item in enumerate(acts["items"]):
+        check not_on_leave[i]: item["due"] not in away.get(DIRECTORY.get(item["owner"]), []), "{item['owner']} is on approved leave on {item['due']}, when '{item['task']}' is due"
+        check before_review[i] after review_booked: item["due"] <= review_day, "'{item['task']}' is due {item['due']}, after the review on {review_day}"
+
+    rule decision:
+        clashes = [c["detail"] for c in checks.failures() if c["name"] in ("not_on_leave", "before_review")]
+        if not (notes_clean and review_booked):
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        if clashes:
+            return {"status": "REASSIGN", "why": clashes, "review": review["start_utc"]}
+        return {"status": "CONFIRM", "review": review["start_utc"], "items": [f"{x['owner']}: {x['task']} by {x['due']}" for x in acts["items"]]}
+    return decision
+
+main:
+    team = ["Lena Hart", "Tomi Okafor", "Keiko Tan"]
+    notes = ("1. Q4 hiring plan. Tomi Okafor to circulate the revised headcount sheet by 2026-10-26.\n"
+             "2. Vendor contract. Keiko Tan will send the redlined MSA to procurement by 2026-10-28.")
+    item = lambda owner, task, due, quote: {"has_action": True, "owner": owner, "task": task, "due": due, "quote": quote}
+    keiko = item("Keiko Tan", "send redlined MSA", "2026-10-28", "Keiko Tan will send the redlined MSA to procurement by 2026-10-28")
+    good = {"a": {0: item("Tomi Okafor", "circulate headcount sheet", "2026-10-26", "Tomi Okafor to circulate the revised headcount sheet by 2026-10-26"), 1: keiko}}
+    thread = ("From: noor@kestrel.example\nTo: felix@kestrel.example, maren@kestrel.example\n"
+              "Can we do a 30 minute review of the Q4 action items on Thursday 29 Oct? Felix and Maren both needed.")
+    slot = {"p": {"start_utc": "2026-10-29T13:00", "duration_min": 30, "duration_quote": "30 minute review",
+                  "attendees": ["noor@kestrel.example", "felix@kestrel.example", "maren@kestrel.example"]}}
+    mail = "Hi Sam, I'd like annual leave from 2026-10-22 to 2026-10-23. That's 2 days. Thanks, Tomi"
+    hol = {"r": {"start": "2026-10-22", "end": "2026-10-23", "half_days": [], "kind": "annual", "days_stated": 2,
+                 "quote": "annual leave from 2026-10-22 to 2026-10-23"}}
+    t = "t.okafor@northwind.example"
+    show("Items due around the leave, review booked", follow_through(notes, team, "2026-10-16", thread, mail, t, model(good), model(slot), model(hol)))
+
+    clash = notes.replace("2026-10-26", "2026-10-23")
+    due_away = {"a": {0: item("Tomi Okafor", "circulate headcount sheet", "2026-10-23", "Tomi Okafor to circulate the revised headcount sheet by 2026-10-23"), 1: keiko}}
+    show("Item due on a day its owner is on approved leave", follow_through(clash, team, "2026-10-16", thread, mail, t, model(due_away), model(slot), model(hol)))
+
+    early = {"p": dict(slot["p"], start_utc="2026-10-29T10:00")}
+    show("Review slot is 6am in New York", follow_through(notes, team, "2026-10-16", thread, mail, t, model(good), model(early), model(hol)))

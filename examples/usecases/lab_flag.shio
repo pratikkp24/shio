@@ -1,0 +1,75 @@
+# Clinical records: lab report transcription. The model reads each analyte's value and unit from the report text,
+# twice and blind; code converts units, compares with the reference ranges and flags values for a clinician.
+# Reads that disagree or are not on the report go back to staff. The output flags; it never diagnoses.
+
+from common import model, grounded, numbers, show
+
+RANGES = {   # analyte -> reference range in the canonical unit, and factors that convert to it
+    "glucose": {"unit": "mmol/L", "low": 3.9, "high": 5.5, "to": {"mmol/L": 1.0, "mg/dL": 1 / 18.016}},
+    "creatinine": {"unit": "mg/dL", "low": 0.6, "high": 1.2, "to": {"mg/dL": 1.0, "umol/L": 1 / 88.4}},
+    "potassium": {"unit": "mmol/L", "low": 3.5, "high": 5.1, "to": {"mmol/L": 1.0, "mEq/L": 1.0}},
+    "hemoglobin": {"unit": "g/dL", "low": 12.0, "high": 17.5, "to": {"g/dL": 1.0, "g/L": 0.1}},
+}
+
+type Result:
+    value: float?          # the number reported; null if this analyte is not on the report
+    unit: str?             # the unit exactly as printed, e.g. mg/dL
+    line: str              # the report line it comes from, copied exactly; empty if not on the report
+
+def canonical(analyte, value, unit):
+    return round(value * RANGES[analyte]["to"][unit], 2)
+
+agent transcribe(report: str, llm):
+    results, rereads = [], []
+    for a in RANGES:
+        read first[a]: Result by llm:
+            From this lab report, read the result for {a}: the value and the unit as printed.
+
+            {report}
+        read second[a]: Result by llm blind:
+            Independently read the {a} result (value and unit) from this lab report.
+
+            {report}
+
+        check agree[a]: first.value == second.value and first.unit == second.unit, "{a}: reads differ ({first.value} {first.unit} / {second.value} {second.unit})"
+        check on_report[a]: first.value is None or (grounded(first.line, report) and first.value in numbers(first.line)), "{a}: {first.value} is not on the report line quoted"
+        check known_unit[a]: first.value is None or first.unit in RANGES[a]["to"], "{a}: unit {first.unit} has no conversion"
+
+        rule entry[a]:
+            if checks.failed("agree", a) or checks.failed("on_report", a) or checks.failed("known_unit", a):
+                return {"reread": [c["detail"] for c in checks.failures(a)]}
+            if first.value is None:
+                return {}
+            v, r = canonical(a, first.value, first.unit), RANGES[a]
+            flag = "LOW" if v < r["low"] else "HIGH" if v > r["high"] else None
+            return {"result": f"{a} {v} {r['unit']} (ref {r['low']}-{r['high']})" + (f" {flag}" if flag else ""), "flag": flag}
+        rereads += entry.get("reread", [])
+        if "result" in entry:
+            results.append(entry)
+    if rereads:
+        return {"status": "RE-READ BY STAFF", "why": rereads}
+    flags = [e["result"] for e in results if e["flag"]]
+    return {"status": "FLAGGED FOR CLINICIAN REVIEW" if flags else "NO FLAGS: file for routine sign-off",
+            "flags": flags, "transcribed": [e["result"] for e in results],
+            "note": "Values compared with reference ranges only. This is not a diagnosis."}
+
+main:
+    report = "Patient: R. Valdane   Collected 2026-10-14\nGlucose (fasting)  92 mg/dL\nCreatinine  88 umol/L\nHemoglobin  138 g/L"
+    ok = {"glucose": {"value": 92, "unit": "mg/dL", "line": "Glucose (fasting)  92 mg/dL"},
+          "creatinine": {"value": 88, "unit": "umol/L", "line": "Creatinine  88 umol/L"},
+          "potassium": {"value": None, "unit": None, "line": ""},
+          "hemoglobin": {"value": 138, "unit": "g/L", "line": "Hemoglobin  138 g/L"}}
+    show("Mixed units, all in range", transcribe(report, model({"first": ok, "second": ok})))
+
+    high = report.replace("92 mg/dL", "131 mg/dL")
+    hi = dict(ok, glucose={"value": 131, "unit": "mg/dL", "line": "Glucose (fasting)  131 mg/dL"})
+    show("Glucose above range", transcribe(high, model({"first": hi, "second": hi})))
+
+    decimal = "Patient: T. Morrow\nCreatinine  1.4 mg/dL\nPotassium  4.2 mmol/L"
+    right = {"glucose": {"value": None, "unit": None, "line": ""}, "hemoglobin": {"value": None, "unit": None, "line": ""},
+             "creatinine": {"value": 1.4, "unit": "mg/dL", "line": "Creatinine  1.4 mg/dL"},
+             "potassium": {"value": 4.2, "unit": "mmol/L", "line": "Potassium  4.2 mmol/L"}}
+    show("First read drops the decimal (1.4 read as 14)", transcribe(decimal, model({"first": dict(right, creatinine={"value": 14, "unit": "mg/dL", "line": "Creatinine  1.4 mg/dL"}), "second": right})))
+
+    invented = dict(ok, potassium={"value": 5.9, "unit": "mmol/L", "line": "Potassium 5.9 mmol/L"})
+    show("Model invents a potassium result", transcribe(report, model({"first": invented, "second": invented})))

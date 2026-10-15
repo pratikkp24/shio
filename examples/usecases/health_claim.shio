@@ -1,0 +1,70 @@
+# Health insurance: claim adjudication. The model reads the claim form; the member table, the plan's covered codes,
+# fee schedule and annual limit, and the provider network decide what is paid. A claim that cannot be paid goes to
+# a claims reviewer with the reasons; nothing is denied automatically and nothing medical is judged.
+
+from common import model, grounded, parse_date, show
+
+MEMBERS = {
+    "HM-20431": {"plan": "Silver", "start": "2026-01-01", "end": "2026-12-31", "used": 4700.00},
+    "HM-30877": {"plan": "Silver", "start": "2025-07-01", "end": "2026-06-30", "used": 410.00},
+    "HM-41566": {"plan": "Silver", "start": "2026-03-01", "end": "2027-02-28", "used": 900.00},
+}
+PLANS = {"Silver": {"annual_limit": 5000.00, "fees": {"99213": 180.00, "73030": 420.00, "97110": 95.00}}}  # code -> max fee
+NETWORK = {"PRV-5512": "Lakeside Family Clinic", "PRV-6120": "Northgate Imaging"}
+GATES = ("member_known", "active_on_date", "code_on_form", "covered", "in_network")   # failures here go to review
+
+type Claim:
+    member_id: str
+    service_date: str      # date of service, YYYY-MM-DD
+    procedure_code: str    # the procedure code on the claim line
+    code_line: str         # the claim line with that code, copied exactly
+    provider_id: str
+    billed: float          # the amount billed on the line
+
+def fees(mid):
+    return PLANS[MEMBERS[mid]["plan"]]["fees"] if mid in MEMBERS else {}
+
+def remaining(mid):
+    return PLANS[MEMBERS[mid]["plan"]]["annual_limit"] - MEMBERS[mid]["used"] if mid in MEMBERS else 0.0
+
+agent adjudicate(form: str, llm):
+    read c: Claim by llm:
+        Read this health insurance claim form.
+
+        {form}
+
+    check member_known: c.member_id in MEMBERS, "no member {c.member_id}"
+    check active_on_date: c.member_id in MEMBERS and MEMBERS[c.member_id]["start"] <= str(parse_date(c.service_date)) <= MEMBERS[c.member_id]["end"], "coverage not active on {c.service_date}"
+    check code_on_form: grounded(c.code_line, form) and c.procedure_code in c.code_line, "code {c.procedure_code} is not on the form as read"
+    check covered: c.procedure_code in fees(c.member_id), "code {c.procedure_code} is not covered by the plan"
+    check in_network: c.provider_id in NETWORK, "provider {c.provider_id} is not in network"
+    check within_fee: c.billed <= fees(c.member_id).get(c.procedure_code, 0), "billed {c.billed:.2f}, fee schedule allows {fees(c.member_id).get(c.procedure_code, 0):.2f}"
+    check within_limit: c.billed <= remaining(c.member_id), "billed {c.billed:.2f}, {remaining(c.member_id):.2f} left of the annual limit"
+
+    rule outcome:
+        gate = [f["detail"] for f in checks.failures() if f["name"] in GATES]
+        if c is None or gate:
+            return {"action": "DENY-TO-REVIEWER", "why": gate or ["claim form could not be read"]}
+        payable = round(min(c.billed, fees(c.member_id)[c.procedure_code], remaining(c.member_id)), 2)
+        if within_fee and within_limit:
+            return {"action": "PAY", "member": c.member_id, "amount": payable, "provider": NETWORK[c.provider_id]}
+        return {"action": "PARTIAL", "member": c.member_id, "amount": payable, "why": [f["detail"] for f in checks.failures()]}
+    return outcome
+
+main:
+    form = "CLAIM  Member: HM-41566  Provider: PRV-5512 Lakeside Family Clinic\nDate of service: 2026-09-22\nLine 1: 99213 Office visit, established patient  $165.00"
+    ok = {"c": {"member_id": "HM-41566", "service_date": "2026-09-22", "procedure_code": "99213", "provider_id": "PRV-5512",
+                "billed": 165.00, "code_line": "Line 1: 99213 Office visit, established patient  $165.00"}}
+    show("Covered visit, in network", adjudicate(form, model(ok)))
+
+    near = "CLAIM  Member: HM-20431  Provider: PRV-6120 Northgate Imaging\nDate of service: 2026-10-02\nLine 1: 73030 X-ray shoulder  $410.00"
+    show("Annual limit nearly used", adjudicate(near, model({"c": {"member_id": "HM-20431", "service_date": "2026-10-02",
+         "procedure_code": "73030", "provider_id": "PRV-6120", "billed": 410.00, "code_line": "Line 1: 73030 X-ray shoulder  $410.00"}})))
+
+    lapsed = "CLAIM  Member: HM-30877  Provider: PRV-7781 Harbor Wellness Spa\nDate of service: 2026-08-14\nLine 1: 97110 Therapeutic exercise  $95.00"
+    show("Coverage lapsed, out of network", adjudicate(lapsed, model({"c": {"member_id": "HM-30877", "service_date": "2026-08-14",
+         "procedure_code": "97110", "provider_id": "PRV-7781", "billed": 95.00, "code_line": "Line 1: 97110 Therapeutic exercise  $95.00"}})))
+
+    excluded = form.replace("99213 Office visit, established patient  $165.00", "15780 Dermabrasion, cosmetic  $165.00")
+    misread = {"c": dict(ok["c"], code_line="Line 1: 99213 Dermabrasion, cosmetic  $165.00")}
+    show("Model reads an excluded code as a covered one", adjudicate(excluded, model(misread)))

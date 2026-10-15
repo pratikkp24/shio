@@ -1,0 +1,68 @@
+# Freight audit: a carrier's LTL invoice against the contracted rate card. The model reads the lane, weight and
+# charges; code checks the invoice adds up, then reprices it from the rate card (weight break, minimum, contracted
+# fuel %, accessorials that are both contracted and on the delivery record) and short-pays any overbilling.
+
+from common import model, money_eq, show
+
+RATE_CARD = {      # lane -> weight breaks (from kg, USD per kg) and minimum charge
+    ("DAL", "ATL"): {"breaks": [(0, 0.42), (500, 0.36), (1000, 0.31)], "min": 95.0},
+    ("DAL", "PHX"): {"breaks": [(0, 0.39), (500, 0.33), (1000, 0.29)], "min": 90.0},
+}
+FUEL_PCT = 18.0                                         # contracted fuel surcharge, % of line haul
+ACCESSORIALS = {"liftgate": 75.0, "residential": 45.0, "inside delivery": 90.0}
+DELIVERIES = {"PRO-660213": {"lane": ("DAL", "ATL"), "kg": 1240, "services": {"liftgate"}},      # TMS / POD record
+              "PRO-660251": {"lane": ("DAL", "PHX"), "kg": 610, "services": set()}}
+
+type Charge:
+    name: str              # the accessorial as named on the invoice, lower case
+    amount: float
+
+type FreightInvoice:
+    pro: str               # the PRO (shipment) number, e.g. PRO-660213
+    line_haul: float
+    fuel_pct: float        # the fuel surcharge percentage billed
+    fuel: float            # the fuel surcharge amount billed
+    accessorials: list[Charge]
+    total: float           # the invoice total
+
+def expected(pro):
+    d = DELIVERIES[pro]
+    card = RATE_CARD[d["lane"]]
+    rate = [r for w, r in card["breaks"] if d["kg"] >= w][-1]
+    haul = max(round(d["kg"] * rate, 2), card["min"])
+    return round(haul * (1 + FUEL_PCT / 100) + sum(ACCESSORIALS[s] for s in d["services"]), 2)
+
+agent audit(invoice: str, llm):
+    read f: FreightInvoice by llm:
+        Read this freight invoice: PRO number, line haul, fuel surcharge (% and amount), each accessorial, total.
+
+        {invoice}
+
+    check known_pro: f.pro in DELIVERIES, "no delivery record for {f.pro}"
+    check adds_up: money_eq(f.line_haul + f.fuel + sum(a.amount for a in f.accessorials), f.total, 0.01), "charges add to {f.line_haul + f.fuel + sum(a.amount for a in f.accessorials):.2f}, total says {f.total:.2f}"
+    check fuel_rate: f.fuel_pct <= FUEL_PCT, "fuel billed at {f.fuel_pct}%, contract is {FUEL_PCT}%"
+    check accessorials_owed: f.pro not in DELIVERIES or all(a.name in DELIVERIES[f.pro]["services"] for a in f.accessorials), "billed for services not on the delivery record: {[a.name for a in f.accessorials if a.name not in DELIVERIES[f.pro]['services']]}"
+    check total_matches: f.pro not in DELIVERIES or f.total <= expected(f.pro) + 0.01, "billed {f.total:.2f}, rate card gives {expected(f.pro):.2f}"
+
+    rule settle:
+        if not (known_pro and adds_up):
+            return {"action": "REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        owed = expected(f.pro)
+        if f.total > owed + 0.01:
+            return {"action": "SHORT PAY", "pro": f.pro, "pay": owed, "overbilled": round(f.total - owed, 2), "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "PAY", "pro": f.pro, "pay": f.total}
+    return settle
+
+main:
+    inv = "Ridgeback Freight Lines  PRO-660213  DAL-ATL  1,240 kg\nLine haul 384.40\nFuel surcharge 18% 69.19\nLiftgate 75.00\nTOTAL 528.59"
+    good = {"f": {"pro": "PRO-660213", "line_haul": 384.40, "fuel_pct": 18, "fuel": 69.19, "accessorials": [{"name": "liftgate", "amount": 75.0}], "total": 528.59}}
+    show("Invoice matches the rate card", audit(inv, model(good)))
+
+    fuel = "Ridgeback Freight Lines  PRO-660251  DAL-PHX  610 kg\nLine haul 201.30\nFuel surcharge 24% 48.31\nTOTAL 249.61"
+    show("Fuel surcharge above contract", audit(fuel, model({"f": {"pro": "PRO-660251", "line_haul": 201.30, "fuel_pct": 24, "fuel": 48.31, "accessorials": [], "total": 249.61}})))
+
+    extra = inv.replace("TOTAL 528.59", "Residential delivery 45.00\nInside delivery 90.00\nTOTAL 663.59")
+    show("Accessorials that were never performed", audit(extra, model({"f": dict(good["f"], total=663.59, accessorials=[
+        {"name": "liftgate", "amount": 75.0}, {"name": "residential", "amount": 45.0}, {"name": "inside delivery", "amount": 90.0}])})))
+
+    show("Model misreads the total", audit(inv, model({"f": dict(good["f"], total=582.59)})))

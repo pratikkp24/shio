@@ -1,0 +1,49 @@
+# Knowledge base Q&A with citations. The answer goes out only if every citation points to a real passage, quotes it
+# exactly, and every number in the answer appears in a quoted passage. Otherwise the user gets "I don't know".
+
+from common import model, grounded, numbers, show
+
+DOCS = {
+    "hr-12": "Employees accrue 1.75 days of paid leave per month of service, up to 21 days a year.",
+    "hr-14": "Unused leave of up to 5 days may be carried into the next calendar year.",
+    "it-03": "Laptops are replaced every 36 months, or sooner if repair costs exceed 40% of a new device.",
+}
+
+type Citation:
+    doc: str               # the passage id
+    quote: str             # the words used from it, copied exactly
+
+type Answer:
+    text: str
+    citations: list[Citation]
+
+agent ask(question: str, llm):
+    passages = "\n".join(f"[{k}] {v}" for k, v in DOCS.items())
+    read a: Answer by llm:
+        Answer the question from these passages only, citing each one you use.
+
+        {passages}
+
+        Question: {question}
+
+    check cites_something: len(a.citations) > 0, "no citations"
+    check real_passages: all(c.doc in DOCS for c in a.citations), "cites a passage that does not exist"
+    check quotes_exact: all(c.doc in DOCS and grounded(c.quote, DOCS[c.doc]) for c in a.citations), "a quote is not in its passage"
+    check numbers_sourced: all(n in sum((numbers(c.quote) for c in a.citations), []) for n in numbers(a.text)), "the answer has a number no citation contains"
+
+    rule reply:
+        if checks.failures():
+            return {"answer": "I don't know from the documents I have.", "held_back": a.text, "why": [c["detail"] for c in checks.failures()]}
+        return {"answer": a.text, "sources": [c.doc for c in a.citations]}
+    return reply
+
+main:
+    good = {"a": {"text": "You can carry over up to 5 days of unused leave.",
+                  "citations": [{"doc": "hr-14", "quote": "Unused leave of up to 5 days may be carried into the next calendar year"}]}}
+    show("Grounded answer", ask("How much leave can I carry over?", model(good)))
+    hallucinated = {"a": {"text": "You can carry over up to 10 days, or 15 with manager approval.",
+                          "citations": [{"doc": "hr-14", "quote": "Unused leave of up to 5 days may be carried"}]}}
+    show("Answer with invented numbers", ask("How much leave can I carry over?", model(hallucinated)))
+    fake_doc = {"a": {"text": "Laptops are replaced every 24 months.",
+                      "citations": [{"doc": "it-09", "quote": "Laptops are replaced every 24 months"}]}}
+    show("Citation to a passage that does not exist", ask("When is my laptop replaced?", model(fake_doc)))

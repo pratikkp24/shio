@@ -1,0 +1,69 @@
+# Lettings: tenant applications. The model reads pay figures from the payslips and the employer reference; code checks
+# every figure is printed on the payslips, the year-to-date totals tie out month to month, and the reference comes
+# from the employer's own email domain. Then rent-to-income decides APPROVE, GUARANTOR or DECLINE.
+
+from common import model, numbers, money_eq, domain, norm, show
+
+EMPLOYERS = {"corvid analytics ltd": "corvid-analytics.example", "harbourline logistics": "harbourline.example"}   # company register
+APPROVE_RATIO, GUARANTOR_RATIO = 0.35, 0.45      # rent as a share of average monthly net pay
+
+type Payslip:
+    month: str             # pay period, YYYY-MM
+    gross: float           # gross pay this period
+    net: float             # net (take-home) pay this period
+    ytd_gross: float       # gross pay year to date, as printed
+
+type Application:
+    employer: str          # employer name as printed on the payslips
+    payslips: list[Payslip]            # in date order, oldest first
+    reference_email: str   # the email address the employment reference came from
+
+def ties_out(slips):
+    return all(money_eq(b.ytd_gross, a.ytd_gross + b.gross, 1) for a, b in zip(slips, slips[1:]))
+
+agent apply(payslips: str, reference: str, rent: float, llm):
+    read a: Application by llm:
+        Read these payslips and the employment reference.
+
+        {payslips}
+
+        Reference:
+        {reference}
+
+    check three_months: len(a.payslips) >= 3, "only {len(a.payslips)} payslips"
+    check figures_printed: all(s.gross in numbers(payslips) and s.net in numbers(payslips) for s in a.payslips), "a pay figure read is not on the payslips"
+    check ytd_ties_out: ties_out(a.payslips), "year-to-date gross does not add up month to month"
+    check steady: max(s.net for s in a.payslips) <= 1.15 * min(s.net for s in a.payslips), "net pay swings from {min(s.net for s in a.payslips)} to {max(s.net for s in a.payslips)}"
+    check known_employer: norm(a.employer) in EMPLOYERS, "employer {a.employer} is not on the company register"
+    check reference_domain: norm(a.employer) in EMPLOYERS and domain(a.reference_email) == EMPLOYERS[norm(a.employer)], "reference sent from {a.reference_email}, not the employer's domain"
+
+    rule decide:
+        if checks.failures():
+            return {"action": "REFER", "why": [c["detail"] for c in checks.failures()]}
+        ratio = round(rent / (sum(s.net for s in a.payslips) / len(a.payslips)), 2)
+        if ratio <= APPROVE_RATIO:
+            return {"action": "APPROVE", "rent_to_income": ratio}
+        return {"action": "GUARANTOR" if ratio <= GUARANTOR_RATIO else "DECLINE", "rent_to_income": ratio}
+    return decide
+
+main:
+    slips = ("CORVID ANALYTICS LTD  Payslip 2026-07  Gross 5,600.00  Net 4,210.40  YTD gross 39,200.00\n"
+             "CORVID ANALYTICS LTD  Payslip 2026-08  Gross 5,600.00  Net 4,210.40  YTD gross 44,800.00\n"
+             "CORVID ANALYTICS LTD  Payslip 2026-09  Gross 5,850.00  Net 4,377.90  YTD gross 50,650.00")
+    ref = "From: hr@corvid-analytics.example\nWe confirm Nadia Ferreira has been employed as Senior Analyst since 2023."
+    p = [{"month": "2026-07", "gross": 5600, "net": 4210.40, "ytd_gross": 39200}, {"month": "2026-08", "gross": 5600, "net": 4210.40, "ytd_gross": 44800},
+         {"month": "2026-09", "gross": 5850, "net": 4377.90, "ytd_gross": 50650}]
+    good = {"a": {"employer": "Corvid Analytics Ltd", "payslips": p, "reference_email": "hr@corvid-analytics.example"}}
+    show("Affordable, verified", apply(slips, ref, 1350, model(good)))
+    show("Same applicant, higher rent", apply(slips, ref, 1750, model(good)))
+
+    forged = slips.replace("Gross 5,850.00  Net 4,377.90", "Gross 8,850.00  Net 6,377.90")
+    edited = [p[0], p[1], {"month": "2026-09", "gross": 8850, "net": 6377.90, "ytd_gross": 50650}]
+    show("Last payslip edited upward", apply(forged, ref, 1750, model({"a": dict(good["a"], payslips=edited)})))
+
+    gmail = "From: corvid.hr.team@gmail.example\nTo whom it may concern: Nadia is a valued Senior Analyst."
+    show("Reference from a personal address", apply(slips, gmail, 1350, model({"a": dict(good["a"], reference_email="corvid.hr.team@gmail.example")})))
+
+    misread = [p[0], p[1], dict(p[2], net=4877.90)]
+    show("Model misreads a net figure", apply(slips, ref, 1350, model({"a": dict(good["a"], payslips=misread)})))
+    show("Rent well beyond income", apply(slips, ref, 2200, model(good)))

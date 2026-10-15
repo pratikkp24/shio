@@ -1,0 +1,65 @@
+# HR: leave requests by email. The model reads the dates and leave type; code counts the working days (half days
+# included), checks them against the HR balance table, blackout dates and how many teammates are already off, and
+# against the day count the employee wrote. Anything that does not clear goes to the manager.
+
+from datetime import timedelta
+from common import model, grounded, parse_date, TODAY, show
+
+BALANCE = {"t.okafor@northwind.example": {"annual": 12.0, "sick": 8.0}, "j.berg@northwind.example": {"annual": 2.0, "sick": 8.0}}
+TEAM_OFF = {"2026-11-12": ["Ines Moreau"], "2026-11-13": ["Ines Moreau", "Paul Lindqvist"], "2026-12-30": ["Ines Moreau"]}
+BLACKOUT = [("2026-12-28", "2026-12-31", "year-end close")]
+MAX_OFF = 2                # at most this many people on the team off on any one day, the requester included
+
+type Leave:
+    start: str             # first day off, YYYY-MM-DD
+    end: str               # last day off, YYYY-MM-DD
+    half_days: list[str]   # days within the range taken as half days, YYYY-MM-DD
+    kind: "annual" | "sick" | "unpaid" | "other"
+    days_stated: float?    # the number of days the employee says this is; null if they do not say
+    quote: str             # the sentence giving the dates, copied exactly
+
+def workdays(start, end):
+    s, e = parse_date(start), parse_date(end)
+    return [] if s is None or e is None else [str(s + timedelta(n)) for n in range((e - s).days + 1) if (s + timedelta(n)).weekday() < 5]
+
+def blocked(days):
+    return [f"{d} ({why})" for d in days for a, b, why in BLACKOUT if a <= d <= b]
+
+agent leave(email: str, sender: str, llm):
+    read r: Leave by llm:
+        Read this leave request and give the dates, the half days, the leave type and the day count if stated.
+
+        {email}
+
+    check known: sender in BALANCE, "{sender} has no leave record"
+    check dates_ok: len(workdays(r.start, r.end)) > 0 and parse_date(r.start) > TODAY, "dates {r.start} to {r.end} are not a future range"
+    check halves_inside: all(h in workdays(r.start, r.end) for h in r.half_days), "half days {r.half_days} fall outside the working days requested"
+    check count_agrees: r.days_stated is None or len(workdays(r.start, r.end)) - 0.5 * len(r.half_days) == r.days_stated, "employee says {r.days_stated} days, the dates read give {len(workdays(r.start, r.end)) - 0.5 * len(r.half_days)}"
+    check in_email: grounded(r.quote, email), "the dates are not quoted from the email"
+    check has_balance: sender in BALANCE and r.kind in BALANCE[sender] and BALANCE[sender][r.kind] >= len(workdays(r.start, r.end)) - 0.5 * len(r.half_days), "not enough {r.kind} leave left"
+    check no_blackout: not blocked(workdays(r.start, r.end)), "falls in a blackout: {blocked(workdays(r.start, r.end))}"
+    check team_cover: all(len(TEAM_OFF.get(d, [])) + 1 <= MAX_OFF for d in workdays(r.start, r.end)), "more than {MAX_OFF} of the team off on {[d for d in workdays(r.start, r.end) if len(TEAM_OFF.get(d, [])) + 1 > MAX_OFF]}"
+
+    rule decision:
+        days = len(workdays(r.start, r.end)) - 0.5 * len(r.half_days)
+        if checks.failures():
+            return {"action": "MANAGER", "days": days, "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "APPROVE", "from": r.start, "to": r.end, "days": days, "kind": r.kind}
+    return decision
+
+main:
+    t = "t.okafor@northwind.example"
+    mail = "Hi Sam, I'd like annual leave from 2026-11-02 to 2026-11-06, leaving at noon on the Friday. That's 4.5 days. Thanks, Tomi"
+    good = {"r": {"start": "2026-11-02", "end": "2026-11-06", "half_days": ["2026-11-06"], "kind": "annual", "days_stated": 4.5,
+                  "quote": "annual leave from 2026-11-02 to 2026-11-06"}}
+    show("Clean request", leave(mail, t, model(good)))
+
+    show("Model misreads the end date", leave(mail, t, model({"r": dict(good["r"], end="2026-11-09")})))
+
+    busy = "Could I take 2026-11-11 to 2026-11-13 as annual leave? 3 days. Tomi"
+    show("Two teammates already off", leave(busy, t, model({"r": {"start": "2026-11-11", "end": "2026-11-13", "half_days": [], "kind": "annual",
+                                                                  "days_stated": 3, "quote": "2026-11-11 to 2026-11-13 as annual leave"}})))
+
+    close = "Requesting annual leave 2026-12-28 to 2026-12-31 (4 days). Jonas"
+    show("Year-end close, low balance", leave(close, "j.berg@northwind.example", model({"r": {"start": "2026-12-28", "end": "2026-12-31",
+         "half_days": [], "kind": "annual", "days_stated": 4, "quote": "annual leave 2026-12-28 to 2026-12-31"}})))

@@ -1,0 +1,59 @@
+# Workflow: lab results to the pharmacy counter. Transcribe the patient's latest labs (lab_flag), check the order
+# against the formulary (formulary_check), then check across both: when the labs flag kidney function, a drug on the
+# renal-caution table goes to a pharmacist even if its dose is within the formulary maximum. Code never changes a dose.
+
+from common import model, show
+from uses import use, step_ok
+
+lab = use("lab_flag")
+pharmacy = use("formulary_check")
+
+RENAL_CAUTION = {"veltrazide"}             # drugs whose orders a pharmacist reviews when kidney function is flagged
+KIDNEY = {"creatinine"}                    # analytes that stand for kidney function
+LAB_DONE = ("FLAGGED FOR CLINICIAN REVIEW", "NO FLAGS: file for routine sign-off")
+
+def kidney_flags(labs):
+    return [f for f in labs.get("flags", []) if f.split(" ")[0] in KIDNEY]
+
+def drug_of(order):
+    return order.get("label", "").split(" ")[0]
+
+agent dispense(patient: str, report: str, rx: str, lab_llm, rx_llm):
+    labs = lab.transcribe(report, lab_llm)
+    order = pharmacy.check_order(patient, rx, rx_llm)
+
+    check same_patient: f"Patient: {patient}" in report, "the lab report is not for {patient}"
+    check labs_read: step_ok(labs, *LAB_DONE), "labs: {labs.get('status')} {labs.get('why', '')}"
+    check order_ok: step_ok(order, "DISPENSE"), "order: {order.get('why', '')}"
+    check renal_clear after labs_read: not (kidney_flags(labs) and drug_of(order) in RENAL_CAUTION), "{drug_of(order)} is on the renal-caution table and the labs flag {kidney_flags(labs)}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "PHARMACIST REVIEW", "patient": patient, "why": [c["detail"] for c in checks.failures()],
+                    "note": "the pharmacist decides; nothing here changes the dose"}
+        return {"action": "DISPENSE", "patient": patient, "label": order["label"], "kidney_flags": kidney_flags(labs)}
+    return decision
+
+def labs(creatinine, unit="mg/dL", second=None):
+    line = f"Creatinine  {creatinine:g} {unit}"
+    none = {"value": None, "unit": None, "line": ""}
+    first = {"glucose": {"value": 92, "unit": "mg/dL", "line": "Glucose (fasting)  92 mg/dL"},
+             "creatinine": {"value": creatinine, "unit": unit, "line": line}, "potassium": none,
+             "hemoglobin": {"value": 138, "unit": "g/L", "line": "Hemoglobin  138 g/L"}}
+    again = dict(first, creatinine=dict(first["creatinine"], value=second)) if second is not None else first
+    return {"first": first, "second": again}
+
+main:
+    report = "Patient: {p}   Collected 2026-10-14\nGlucose (fasting)  92 mg/dL\nCreatinine  {c}\nHemoglobin  138 g/L"
+    cori = "Rx  PT-7731  Corivastat 20 mg tablets - take 1 tablet once daily at night. 30 days."
+    c_ok = {"o": {"drug": "corivastat", "strength_mg": 20, "tablets_per_dose": 1, "frequency": "once daily", "rx_line": "Corivastat 20 mg tablets"}}
+    show("Normal labs, standard order", dispense("PT-7731", report.format(p="PT-7731", c="0.9 mg/dL"), cori, model(labs(0.9)), model(c_ok)))
+
+    velt = "Rx  PT-9050  Veltrazide 25 mg - 1 tablet once daily."
+    v_ok = {"o": {"drug": "veltrazide", "strength_mg": 25, "tablets_per_dose": 1, "frequency": "once daily", "rx_line": "Veltrazide 25 mg - 1 tablet once daily"}}
+    show("Renal-caution drug, kidney function normal", dispense("PT-9050", report.format(p="PT-9050", c="1.1 mg/dL"), velt, model(labs(1.1)), model(v_ok)))
+    show("Creatinine flagged, renal-caution drug within the maximum", dispense("PT-9050", report.format(p="PT-9050", c="1.6 mg/dL"), velt,
+         model(labs(1.6)), model(v_ok)))
+
+    show("Lab reads disagree (1.6 read as 16)", dispense("PT-9050", report.format(p="PT-9050", c="1.6 mg/dL"), velt,
+         model(labs(1.6, second=16)), model(v_ok)))

@@ -1,0 +1,86 @@
+# KYC onboarding: an applicant's form against their identity document. The model reads both; matching, the PAN
+# format and the age limit are code. A blind second read of the document guards against a misread digit; when the
+# two reads disagree, a third read sees both, and code accepts a value only if two of the three reads agree on it.
+
+import re
+from datetime import date
+from common import model, norm, parse_date, TODAY, show
+
+PAN = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")      # Indian PAN: 5 letters, 4 digits, 1 letter
+
+type Identity:
+    name: str              # full name exactly as printed
+    dob: str               # date of birth as YYYY-MM-DD
+    pan: str               # the PAN as printed, no spaces
+
+def same_name(a, b):
+    return sorted(norm(a).replace(".", " ").split()) == sorted(norm(b).replace(".", " ").split())
+
+def age(dob):
+    d = parse_date(dob)
+    return None if d is None else TODAY.year - d.year - ((TODAY.month, TODAY.day) < (d.month, d.day))
+
+agent kyc(form: str, id_text: str, llm):
+    read applied: Identity by llm:
+        Read the applicant's details from this application form.
+
+        {form}
+    read card: Identity by llm:
+        Read the details printed on this identity document.
+
+        {id_text}
+    read card_again: Identity by llm blind:
+        Independently read the name, date of birth and PAN on this document.
+
+        {id_text}
+
+    when disputed: card.pan != card_again.pan or card.dob != card_again.dob
+    if disputed:
+        read third: Identity by llm seeing card, card_again:
+            Two independent reads of this document disagree. Read the name, date of birth and PAN again,
+            character by character.
+
+            {id_text}
+
+    rule doc:                       # what the card says: two of three reads must agree on it
+        if not disputed:
+            return {"name": card.name, "dob": card.dob, "pan": card.pan, "reads": "two reads agree"}
+        for r in (card, card_again):
+            if third is not None and (third.pan, third.dob) == (r.pan, r.dob):
+                return {"name": r.name, "dob": r.dob, "pan": r.pan, "reads": "two of three reads agree"}
+        return None
+
+    check document_settled: doc is not None, "three reads of the card do not agree: {card.pan} / {card_again.pan} / {third.pan if third else '-'}"
+    check pan_format after document_settled: bool(PAN.match(doc["pan"])), "PAN {doc['pan']} is not a valid format"
+    check name_matches after document_settled: same_name(applied.name, doc["name"]), "form says {applied.name}, card says {doc['name']}"
+    check dob_matches after document_settled: applied.dob == doc["dob"], "form DOB {applied.dob}, card DOB {doc['dob']}"
+    check pan_matches after document_settled: applied.pan == doc["pan"], "form PAN {applied.pan}, card PAN {doc['pan']}"
+    check adult after document_settled: age(doc["dob"]) is not None and age(doc["dob"]) >= 18, "applicant is under 18 or DOB unreadable"
+
+    rule decision:
+        if document_settled and not adult and dob_matches:
+            return {"status": "REJECT", "why": "applicant is under 18"}
+        if checks.failures():
+            return {"status": "REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "APPROVE", "name": doc["name"], "pan": doc["pan"], "reads": doc["reads"]}
+    return decision
+
+main:
+    form = "Name: Priya R. Sharma\nDate of birth: 1994-03-07\nPAN: ABCPS1234K"
+    card = "INCOME TAX DEPARTMENT\nPRIYA R SHARMA\nDOB 07/03/1994\nPermanent Account Number ABCPS1234K"
+    ok = {"applied": {"name": "Priya R. Sharma", "dob": "1994-03-07", "pan": "ABCPS1234K"},
+          "card": {"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1234K"},
+          "card_again": {"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1234K"}}
+    show("Clean match", kyc(form, card, model(ok)))
+
+    misread = dict(ok, card={"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1284K"},
+                   third={"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1234K"})
+    show("One read misreads a digit; a third read settles it", kyc(form, card, model(misread)))
+
+    unsure = dict(misread, third={"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1264K"})
+    show("Three reads, three different PANs", kyc(form, card, model(unsure)))
+
+    minor_form = "Name: Arjun Mehta\nDate of birth: 2010-05-01\nPAN: AAAPM9876Q"
+    minor_card = "ARJUN MEHTA\nDOB 01/05/2010\nAAAPM9876Q"
+    minor = {k: {"name": "Arjun Mehta", "dob": "2010-05-01", "pan": "AAAPM9876Q"} for k in ("applied", "card", "card_again")}
+    show("Under 18", kyc(minor_form, minor_card, model(minor)))

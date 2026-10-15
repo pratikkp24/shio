@@ -1,0 +1,62 @@
+# Marketing: translation QA for a German campaign email. The model translates; code checks that every number and
+# price, every URL and every {placeholder} in the English survives, that the length is plausible, and that glossary
+# terms use the approved German. Anything off goes to a linguist instead of the send queue.
+
+import re
+from collections import Counter
+from common import model, numbers, show
+
+GLOSSARY = {"free shipping": "Kostenloser Versand", "aurora pro": "Aurora Pro", "gift card": "Geschenkkarte"}
+URL = re.compile(r"https?://\S+")
+PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
+RATIO = (0.8, 1.6)            # German runs longer than English; outside this a sentence was dropped or invented
+
+def de_numbers(s):
+    """Numbers in German formatting (1.299,50 -> 1299.5), ignoring URLs."""
+    s = URL.sub(" ", s)
+    return [float(n.replace(".", "").replace(",", ".")) for n in re.findall(r"\d[\d.]*(?:,\d+)?", s)]
+
+def missing_terms(src, out):
+    has = lambda term, text: re.search(r"\b" + re.escape(term.lower()) + r"\b", text.lower()) is not None
+    return [de for en, de in GLOSSARY.items() if has(en, src) and not has(de, out)]
+
+agent translate(source: str, llm):
+    src_numbers = Counter(numbers(URL.sub(" ", source)))
+    src_urls = sorted(URL.findall(source))
+    src_slots = sorted(PLACEHOLDER.findall(source))
+    read de: str by llm:
+        Translate this marketing email into German. Keep URLs and {{placeholders}} exactly as they are.
+
+        {source}
+
+    check numbers_kept: Counter(de_numbers(de)) == src_numbers, "numbers changed: source {sorted(src_numbers.elements())}, German {sorted(de_numbers(de))}"
+    check urls_kept: sorted(URL.findall(de)) == src_urls, "URLs changed: {sorted(set(URL.findall(de)) ^ set(src_urls))}"
+    check placeholders_kept: sorted(PLACEHOLDER.findall(de)) == src_slots, "placeholders changed: source {src_slots}, German {sorted(PLACEHOLDER.findall(de))}"
+    check length_sane: RATIO[0] <= len(de) / len(source) <= RATIO[1], "German is {len(de) / len(source):.2f}x the English length"
+    check glossary_used: not missing_terms(source, de), "approved terms missing: {missing_terms(source, de)}"
+
+    rule route:
+        if checks.failures():
+            return {"route": "LINGUIST", "why": [c["detail"] for c in checks.failures()]}
+        return {"route": "PUBLISH", "text": de}
+    return route
+
+main:
+    en = ("Hi {first_name}, the Aurora Pro is now just €49.99 until 30 November. Free shipping on orders over €100. "
+          "Shop now: https://shop.lumora.example/aurora-pro?utm=nov")
+    good = ("Hallo {first_name}, der Aurora Pro kostet jetzt nur 49,99 € bis zum 30. November. Kostenloser Versand "
+            "ab einem Bestellwert von 100 €. Jetzt kaufen: https://shop.lumora.example/aurora-pro?utm=nov")
+    show("Faithful translation", translate(en, model({"de": good})))
+
+    slipped = ("Hallo, der Aurora Pro kostet jetzt nur 39,99 € bis zum 30. November. Kostenloser Versand "
+               "ab einem Bestellwert von 100 €. Jetzt kaufen: https://shop.lumora.example/aurora-pro?utm=nov")
+    show("Price and name placeholder lost", translate(en, model({"de": slipped})))
+
+    localized = ("Hallo {first_name}, der Aurora Profi kostet jetzt nur 49,99 € bis zum 30. November. Gratisversand "
+                 "ab einem Bestellwert von 100 €. Jetzt kaufen: https://shop.lumora.example/de/aurora-profi?utm=nov")
+    show("Brand, glossary term and URL 'localized'", translate(en, model({"de": localized})))
+
+    gift = "Give a {gift_amount} gift card this season: https://shop.lumora.example/gift"
+    padded = ("Verschenken Sie diese Saison eine Geschenkkarte über {gift_amount}: https://shop.lumora.example/gift "
+              "Bonus: Mit dem Code LUMO50 sparen alle Neukunden 50 % auf ihre erste Bestellung, nur bis Sonntag!")
+    show("Model adds an offer that is not in the English", translate(gift, model({"de": padded})))

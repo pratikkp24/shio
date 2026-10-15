@@ -1,0 +1,42 @@
+# Finance: expense claims against receipts. The model reads the receipt; the claim is paid only if the receipt
+# total, the date and the category agree with what the employee claimed and with the travel policy.
+
+from common import model, money_eq, parse_date, show
+
+POLICY = {"meals": 75.0, "taxi": 60.0, "hotel": 220.0}          # per receipt, USD
+TRIP = ("2026-10-05", "2026-10-09")
+
+type Receipt:
+    merchant: str
+    date: str              # YYYY-MM-DD
+    total: float           # the amount paid, including tax and tip
+    category: "meals" | "taxi" | "hotel" | "alcohol" | "other"
+    line_items: list[float]
+
+agent expense(claim: dict, receipt_text: str, llm):
+    read r: Receipt by llm:
+        Read this receipt.
+
+        {receipt_text}
+
+    check adds_up: not r.line_items or money_eq(sum(r.line_items), r.total, 0.01), "line items add to {sum(r.line_items):.2f}, total says {r.total:.2f}"
+    check matches_claim: money_eq(r.total, claim["amount"]), "claimed {claim['amount']}, receipt total {r.total}"
+    check on_trip: parse_date(r.date) is not None and TRIP[0] <= r.date[:10] <= TRIP[1], "receipt dated {r.date}, outside the trip"
+    check allowed: r.category in POLICY, "category {r.category} is not reimbursable"
+    check under_limit: r.category in POLICY and r.total <= POLICY[r.category], "{r.total} is over the {r.category} limit"
+
+    rule outcome:
+        if not allowed:
+            return {"status": "REJECT", "why": f"{r.category} is not reimbursable"}
+        if checks.failures():
+            return {"status": "RETURN TO EMPLOYEE", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "PAY", "amount": r.total}
+    return outcome
+
+main:
+    receipt = "BLUE DOOR BISTRO  2026-10-07\nPasta 24.00\nSalad 12.50\nTip 7.30\nTOTAL 43.80"
+    good = {"r": {"merchant": "Blue Door Bistro", "date": "2026-10-07", "total": 43.80, "category": "meals", "line_items": [24.00, 12.50, 7.30]}}
+    show("Dinner on the trip", expense({"amount": 43.80}, receipt, model(good)))
+    show("Claim typed as 143.80", expense({"amount": 143.80}, receipt, model(good)))
+    bar = "THE ANCHOR PUB 2026-10-08\n4 x IPA 36.00\nTOTAL 36.00"
+    show("Bar tab", expense({"amount": 36.0}, bar, model({"r": {"merchant": "The Anchor", "date": "2026-10-08", "total": 36.0, "category": "alcohol", "line_items": [36.0]}})))

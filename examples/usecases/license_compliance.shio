@@ -1,0 +1,61 @@
+# Open-source license review before a release. The model names each dependency's license from its LICENSE file;
+# code only accepts the name if the file contains that license's own text marker, maps it to the allow/deny table,
+# and sends copyleft in a proprietary product, or anything it cannot confirm, to legal.
+
+from common import model, grounded, show
+
+SPDX = {                   # SPDX id -> words from the license's own text, and its class
+    "MIT": ("Permission is hereby granted, free of charge", "permissive"),
+    "Apache-2.0": ("Apache License, Version 2.0", "permissive"),
+    "BSD-3-Clause": ("Neither the name of the copyright holder", "permissive"),
+    "LGPL-3.0": ("GNU LESSER GENERAL PUBLIC LICENSE", "weak copyleft"),
+    "GPL-3.0": ("GNU GENERAL PUBLIC LICENSE", "copyleft"),
+    "AGPL-3.0": ("GNU AFFERO GENERAL PUBLIC LICENSE", "copyleft"),
+}
+
+type License:
+    spdx: str              # the SPDX identifier, e.g. MIT, Apache-2.0, GPL-3.0
+    quote: str             # the line of the file that names or grants it, copied exactly
+
+agent review(product: dict, licenses: dict, llm):
+    results = {}
+    for pkg, text in licenses.items():
+        read lic[pkg]: License by llm:
+            Which license is this? Give the SPDX identifier and the line that shows it.
+
+            {text}
+
+        check known[pkg]: lic.spdx in SPDX, "{pkg}: '{lic.spdx}' is not in the license table"
+        check marker[pkg]: lic.spdx in SPDX and grounded(SPDX[lic.spdx][0], text), "{pkg}: file does not contain the {lic.spdx} text"
+        check quoted[pkg]: grounded(lic.quote, text), "{pkg}: quoted line is not in the file"
+
+        rule verdict[pkg]:
+            unconfirmed = [c["detail"] for c in checks.failures() if c.get("key") == pkg]
+            if lic is None or unconfirmed:
+                return ("LEGAL", "; ".join(unconfirmed) or f"{pkg}: license unreadable")
+            kind = SPDX[lic.spdx][1]
+            if kind != "permissive" and product["distribution"] == "proprietary":
+                return ("LEGAL", f"{pkg}: {lic.spdx} ({kind}) in a proprietary product")
+            return ("OK", f"{pkg}: {lic.spdx}")
+        results[pkg] = verdict
+
+    flagged = [note for status, note in results.values() if status == "LEGAL"]
+    if flagged:
+        return {"release": "LEGAL", "product": product["name"], "why": flagged}
+    return {"release": "SHIP", "product": product["name"], "licenses": [note for _, note in results.values()]}
+
+main:
+    mit = "MIT License\nCopyright (c) 2024 Ravel Labs\nPermission is hereby granted, free of charge, to any person obtaining a copy..."
+    apache = "Apache License, Version 2.0, January 2004\nhttp://www.apache.org/licenses/\nTERMS AND CONDITIONS FOR USE..."
+    gpl = "GNU GENERAL PUBLIC LICENSE\nVersion 3, 29 June 2007\nNote: the 1.x releases of this library were MIT licensed.\n..."
+    agpl = "GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3, 19 November 2007\nEveryone is permitted to copy and distribute..."
+    app = {"name": "Tidewater Console", "distribution": "proprietary"}
+
+    ok = {"lic": {"tinyqueue": {"spdx": "MIT", "quote": "MIT License"}, "parsekit": {"spdx": "Apache-2.0", "quote": "Apache License, Version 2.0"}}}
+    show("Permissive dependencies", review(app, {"tinyqueue": mit, "parsekit": apache}, model(ok)))
+
+    misled = {"lic": {"tinyqueue": {"spdx": "MIT", "quote": "MIT License"}, "fastgrid": {"spdx": "MIT", "quote": "were MIT licensed"}}}
+    show("Model reads 'MIT' from a GPL file's note", review(app, {"tinyqueue": mit, "fastgrid": gpl}, model(misled)))
+
+    right = {"lic": {"metricsd": {"spdx": "AGPL-3.0", "quote": "GNU AFFERO GENERAL PUBLIC LICENSE"}}}
+    show("AGPL in a proprietary product", review(app, {"metricsd": agpl}, model(right)))

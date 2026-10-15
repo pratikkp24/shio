@@ -1,0 +1,65 @@
+# Order entry: a customer emails an order. The model reads the SKUs and quantities with the words they came from;
+# code checks every SKU is in the catalog, every quantity meets the MOQ and pack multiple, and the order fits the
+# customer's remaining credit. Only then is a sales order created; otherwise we confirm with the customer.
+
+from common import model, grounded, numbers, show
+
+CATALOG = {        # sku -> unit price (USD), minimum order quantity, pack size
+    "BRK-2210": {"price": 4.20, "moq": 100, "pack": 50},
+    "BRK-2215": {"price": 5.10, "moq": 100, "pack": 50},
+    "HNG-0480": {"price": 12.75, "moq": 24, "pack": 12},
+}
+CUSTOMERS = {"purchasing@hallworth-fittings.example": {"limit": 25000.0, "open": 21800.0}}
+
+type Line:
+    sku: str               # the product code as written, e.g. BRK-2210
+    qty: int               # the number of units ordered
+    quote: str             # the words of the email this line comes from, copied exactly
+
+type Order:
+    lines: list[Line]
+
+def value(lines):
+    return round(sum(CATALOG[l.sku]["price"] * l.qty for l in lines if l.sku in CATALOG), 2)
+
+def bad_qty(l):
+    p = CATALOG.get(l.sku)
+    return p is not None and (l.qty < p["moq"] or l.qty % p["pack"] != 0)
+
+agent order_entry(email: str, sender: str, llm):
+    account = CUSTOMERS.get(sender)
+    read o: Order by llm:
+        Read the order in this customer email. One line per product, with the quantity.
+
+        {email}
+
+    check has_lines: len(o.lines) > 0, "no order lines found"
+    check skus_known: all(l.sku in CATALOG for l in o.lines), "not in the catalog: {[l.sku for l in o.lines if l.sku not in CATALOG]}"
+    check lines_quoted: all(grounded(l.quote, email) and l.sku in l.quote and l.qty in numbers(l.quote) for l in o.lines), "a line's SKU or quantity is not in the words it quotes"
+    check pack_ok: not any(bad_qty(l) for l in o.lines), "below MOQ or not a pack multiple: {[(l.sku, l.qty) for l in o.lines if bad_qty(l)]}"
+    check known_customer: account is not None, "{sender} has no trading account"
+    check within_credit: account is None or account["open"] + value(o.lines) <= account["limit"], "order {value(o.lines):,.2f} on top of {account['open']:,.2f} open exceeds the {account['limit']:,.0f} limit"
+
+    rule outcome:
+        if checks.failures():
+            return {"action": "CONFIRM WITH CUSTOMER", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "CREATE ORDER", "lines": [(l.sku, l.qty) for l in o.lines], "value": value(o.lines)}
+    return outcome
+
+main:
+    buyer = "purchasing@hallworth-fittings.example"
+    email = "Hi, please send 200 x BRK-2210 and 48 x HNG-0480 to our Leeds site by Friday. Thanks, Imogen Hale"
+    good = {"o": {"lines": [{"sku": "BRK-2210", "qty": 200, "quote": "200 x BRK-2210"},
+                            {"sku": "HNG-0480", "qty": 48, "quote": "48 x HNG-0480"}]}}
+    show("Clean order", order_entry(email, buyer, model(good)))
+
+    misread = {"o": {"lines": [{"sku": "BRK-2201", "qty": 200, "quote": "200 x BRK-2210"},
+                               {"sku": "HNG-0480", "qty": 48, "quote": "48 x HNG-0480"}]}}
+    show("Model transposes two SKU digits", order_entry(email, buyer, model(misread)))
+
+    odd = "Can we get 130 of the BRK-2215 brackets please? Imogen"
+    show("Quantity not a pack multiple", order_entry(odd, buyer, model({"o": {"lines": [{"sku": "BRK-2215", "qty": 130, "quote": "130 of the BRK-2215"}]}})))
+
+    big = "Urgent: 600 x BRK-2215 and 96 x HNG-0480 for the Q4 refit. Imogen"
+    lines = [{"sku": "BRK-2215", "qty": 600, "quote": "600 x BRK-2215"}, {"sku": "HNG-0480", "qty": 96, "quote": "96 x HNG-0480"}]
+    show("Order exceeds the credit limit", order_entry(big, buyer, model({"o": {"lines": lines}})))

@@ -1,0 +1,62 @@
+# Manufacturing: incoming quality inspection. The model reads each sample's measured dimensions from the inspector's
+# report, one sample at a time, with the report row it read them from. Code compares each to the drawing tolerances
+# and applies the sampling plan's accept/reject numbers; a sample it cannot verify sends the lot to reinspection.
+
+from common import model, grounded, numbers, show
+
+SPEC = {"bore_mm": (12.00, 0.05), "length_mm": (80.0, 0.20)}    # nominal, +/- tolerance (drawing BR-7714 rev C)
+PLAN = {"n": 8, "accept": 1, "reject": 3}     # illustrative double-sampling plan: <=1 accept, >=3 reject, else 2nd sample
+
+type Sample:
+    bore_mm: float         # the measured bore diameter in mm
+    length_mm: float       # the measured overall length in mm
+    row: str               # the report row for this sample, copied exactly
+
+def in_tol(dim, x):
+    nominal, tol = SPEC[dim]
+    return abs(x - nominal) <= tol + 1e-9
+
+agent inspect_lot(lot: str, report: str, llm):
+    samples = [f"S{i}" for i in range(1, PLAN["n"] + 1)]
+    for sid in samples:
+        read m[sid]: Sample by llm:
+            From this inspection report, read sample {sid} only.
+
+            {report}
+        check verified[sid]: grounded(m.row, report) and m.row.split()[0] == sid and m.bore_mm in numbers(m.row) and m.length_mm in numbers(m.row), "{sid}: values {m.bore_mm}/{m.length_mm} are not what row '{m.row}' says"
+        check in_spec[sid]: in_tol("bore_mm", m.bore_mm) and in_tol("length_mm", m.length_mm), "{sid}: bore {m.bore_mm}, length {m.length_mm} out of tolerance"
+
+    rule disposition:
+        unverified = [s for s in samples if checks.failed("verified", s)]
+        defects = [s for s in samples if s not in unverified and checks.failed("in_spec", s)]
+        why = [c["detail"] for c in checks.failures()]
+        if unverified:
+            return {"lot": lot, "action": "REINSPECT", "why": why}
+        if len(defects) <= PLAN["accept"]:
+            return {"lot": lot, "action": "ACCEPT LOT", "defects": len(defects), "why": why}
+        if len(defects) >= PLAN["reject"]:
+            return {"lot": lot, "action": "REJECT", "defects": len(defects), "why": why}
+        return {"lot": lot, "action": "REINSPECT", "note": "draw the second sample", "defects": len(defects), "why": why}
+    return disposition
+
+def report_and_answers(values):
+    rows = [f"S{i} {b:.2f} {l:.2f}" for i, (b, l) in enumerate(values, 1)]
+    answers = {f"S{i}": {"bore_mm": b, "length_mm": l, "row": r} for i, ((b, l), r) in enumerate(zip(values, rows), 1)}
+    return "Sample  Bore  Length\n" + "\n".join(rows), answers
+
+main:
+    good = [(12.01, 80.05), (11.98, 79.92), (12.03, 80.10), (12.00, 80.00), (11.97, 80.12), (12.02, 79.95), (12.04, 80.08), (11.99, 80.02)]
+    report, ans = report_and_answers(good)
+    show("Lot in tolerance", inspect_lot("LOT-3307", report, model({"m": ans})))
+
+    bad = good[:2] + [(12.09, 80.05), (12.08, 80.01), (11.93, 80.00)] + good[5:]
+    report, ans = report_and_answers(bad)
+    show("Three oversize/undersize bores", inspect_lot("LOT-3308", report, model({"m": ans})))
+
+    two = good[:6] + [(12.07, 80.00), (12.00, 80.31)]
+    report, ans = report_and_answers(two)
+    show("Two defects: second sample needed", inspect_lot("LOT-3309", report, model({"m": ans})))
+
+    report, ans = report_and_answers(bad)
+    ans["S4"] = dict(ans["S4"], bore_mm=12.03)
+    show("Model misreads 12.08 as 12.03", inspect_lot("LOT-3308", report, model({"m": ans})))

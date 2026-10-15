@@ -1,0 +1,70 @@
+# Real estate: commercial lease abstraction. The model reads base rent, escalation and term, each with its clause,
+# and the lease's own rent table. Code checks every figure is in its clause, recomputes the rent for each year and
+# ties it to the table. The abstract is filed only if it all agrees; otherwise a lease analyst reconciles it.
+
+from common import model, grounded, numbers, money_eq, show
+
+type Figure:
+    value: float           # the figure (currency amount, percent, or years)
+    clause: str            # the sentence it comes from, copied exactly
+
+type Row:
+    year: int              # lease year, 1 = first year
+    rent: float            # annual rent the table gives for that year
+
+type Lease:
+    base_rent: Figure      # annual rent in lease year 1
+    escalation_pct: Figure # percent increase at each review
+    every_years: Figure    # years between reviews
+    term_years: Figure     # length of the term in years
+    table: list[Row]       # the rent schedule table, as printed
+
+FIELDS = ("base_rent", "escalation_pct", "every_years", "term_years")
+
+def schedule(base, pct, every, term):
+    return {y: round(base * (1 + pct / 100) ** ((y - 1) // int(every)), 2) for y in range(1, int(term) + 1)}
+
+def off_rows(l):
+    want = schedule(l.base_rent.value, l.escalation_pct.value, l.every_years.value, l.term_years.value)
+    got = {r.year: r.rent for r in l.table}
+    return [f"year {y}: clauses give {want[y]:,.2f}, table says {got.get(y)}" for y in want if not money_eq(got.get(y), want[y], 1)]
+
+agent abstract(lease: str, llm):
+    read l: Lease by llm:
+        Abstract this commercial lease: base rent, escalation, review interval, term, each with the exact clause,
+        and the rent schedule table.
+
+        {lease}
+
+    for f in FIELDS:
+        check cited[f]: grounded(getattr(l, f).clause, lease), "{f}: clause not found in the lease"
+        check figure_in_clause[f]: getattr(l, f).value in numbers(getattr(l, f).clause), "{f}: {getattr(l, f).value} is not in its clause"
+    check table_printed: all(r.rent in numbers(lease) for r in l.table), "a table rent is not printed in the lease"
+    check table_ties: not off_rows(l), "rent table: {'; '.join(off_rows(l))}"
+
+    rule filed:
+        if checks.failures():
+            return {"status": "ANALYST REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "ABSTRACT FILED", "base_rent": l.base_rent.value, "escalation": f"{l.escalation_pct.value}% every {l.every_years.value:.0f} yr",
+                "term_years": l.term_years.value, "total_rent": round(sum(r.rent for r in l.table), 2)}
+    return filed
+
+main:
+    lease = ("4.1 The Tenant shall pay an annual base rent of 120,000.00 in the first lease year.\n"
+             "4.2 The rent shall increase by 3% every 2 years on the review date.\n"
+             "2.1 The term is 6 years from the commencement date.\n"
+             "Schedule 2 Rent: Year 1 120,000.00; Year 2 120,000.00; Year 3 123,600.00; Year 4 123,600.00; Year 5 127,308.00; Year 6 127,308.00")
+    rows = [{"year": y, "rent": r} for y, r in enumerate([120000, 120000, 123600, 123600, 127308, 127308], 1)]
+    good = {"l": {"base_rent": {"value": 120000, "clause": "annual base rent of 120,000.00 in the first lease year"},
+                  "escalation_pct": {"value": 3, "clause": "The rent shall increase by 3% every 2 years"},
+                  "every_years": {"value": 2, "clause": "The rent shall increase by 3% every 2 years"},
+                  "term_years": {"value": 6, "clause": "The term is 6 years from the commencement date"}, "table": rows}}
+    show("Clauses and rent table agree", abstract(lease, model(good)))
+
+    show("Model reads 3.5% for 3%", abstract(lease, model({"l": dict(good["l"], escalation_pct={"value": 3.5, "clause": "The rent shall increase by 3% every 2 years"})})))
+
+    show("Model misses the 2-year interval", abstract(lease, model({"l": dict(good["l"], every_years={"value": 1, "clause": "The rent shall increase by 3% every 2 years"})})))
+
+    typo = lease.replace("Year 5 127,308.00", "Year 5 128,308.00")
+    bad_rows = [dict(r, rent=128308) if r["year"] == 5 else r for r in rows]
+    show("The lease's own table is wrong", abstract(typo, model({"l": dict(good["l"], table=bad_rows)})))

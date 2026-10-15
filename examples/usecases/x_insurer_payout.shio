@@ -1,0 +1,73 @@
+# Workflow: paying out a member's reimbursement claim. Adjudicate the claim (health_claim), verify the claimant (kyc),
+# then check across both and the payee register: the claimant is the member, and the money goes only to the member's
+# registered account with no unconfirmed bank change open. PAY or HOLD. (vendor_bank_change's master holds suppliers,
+# not members or providers, so bank changes are read from the payee register here.)
+
+import re
+from common import model, grounded, show
+from uses import use, step_ok
+
+claims = use("health_claim")
+kyc = use("kyc")
+
+PAYEES = {"HM-41566": {"pan": "ABCPS1234K", "account": "447100982231"},          # member -> PAN and registered account
+          "HM-20431": {"pan": "BCDPK5678L", "account": "552019903317"}}
+BANK_CHANGES = {"HM-20431": {"to": "990011223344", "status": "callback not yet made"}}   # requested, not confirmed
+
+type Payee:
+    account: str           # the account the form asks the money to go to, digits only
+    quote: str             # the words giving it, copied exactly
+
+def digits(s):
+    return re.sub(r"\D", "", str(s or ""))
+
+agent payout(form: str, kyc_form: str, id_text: str, claim_llm, kyc_llm, llm):
+    paid = claims.adjudicate(form, claim_llm)
+    person = kyc.kyc(kyc_form, id_text, kyc_llm)
+    member = paid.get("member")
+    read pay: Payee by llm:
+        Which bank account does this claim form ask the reimbursement to be paid into?
+
+        {form}
+
+    check claim_paid: step_ok(paid, "PAY", "PARTIAL"), "claim: {paid.get('action')} {paid.get('why', '')}"
+    check verified: step_ok(person, "APPROVE"), "identity: {person.get('status')} {person.get('why', '')}"
+    check account_read: grounded(pay.quote, form) and digits(pay.account) in digits(pay.quote), "account {pay.account} is not on the form as read"
+    check claimant_is_member after claim_paid, verified: PAYEES.get(member, {}).get("pan") == person.get("pan"), "verified PAN {person.get('pan')} is not member {member}'s"
+    check registered_account after claim_paid: digits(pay.account) == PAYEES.get(member, {}).get("account"), "form asks for {pay.account}; {member}'s registered account is {PAYEES.get(member, {}).get('account')}"
+    check no_open_change after claim_paid: member not in BANK_CHANGES, "bank change for {member} to {BANK_CHANGES.get(member, {}).get('to')}: {BANK_CHANGES.get(member, {}).get('status')}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "HOLD", "member": member, "why": [c["detail"] for c in checks.failures()], "note": "do not pay to a new account until it is confirmed"}
+        return {"action": "PAY", "member": member, "amount": paid["amount"], "to_account": PAYEES[member]["account"]}
+    return decision
+
+main:
+    line = "Line 1: 99213 Office visit, established patient  $165.00"
+    form = f"CLAIM  Member: HM-41566  Provider: PRV-5512 Lakeside Family Clinic\nDate of service: 2026-09-22\n{line}\n" \
+           "Paid by member. Reimburse to account 4471 0098 2231."
+    c_ok = {"c": {"member_id": "HM-41566", "service_date": "2026-09-22", "procedure_code": "99213", "provider_id": "PRV-5512",
+                  "billed": 165.00, "code_line": line}}
+    kform = "Name: Priya R. Sharma\nDate of birth: 1994-03-07\nPAN: ABCPS1234K"
+    card = "INCOME TAX DEPARTMENT\nPRIYA R SHARMA\nDOB 07/03/1994\nPermanent Account Number ABCPS1234K"
+    me = {"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1234K"}
+    ids = {"applied": dict(me, name="Priya R. Sharma"), "card": me, "card_again": me}
+    p_ok = {"pay": {"account": "447100982231", "quote": "Reimburse to account 4471 0098 2231"}}
+    show("Covered claim, registered account", payout(form, kform, card, model(c_ok), model(ids), model(p_ok)))
+
+    swapped = form.replace("4471 0098 2231", "6620 1187 4409")
+    show("Both steps pass, but the form names a new account", payout(swapped, kform, card, model(c_ok), model(ids),
+         model({"pay": {"account": "662011874409", "quote": "Reimburse to account 6620 1187 4409"}})))
+
+    lapsed = "CLAIM  Member: HM-30877  Provider: PRV-7781 Harbor Wellness Spa\nDate of service: 2026-08-14\n" \
+             "Line 1: 97110 Therapeutic exercise  $95.00\nReimburse to account 4471 0098 2231."
+    show("Claim step fails: coverage lapsed, out of network", payout(lapsed, kform, card, model({"c": {"member_id": "HM-30877",
+         "service_date": "2026-08-14", "procedure_code": "97110", "provider_id": "PRV-7781", "billed": 95.00,
+         "code_line": "Line 1: 97110 Therapeutic exercise  $95.00"}}), model(ids), model(p_ok)))
+
+    other = form.replace("HM-41566", "HM-20431").replace("4471 0098 2231", "5520 1990 3317")
+    neha = {"name": "NEHA KAPOOR", "dob": "1996-01-02", "pan": "BCDPK5678L"}
+    show("Registered account, but a bank change is still unconfirmed", payout(other, "Name: Neha Kapoor", "NEHA KAPOOR",
+         model({"c": dict(c_ok["c"], member_id="HM-20431")}), model({"applied": dict(neha, name="Neha Kapoor"), "card": neha, "card_again": neha}),
+         model({"pay": {"account": "552019903317", "quote": "Reimburse to account 5520 1990 3317"}})))

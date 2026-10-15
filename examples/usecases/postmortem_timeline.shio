@@ -1,0 +1,61 @@
+# Incident postmortems: checking a draft before it is published. The model extracts the draft's timeline and the
+# durations it states; code checks every event is a line in the incident log with the same timestamp, the events are
+# in order, and time-to-detect and time-to-mitigate recomputed from the timestamps match what the draft says.
+
+from datetime import datetime
+from common import model, grounded, numbers, show
+
+type Event:
+    at: str                # timestamp as YYYY-MM-DDTHH:MM:SSZ
+    kind: "start" | "detected" | "mitigated" | "other"
+    log_line: str          # the log line this event comes from, copied exactly
+
+type Timeline:
+    events: list[Event]    # in the order the draft lists them
+    stated_ttd_min: float  # time to detect the draft states, minutes
+    stated_ttm_min: float  # time to mitigate the draft states, minutes (from start)
+
+def ts(s):
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ")
+
+def minutes(events, a, b):
+    t = {e.kind: ts(e.at) for e in events if e.kind in (a, b)}
+    return round((t[b] - t[a]).total_seconds() / 60, 1)
+
+agent review(draft: str, log: str, llm):
+    read tl: Timeline by llm:
+        Extract the timeline from this postmortem draft, each event with the log line it cites, and the time to
+        detect and time to mitigate the draft states.
+
+        {draft}
+
+    check one_of_each: all(sum(e.kind == k for e in tl.events) == 1 for k in ("start", "detected", "mitigated")), "need exactly one start, detected and mitigated event"
+    check in_log: all(grounded(e.log_line, log) for e in tl.events), "not in the log: {[e.log_line for e in tl.events if not grounded(e.log_line, log)]}"
+    check same_time: all(e.log_line.startswith(e.at) for e in tl.events), "timestamp differs from its log line: {[e.at for e in tl.events if not e.log_line.startswith(e.at)]}"
+    check in_order: [e.at for e in tl.events] == sorted(e.at for e in tl.events), "events are not in time order"
+    check ttd_right: tl.stated_ttd_min in numbers(draft) and minutes(tl.events, "start", "detected") == tl.stated_ttd_min, "draft says detected in {tl.stated_ttd_min} min; log says {minutes(tl.events, 'start', 'detected')}"
+    check ttm_right: tl.stated_ttm_min in numbers(draft) and minutes(tl.events, "start", "mitigated") == tl.stated_ttm_min, "draft says mitigated in {tl.stated_ttm_min} min; log says {minutes(tl.events, 'start', 'mitigated')}"
+
+    rule verdict:
+        if tl is None or checks.failures():
+            return {"status": "FIX", "why": [c["detail"] for c in checks.failures()] or ["timeline unreadable"]}
+        return {"status": "PUBLISH", "ttd_min": tl.stated_ttd_min, "ttm_min": tl.stated_ttm_min}
+    return verdict
+
+main:
+    lines = ["2026-10-12T09:02:00Z deploy cart-svc v4.18 rolled out to 100%",
+             "2026-10-12T09:11:00Z ALERT checkout 5xx rate 7.2% above 2%",
+             "2026-10-12T09:19:00Z rollback cart-svc to v4.17 started",
+             "2026-10-12T09:27:00Z checkout 5xx rate 0.3%, alert resolved"]
+    log = "\n".join(lines)
+    E = lambda line, kind: {"at": line[:20], "kind": kind, "log_line": line}
+    good = [E(lines[0], "start"), E(lines[1], "detected"), E(lines[3], "mitigated")]
+    draft = "Impact began 09:02 with the v4.18 rollout. Detected after 9 minutes by the 5xx alert. Mitigated by rollback; 25 minutes from start."
+    show("Draft agrees with the log", review(draft, log, model({"tl": {"events": good, "stated_ttd_min": 9, "stated_ttm_min": 25}})))
+
+    rosy = "Impact began 09:02. Our alerting detected it within 4 minutes. Mitigated 25 minutes from start."
+    show("Draft understates time to detect", review(rosy, log, model({"tl": {"events": good, "stated_ttd_min": 4, "stated_ttm_min": 25}})))
+
+    invented = good[:2] + [{"at": "2026-10-12T09:15:00Z", "kind": "mitigated", "log_line": "2026-10-12T09:15:00Z feature flag cart_v2 disabled"}]
+    draft3 = "Impact began 09:02. Detected after 9 minutes. Mitigated at 09:15 by disabling a flag, 13 minutes from start."
+    show("Model invents a mitigation step", review(draft3, log, model({"tl": {"events": invented, "stated_ttd_min": 9, "stated_ttm_min": 13}})))

@@ -1,0 +1,80 @@
+# Workflow: a building permit and the builder behind it. Check the application (building_permit) and the construction
+# contract (contract), then check across both and the municipal contractor register: the contractor named on the permit
+# is the party under contract and holds a current licence. ISSUE (to the planning officer for sign-off) or HOLD.
+# (supplier_certificate's supplier table has no builders, so the licence is checked against the register here.)
+
+import re
+from common import model, grounded, norm, parse_date, TODAY, show
+from uses import use, step_ok
+
+planning = use("building_permit")
+legal = use("contract")
+
+REGISTER = {"VMC/CL/2291": {"name": "Arvind Buildcon Pvt Ltd", "expiry": "2027-03-31"},
+            "VMC/CL/1874": {"name": "Sona Constructions", "expiry": "2026-06-30"}}      # licensed contractors
+
+type Builder:
+    name: str              # the contractor's name as written
+    licence: str?          # the contractor licence number, if given
+    quote: str             # the words naming the contractor, copied exactly
+
+def firm(s):
+    return " ".join(w for w in re.sub(r"[.,]", "", norm(s)).split() if w not in ("pvt", "ltd", "private", "limited", "llp"))
+
+agent permit_file(file_no: str, form: str, drawings: str, contract: str, plan_llm, law_llm, llm):
+    scrutiny = planning.permit(file_no, form, drawings, plan_llm)
+    terms = legal.review(contract, law_llm)
+    read on_permit: Builder by llm:
+        Which contractor does this permit application name, and with what licence number?
+
+        {form}
+    read on_contract: Builder by llm blind:
+        Who is the contractor party to this construction contract?
+
+        {contract}
+
+    check plans_ok: step_ok(scrutiny, "ACCEPT FOR SCRUTINY"), "permit: {scrutiny.get('status')} {scrutiny.get('why', scrutiny.get('fix', ''))}"
+    check contract_ok: step_ok(terms, "SIGN"), "contract: {terms.get('verdict')} {terms.get('flags', '')}"
+    check names_read: grounded(on_permit.quote, form) and grounded(on_contract.quote, contract) and firm(on_permit.name) in firm(on_permit.quote) and firm(on_contract.name) in firm(on_contract.quote), "contractor names not as written"
+    check same_contractor: firm(on_permit.name) == firm(on_contract.name), "permit names {on_permit.name}, contract is with {on_contract.name}"
+    check licensed: on_permit.licence in REGISTER and firm(REGISTER[on_permit.licence]["name"]) == firm(on_permit.name), "licence {on_permit.licence} is not registered to {on_permit.name}"
+    check licence_current after licensed: parse_date(REGISTER[on_permit.licence]["expiry"]) > TODAY, "licence {on_permit.licence} expired {REGISTER[on_permit.licence]['expiry']}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "file": file_no, "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "ISSUE", "file": file_no, "contractor": REGISTER[on_permit.licence]["name"], "licence": on_permit.licence,
+                "to": "planning officer for sign-off"}
+    return decision
+
+main:
+    form = "BPA-2026-1187  Zone: R1  Plot area: 300 sq m  Built-up (all floors): 420 sq m  Floors: G+1 (2)\nSetbacks: front 5.0 m, rear 3.0 m, " \
+           "sides 1.8 m / 2.0 m\nContractor: Arvind Buildcon Pvt Ltd, licence VMC/CL/2291"
+    sheet = "AREA STATEMENT (Sheet A-01)  Zone R1 | Plot 300.00 m2 | Total BUA 420.00 m2 | 2 floors | Front 5.0 | Rear 3.0 | Side 1.8"
+    figs = {"zone": "R1", "plot_sqm": 300, "built_up_sqm": 420, "floors": 2, "front_m": 5.0, "rear_m": 3.0, "side_m": 1.8}
+    plans = model({"f": figs, "d": figs})
+    deal = """Agreement between Ritu Malhotra (Owner) and Arvind Buildcon Pvt Ltd (Contractor) for a house on plot 14.
+    3. Either party may end this Agreement on 60 days' written notice; it renews automatically each year.
+    9. Liability of each party is limited to 1 times the annual fees.
+    11. Governing law: India."""
+    t_ok = {"t": {"auto_renews": {"value": "yes, 60 days' notice", "number": 60, "clause": "may end this Agreement on 60 days' written notice"},
+                  "liability_cap": {"value": "1x annual fees", "number": 1, "clause": "limited to 1 times the annual fees"},
+                  "governing_law": {"value": "India", "number": None, "clause": "Governing law: India"}}}
+    arvind = {"name": "Arvind Buildcon Pvt Ltd", "licence": "VMC/CL/2291", "quote": "Contractor: Arvind Buildcon Pvt Ltd"}
+    party = {"name": "Arvind Buildcon Pvt Ltd", "licence": None, "quote": "Arvind Buildcon Pvt Ltd (Contractor)"}
+    show("Same licensed contractor on permit and contract", permit_file("BPA-2026-1187", form, sheet, deal, plans, model(t_ok),
+         model({"on_permit": arvind, "on_contract": party})))
+
+    sona = deal.replace("Arvind Buildcon Pvt Ltd", "Sona Constructions")
+    show("Both steps pass, but the contract is with another builder", permit_file("BPA-2026-1187", form, sheet, sona, plans, model(t_ok),
+         model({"on_permit": arvind, "on_contract": {"name": "Sona Constructions", "licence": None, "quote": "Sona Constructions (Contractor)"}})))
+
+    lapsed = form.replace("Arvind Buildcon Pvt Ltd, licence VMC/CL/2291", "Sona Constructions, licence VMC/CL/1874")
+    show("Contractor matches, licence expired", permit_file("BPA-2026-1187", lapsed, sheet, sona, plans, model(t_ok), model({
+         "on_permit": {"name": "Sona Constructions", "licence": "VMC/CL/1874", "quote": "Contractor: Sona Constructions"},
+         "on_contract": {"name": "Sona Constructions", "licence": None, "quote": "Sona Constructions (Contractor)"}})))
+
+    big = dict(figs, built_up_sqm=540, floors=3)
+    show("Permit fails zoning (FAR 1.8 in a 1.5 zone)", permit_file("BPA-2026-1190", form.replace("420", "540").replace("G+1 (2)", "G+2 (3)"),
+         sheet.replace("420.00", "540.00").replace("2 floors", "3 floors"), deal, model({"f": big, "d": big}), model(t_ok),
+         model({"on_permit": arvind, "on_contract": party})))

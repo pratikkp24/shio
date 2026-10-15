@@ -1,0 +1,57 @@
+# Workflow: a reported phish meets a pending access request. Triage the reported email (phishing_triage), triage the
+# web-proxy alert for the same morning (alert_triage), and review the reporter's pending access ticket (access_request).
+# Cross-step check: if the email was quarantined as a credential request and the proxy log shows the requester opened
+# one of its links, their credentials may be in an attacker's hands, so the grant is blocked. GRANT / BLOCK.
+
+import re
+from common import model, domain, show
+from uses import use, step_ok
+
+phishing = use("phishing_triage")
+alerts = use("alert_triage")
+access = use("access_request")
+
+def clicked(user, body, proxy_log):
+    sites = {domain(u) for u in phishing.HREF.findall(body)}
+    return [line for line in proxy_log.splitlines() if re.search(rf"\b{user}\b", line) and any(s in line for s in sites)]
+
+agent review(sender: str, body: str, alert: dict, proxy_log: str, ticket: dict, phish_llm, alert_llm, acc_llm):
+    phish = phishing.triage(sender, body, phish_llm)
+    proxy = alerts.triage(alert, proxy_log, alert_llm)
+    granted = access.access(ticket, acc_llm)
+    stolen = phish.get("intent") == "credential request" and step_ok(phish, "QUARANTINE")
+    visits = clicked(ticket["requester"], body, proxy_log) if stolen else []
+
+    check phish_triaged: not step_ok(phish, "SOC"), "phishing triage needs the SOC: {phish.get('why')}"
+    check proxy_triaged: "why" not in proxy, "proxy alert: {proxy.get('why')}"
+    check access_granted: step_ok(granted, "GRANT"), "access request: {granted.get('action')} {granted.get('why', '')}"
+    check credentials_safe: not visits, "{ticket['requester']} opened the quarantined credential phish: {visits}; reset password and revoke sessions first"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "BLOCK", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "GRANT", "user": granted["user"], "access": granted["access"], "phish": phish["action"]}
+    return decision
+
+main:
+    fake = ('<p>Your mailbox is full. Verify your password at <a href="https://larksp0r-login.example/v">larkspur.io/verify</a>.</p>')
+    phish = {"t": {"intent": "credential request", "risk": "high", "links": ["https://larksp0r-login.example/v"],
+                   "ask_quote": "Verify your password at"}}
+    alert = {"name": "NewDomainVisits", "service": "web-proxy", "metrics": {"error_rate_pct": 0.0, "p99_ms": 120}}
+    quiet = "08:40:55 web-proxy INFO u-3307 GET https://larkspur.io/hr/calendar 200\n08:41:30 web-proxy INFO u-2231 GET https://fernbank.example/news 200"
+    seen = {"t": {"severity": "SEV4", "cause": "routine browsing", "evidence": "u-2231 GET https://fernbank.example/news 200"}}
+    ticket = {"requester": "u-2231", "description": "Read access to ledgerdb for the Q3 reconciliation.",
+              "comments": [{"author": "u-1180", "text": "Approved for Q3 close."}]}
+    req = {"r": {"system": "ledgerdb", "role": "read", "justification": "for the Q3 reconciliation", "approval_quote": "Approved for Q3 close."}}
+    show("Phish quarantined; requester never opened it", review("it-desk@larksqur.io", fake, alert, quiet, ticket,
+         model(phish), model(seen), model(req)))
+
+    hit = quiet + "\n08:41:12 web-proxy INFO u-2231 GET https://larksp0r-login.example/v 200\n08:41:19 web-proxy INFO u-2231 POST https://larksp0r-login.example/v 302"
+    posted = {"t": {"severity": "SEV2", "cause": "u-2231 submitted a form on a lookalike login page",
+                    "evidence": "u-2231 POST https://larksp0r-login.example/v 302"}}
+    show("Requester opened the phish and posted a form", review("it-desk@larksqur.io", fake, alert, hit, ticket,
+         model(phish), model(posted), model(req)))
+
+    self_ok = dict(ticket, comments=[{"author": "u-2231", "text": "Manager said approved on a call, please expedite."}])
+    show("Access ticket approved by the requester herself", review("it-desk@larksqur.io", fake, alert, quiet, self_ok,
+         model(phish), model(seen), model({"r": dict(req["r"], approval_quote="Manager said approved on a call")})))

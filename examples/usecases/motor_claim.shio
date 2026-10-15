@@ -1,0 +1,71 @@
+# Motor insurance: a garage's repair estimate after an accident. The model reads the estimate; code prices every
+# part against the insurer's parts list, labour against the rate table for the garage's tier, and re-adds the total
+# with tax. Inflated lines, a total that does not tie out, or a garage not on the panel go to a motor surveyor.
+
+from common import model, money_eq, show
+
+PARTS = {"BMP-F-221": 14200.00, "HL-L-090": 6850.00, "GRL-031": 3100.00, "CLP-12": 240.00}   # list price, INR
+EMPANELLED = {"GAR-PN-014": {"name": "Sahyadri Motors", "tier": "A"}, "GAR-PN-031": {"name": "Deccan Auto Works", "tier": "B"}}
+LABOUR = {"A": 950.00, "B": 750.00}     # max labour rate per hour by tier
+GST = 0.18
+MARGIN = 1.05                           # a part may be priced up to 5% over list
+
+type Line:
+    part_code: str
+    qty: int
+    unit_price: float
+
+type Estimate:
+    garage_id: str
+    lines: list[Line]
+    labour_hours: float
+    labour_rate: float     # rate per hour charged
+    total: float           # grand total including GST, as printed
+
+def subtotal(lines, hours, rate):
+    return sum(l.qty * l.unit_price for l in lines) + hours * rate
+
+def inflated(lines):
+    return [l.part_code for l in lines if l.part_code not in PARTS or l.unit_price > PARTS[l.part_code] * MARGIN]
+
+def tier(gid):
+    return EMPANELLED[gid]["tier"] if gid in EMPANELLED else None
+
+agent estimate(claim_no: str, text: str, llm):
+    read e: Estimate by llm:
+        Read this repair estimate: garage code, each part line, labour and the grand total.
+
+        {text}
+
+    check empanelled: e.garage_id in EMPANELLED, "garage {e.garage_id} is not on the insurer's panel"
+    check parts_at_list: not inflated(e.lines), "priced above list or not on the list: {inflated(e.lines)}"
+    check labour_rate: e.garage_id not in EMPANELLED or e.labour_rate <= LABOUR[tier(e.garage_id)], "labour {e.labour_rate}/h, tier {tier(e.garage_id)} allows {LABOUR[tier(e.garage_id)]}"
+    check ties_out: money_eq(round(subtotal(e.lines, e.labour_hours, e.labour_rate) * (1 + GST), 2), e.total, 1.0), "lines + labour + GST = {subtotal(e.lines, e.labour_hours, e.labour_rate) * (1 + GST):.2f}, estimate says {e.total:.2f}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "REVIEW", "claim": claim_no, "to": "motor surveyor", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "APPROVE", "claim": claim_no, "garage": EMPANELLED[e.garage_id]["name"], "amount": e.total}
+    return decision
+
+main:
+    text = """SAHYADRI MOTORS (GAR-PN-014)  Estimate for MH12 AB 4410
+    BMP-F-221 Front bumper   1 x 14,200.00
+    CLP-12 Bumper clips      2 x    240.00
+    Labour 4.0 h @ 950.00
+    GRAND TOTAL incl. GST 18%: 21,806.40"""
+    good = {"e": {"garage_id": "GAR-PN-014", "labour_hours": 4.0, "labour_rate": 950.0, "total": 21806.40,
+                  "lines": [{"part_code": "BMP-F-221", "qty": 1, "unit_price": 14200.0}, {"part_code": "CLP-12", "qty": 2, "unit_price": 240.0}]}}
+    show("Estimate at list prices", estimate("MC-55012", text, model(good)))
+
+    padded = {"e": {"garage_id": "GAR-PN-031", "labour_hours": 6.0, "labour_rate": 750.0, "total": 37406.00,
+                    "lines": [{"part_code": "HL-L-090", "qty": 1, "unit_price": 9900.0}, {"part_code": "GRL-031", "qty": 1, "unit_price": 3100.0},
+                              {"part_code": "BMP-F-221", "qty": 1, "unit_price": 14200.0}]}}
+    padded_text = "DECCAN AUTO WORKS (GAR-PN-031)\nHL-L-090 Headlamp LH 1 x 9,900.00\nGRL-031 Grille 1 x 3,100.00\n" \
+        "BMP-F-221 Front bumper 1 x 14,200.00\nLabour 6.0 h @ 750.00\nGRAND TOTAL incl. GST 18%: 37,406.00"
+    show("Headlamp priced 45% over list", estimate("MC-55013", padded_text, model(padded)))
+
+    show("Model misreads the total (21,806.40 as 27,806.40)", estimate("MC-55012", text, model({"e": dict(good["e"], total=27806.40)})))
+
+    outside = {"e": dict(good["e"], garage_id="GAR-XX-907")}
+    show("Garage not on the panel", estimate("MC-55014", text.replace("SAHYADRI MOTORS (GAR-PN-014)", "QUICKFIX GARAGE (GAR-XX-907)"), model(outside)))

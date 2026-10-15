@@ -1,0 +1,62 @@
+# Workflow: supplier risk review. Vet the supplier's ISO 9001 certificate (supplier_certificate) and screen the
+# directors and owners in its onboarding pack (sanctions_screening). Cross-step check: the company the pack describes
+# is the legal entity the certificate was issued to. A clean result with a sanctions near-miss cleared only by date
+# of birth, or a certificate close to expiry, is downgraded to WATCHLIST. APPROVED / WATCHLIST / SUSPEND.
+
+from common import model, grounded, norm, show
+from uses import use, step_ok
+
+certs = use("supplier_certificate")
+sanctions = use("sanctions_screening")
+
+type Company:
+    name: str              # the legal name of the company the onboarding pack is about, as written
+    quote: str             # the words of the pack giving it, copied exactly
+
+agent supplier_risk(supplier_id: str, cert_text: str, pack: str, cert_llm, screen_llm, llm):
+    vetted = certs.vet(supplier_id, cert_text, cert_llm)
+    screened = sanctions.screening(pack, screen_llm)
+    read co: Company by llm:
+        Which company is this onboarding pack about? Give its full legal name.
+
+        {pack}
+
+    check certified: step_ok(vetted, "APPROVED SUPPLIER"), "certificate: {vetted.get('status')} {vetted.get('why', '')}"
+    check screened_clear: step_ok(screened, "CLEAR"), "sanctions: {screened.get('status')} {screened.get('why', '')}"
+    check company_read: grounded(co.quote, pack) and grounded(co.name, co.quote), "company {co.name} is not what the pack says"
+    check same_entity after certified, company_read: norm(co.name) == norm(certs.SUPPLIERS[supplier_id]["name"]), "pack is for {co.name}, certificate is held by {certs.SUPPLIERS[supplier_id]['name']}"
+    when near_miss: bool(screened.get("near_misses_cleared_by_dob"))
+    when renewal_due: bool(vetted.get("note"))
+
+    rule decision:
+        if checks.failures():
+            return {"status": "SUSPEND", "supplier": supplier_id, "why": [c["detail"] for c in checks.failures()]}
+        if near_miss or renewal_due:
+            return {"status": "WATCHLIST", "supplier": supplier_id, "near_misses": screened["near_misses_cleared_by_dob"], "certificate": vetted["note"]}
+        return {"status": "APPROVED", "supplier": supplier_id, "certificate_expires": vetted["expires"], "screened": screened["screened"]}
+    return decision
+
+main:
+    cert = """CERTIFICATE No. NCL-Q-40917
+    Norvale Certification Ltd certifies that Ostrava Precision Components s.r.o. operates a quality management
+    system that complies with ISO 9001:2015.
+    Scope: CNC machining and anodising of aluminium parts for industrial equipment.
+    Issued: 2025-03-14  Expiry date: 2028-03-13"""
+    c_ok = model({"c": {"standard": "ISO 9001:2015", "holder": "Ostrava Precision Components s.r.o.", "issuer": "Norvale Certification Ltd",
+                        "scope": "CNC machining and anodising of aluminium parts for industrial equipment", "expiry": "2028-03-13"}})
+    pack = "Supplier onboarding: Ostrava Precision Components s.r.o., Ostrava. Director: Marta Velasquez-Orr, born 03/11/1982. Shareholder: Tobias Lindgren, born 19/06/1975."
+    people = {"o": {"people": [{"name": "Marta Velasquez-Orr", "aliases": [], "dob": "1982-11-03"}, {"name": "Tobias Lindgren", "aliases": [], "dob": "1975-06-19"}]}}
+    co = {"co": {"name": "Ostrava Precision Components s.r.o.", "quote": "Supplier onboarding: Ostrava Precision Components s.r.o."}}
+    show("Certified, clean screening, same entity", supplier_risk("SUP-118", cert, pack, c_ok, model(people), model(co)))
+
+    near = pack.replace("Marta Velasquez-Orr, born 03/11/1982", "Anselm Kreyer, born 02/02/1988")
+    kreyer = {"o": {"people": [{"name": "Anselm Kreyer", "aliases": [], "dob": "1988-02-02"}, people["o"]["people"][1]]}}
+    show("Director's name close to a listed person", supplier_risk("SUP-118", cert, near, c_ok, model(kreyer), model(co)))
+
+    sister = pack.replace("Ostrava Precision Components s.r.o.", "Ostrava Precision Holdings a.s.")
+    show("Pack is for the sister company", supplier_risk("SUP-118", cert, sister, c_ok, model(people),
+         model({"co": {"name": "Ostrava Precision Holdings a.s.", "quote": "Supplier onboarding: Ostrava Precision Holdings a.s."}})))
+
+    hit = pack + " Beneficial owner: Dimitri Volkanov (born 12/04/1971), 60% via Seabright Holdings."
+    owner = {"o": {"people": people["o"]["people"] + [{"name": "Dimitri Volkanov", "aliases": [], "dob": "1971-04-12"}]}}
+    show("Screening step fails: owner matches the list", supplier_risk("SUP-118", cert, hit, c_ok, model(owner), model(co)))

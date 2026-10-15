@@ -1,0 +1,68 @@
+# Workflow: an incident on a service that holds personal data. Triage the alert (alert_triage), then check the
+# postmortem draft against the incident log (postmortem_timeline). Code looks the service up in the data catalogue and
+# computes the 72-hour regulator notification deadline from the alert time. Cross-step check: the detection time the
+# postmortem states is the time the alert fired. Code decides NOTIFY BY <time> or FIX.
+
+from datetime import datetime, timedelta
+from common import model, grounded, show
+from uses import use
+
+triage_step = use("alert_triage")
+postmortem = use("postmortem_timeline")
+
+PERSONAL_DATA = {"checkout-api": ["name", "email", "delivery address"], "search-api": []}   # data catalogue
+NOTIFY_WITHIN_H = 72
+
+type Detection:
+    at: str                # the clock time the draft says the incident was detected, HH:MM
+    quote: str             # the sentence that says so, copied exactly
+
+agent incident(alert: dict, logs: str, draft: str, log: str, triage_llm, pm_llm, llm):
+    triaged = triage_step.triage(alert, logs, triage_llm)
+    review = postmortem.review(draft, log, pm_llm)
+    fired = datetime.strptime(alert["fired_at"], "%Y-%m-%dT%H:%M:%SZ")
+    deadline = fired + timedelta(hours=NOTIFY_WITHIN_H)
+    personal = PERSONAL_DATA.get(alert["service"], [])
+    read det: Detection by llm:
+        At what clock time does this postmortem draft say the incident was detected? Quote the sentence.
+
+        {draft}
+
+    check triage_clean: "why" not in triaged, "triage: {triaged.get('why')}"
+    check postmortem_ok: review.get("status") == "PUBLISH", "postmortem: {review.get('why')}"
+    check detection_quoted: grounded(det.quote, draft) and det.at in det.quote, "the detection time is not quoted from the draft"
+    check detected_at_alert: det.at == alert["fired_at"][11:16], "draft says detected at {det.at}; the alert that opened the incident fired at {alert['fired_at'][11:16]} UTC"
+
+    rule decision:
+        clock = {"personal_data": personal, "notify_by": deadline.strftime("%Y-%m-%d %H:%M UTC") if personal else "not required",
+                 "severity": triaged["severity"]}
+        if checks.failures():
+            return {"status": "FIX", "why": [c["detail"] for c in checks.failures()], **clock}
+        return {"status": f"NOTIFY BY {clock['notify_by']}" if personal else "NO NOTIFICATION", "page": triaged["action"], **clock}
+    return decision
+
+main:
+    logs = "09:11:02 checkout-api ERROR cart-svc v4.18 returned 500 on /cart for 7.2% of requests"
+    alert = {"name": "HighErrorRate", "service": "checkout-api", "metrics": {"error_rate_pct": 7.2, "p99_ms": 2100}, "fired_at": "2026-10-15T09:11:00Z"}
+    sev1 = {"t": {"severity": "SEV1", "cause": "cart-svc v4.18 is failing", "evidence": "cart-svc v4.18 returned 500 on /cart"}}
+    lines = ["2026-10-15T09:02:00Z deploy cart-svc v4.18 rolled out to 100%", "2026-10-15T09:05:00Z WARN checkout p99 1200ms",
+             "2026-10-15T09:11:00Z ALERT checkout 5xx rate 7.2% above 2%", "2026-10-15T09:27:00Z checkout 5xx rate 0.3%, alert resolved"]
+    log = "\n".join(lines)
+    E = lambda line, kind: {"at": line[:20], "kind": kind, "log_line": line}
+    good = {"tl": {"events": [E(lines[0], "start"), E(lines[2], "detected"), E(lines[3], "mitigated")], "stated_ttd_min": 9, "stated_ttm_min": 25}}
+    draft = "Impact began 09:02 with the v4.18 rollout. Detected at 09:11 by the 5xx alert, after 9 minutes. Mitigated by rollback, 25 minutes from start."
+    show("Postmortem agrees with the alert", incident(alert, logs, draft, log, model(sev1), model(good),
+         model({"det": {"at": "09:11", "quote": "Detected at 09:11 by the 5xx alert"}})))
+
+    early = "Impact began 09:02 with the v4.18 rollout. Detected at 09:05 from a latency warning, after 3 minutes. Mitigated by rollback, 25 minutes from start."
+    warn = {"tl": {"events": [E(lines[0], "start"), E(lines[1], "detected"), E(lines[3], "mitigated")], "stated_ttd_min": 3, "stated_ttm_min": 25}}
+    show("Draft dates detection to an unpaged warning", incident(alert, logs, early, log, model(sev1), model(warn),
+         model({"det": {"at": "09:05", "quote": "Detected at 09:05 from a latency warning"}})))
+
+    rosy = draft.replace("after 9 minutes", "within 4 minutes")
+    show("Draft understates time to detect", incident(alert, logs, rosy, log, model(sev1), model({"tl": dict(good["tl"], stated_ttd_min=4)}),
+         model({"det": {"at": "09:11", "quote": "Detected at 09:11 by the 5xx alert"}})))
+
+    search = dict(alert, service="search-api")
+    show("Same incident on a service with no personal data", incident(search, logs, draft, log, model(sev1), model(good),
+         model({"det": {"at": "09:11", "quote": "Detected at 09:11 by the 5xx alert"}})))

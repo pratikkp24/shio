@@ -1,0 +1,73 @@
+# HR: employment verification. The model reads the job as the candidate's résumé states it and as the previous
+# employer's verification letter states it. Code checks the letter's dates are written in the letter, compares the
+# dates within a month's tolerance and the job titles, and sends any discrepancy to the recruiter to discuss.
+
+import calendar
+from common import model, grounded, norm, show
+
+TOLERANCE_MONTHS = 1
+SAME_TITLE = {"sr": "senior", "jr": "junior", "mgr": "manager"}
+
+type Job:
+    employer: str          # company name
+    title: str             # job title as written
+    start: str             # first month, YYYY-MM
+    end: str?              # last month, YYYY-MM; null if still employed
+    quote: str             # the sentence giving the title and dates, copied exactly
+
+def months(ym):
+    y, m = str(ym)[:7].split("-")
+    return int(y) * 12 + int(m)
+
+def gap(a, b):
+    return abs(months(a) - months(b)) if a and b else (0 if a == b else 99)
+
+def company(s):
+    return " ".join(w for w in norm(s).replace(".", "").replace(",", "").split() if w not in ("ltd", "inc", "llc", "plc", "gmbh"))
+
+def title(s):
+    return " ".join(SAME_TITLE.get(w, w) for w in norm(s).replace(".", "").split())
+
+def written(ym, text):
+    if not ym:
+        return True
+    y, m = str(ym)[:7].split("-")
+    return y in text and (calendar.month_name[int(m)] in text or calendar.month_abbr[int(m)] in text or f"{y}-{m}" in text)
+
+agent verify(resume: str, letter: str, llm):
+    read claim: Job by llm:
+        Read the candidate's most recent job from this résumé.
+
+        {resume}
+    read conf: Job by llm blind:
+        Read the employment this verification letter confirms.
+
+        {letter}
+
+    check letter_quoted: grounded(conf.quote, letter) and written(conf.start, conf.quote) and written(conf.end, conf.quote), "the letter's dates {conf.start} to {conf.end} are not written in the letter"
+    check same_employer: company(claim.employer) == company(conf.employer), "résumé says {claim.employer}, letter is from {conf.employer}"
+    check start_agrees: gap(claim.start, conf.start) <= TOLERANCE_MONTHS, "start: résumé {claim.start}, letter {conf.start}"
+    check end_agrees: gap(claim.end, conf.end) <= TOLERANCE_MONTHS, "end: résumé {claim.end}, letter {conf.end}"
+    check title_agrees: title(claim.title) == title(conf.title), "title: résumé '{claim.title}', letter '{conf.title}'"
+
+    rule result:
+        if checks.failures():
+            return {"status": "DISCREPANCY", "why": [c["detail"] for c in checks.failures()], "next": "recruiter discusses with the candidate"}
+        return {"status": "VERIFIED", "employer": conf.employer, "title": conf.title, "from": conf.start, "to": conf.end}
+    return result
+
+main:
+    resume = "Experience\nSr. Data Analyst, Pelham & Rowe Ltd, Mar 2021 - Jul 2024: pricing models for retail clients."
+    letter = "Pelham & Rowe confirms that Imogen Achterberg was employed as Senior Data Analyst from 1 March 2021 to 28 June 2024."
+    claim = {"employer": "Pelham & Rowe Ltd", "title": "Sr. Data Analyst", "start": "2021-03", "end": "2024-07", "quote": "Sr. Data Analyst, Pelham & Rowe Ltd, Mar 2021 - Jul 2024"}
+    conf = {"employer": "Pelham & Rowe", "title": "Senior Data Analyst", "start": "2021-03", "end": "2024-06",
+            "quote": "employed as Senior Data Analyst from 1 March 2021 to 28 June 2024"}
+    show("Matches within a month", verify(resume, letter, model({"claim": claim, "conf": conf})))
+
+    stretched = resume.replace("Jul 2024", "Feb 2025").replace("Sr. Data Analyst", "Head of Analytics")
+    show("Résumé stretches the dates and the title", verify(stretched, letter, model({"claim": dict(claim, title="Head of Analytics", end="2025-02",
+         quote="Head of Analytics, Pelham & Rowe Ltd, Mar 2021 - Feb 2025"), "conf": conf})))
+
+    agreeable = dict(conf, end="2025-02")
+    show("Model reads the letter's end date as the résumé's", verify(stretched.replace("Head of Analytics", "Sr. Data Analyst"), letter,
+         model({"claim": dict(claim, end="2025-02"), "conf": agreeable})))

@@ -1,0 +1,65 @@
+# Scheduling from an email thread. The model reads who should attend, how long the meeting is, and proposes a slot;
+# code checks every attendee is named in the thread and free then on their calendar, the slot is inside working hours
+# in each attendee's own time zone, and the length is the one the thread asked for. Otherwise it asks, not books.
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from common import model, grounded, numbers, TODAY, show
+
+PEOPLE = {                 # free/busy from the calendar system, UTC
+    "noor@kestrel.example": {"tz": "Asia/Dubai", "busy": [("2026-10-20T05:00", "2026-10-20T06:00")]},
+    "felix@kestrel.example": {"tz": "Europe/Berlin", "busy": [("2026-10-20T08:00", "2026-10-20T09:00")]},
+    "maren@kestrel.example": {"tz": "America/New_York", "busy": []},
+}
+HOURS = (9, 18)            # working hours, local time
+
+type Proposal:
+    start_utc: str         # YYYY-MM-DDTHH:MM in UTC
+    duration_min: int
+    duration_quote: str    # the words in the thread that give the length, copied exactly
+    attendees: list[str]   # email addresses
+
+def span(p):
+    s = datetime.fromisoformat(p.start_utc).replace(tzinfo=ZoneInfo("UTC"))
+    return s, s + timedelta(minutes=p.duration_min)
+
+def busy_now(who, p):
+    s, e = span(p)
+    return [b for b in PEOPLE[who]["busy"] if s < datetime.fromisoformat(b[1]).replace(tzinfo=ZoneInfo("UTC")) and datetime.fromisoformat(b[0]).replace(tzinfo=ZoneInfo("UTC")) < e]
+
+def after_hours(who, p):
+    s, e = (t.astimezone(ZoneInfo(PEOPLE[who]["tz"])) for t in span(p))
+    return not (s.date() == e.date() and HOURS[0] <= s.hour and (e.hour, e.minute) <= (HOURS[1], 0))
+
+agent schedule(thread: str, llm):
+    read p: Proposal by llm:
+        Read this email thread. Who needs to attend, how long should the meeting be, and propose a start time in UTC.
+
+        {thread}
+
+    check known: all(a in PEOPLE for a in p.attendees), "not in the directory: {[a for a in p.attendees if a not in PEOPLE]}"
+    check named: len(p.attendees) > 0 and all(grounded(a, thread) for a in p.attendees), "attendee not named in the thread"
+    check future: span(p)[0].date() > TODAY, "slot {p.start_utc} is not in the future"
+    check length: grounded(p.duration_quote, thread) and p.duration_min in numbers(p.duration_quote), "length {p.duration_min} min from '{p.duration_quote}' is not what the thread asks for"
+    check free: all(not busy_now(a, p) for a in p.attendees if a in PEOPLE), "busy then: {[a for a in p.attendees if a in PEOPLE and busy_now(a, p)]}"
+    check working_hours: all(not after_hours(a, p) for a in p.attendees if a in PEOPLE), "outside 9-18 local for {[a for a in p.attendees if a in PEOPLE and after_hours(a, p)]}"
+
+    rule action:
+        if p is None or checks.failures():
+            return {"action": "ASK", "why": [c["detail"] for c in checks.failures()] or ["no proposal"]}
+        return {"action": "BOOK", "start_utc": p.start_utc, "minutes": p.duration_min, "attendees": p.attendees}
+    return action
+
+main:
+    thread = ("From: noor@kestrel.example\nTo: felix@kestrel.example, maren@kestrel.example\n"
+              "Can we do a 30 minute review of the vendor shortlist on Tuesday 20 Oct? Felix and Maren both needed.")
+    all3 = ["noor@kestrel.example", "felix@kestrel.example", "maren@kestrel.example"]
+    show("Slot that works for all three", schedule(thread, model({"p": {"start_utc": "2026-10-20T13:00",
+        "duration_min": 30, "duration_quote": "30 minute review", "attendees": all3}})))
+    show("Too early for New York", schedule(thread, model({"p": {"start_utc": "2026-10-20T10:00",
+        "duration_min": 30, "duration_quote": "30 minute review", "attendees": all3}})))
+    show("Model invents the length", schedule(thread, model({"p": {"start_utc": "2026-10-20T13:00",
+        "duration_min": 45, "duration_quote": "a 45 minute review", "attendees": all3}})))
+    pair = "From: noor@kestrel.example\nTo: felix@kestrel.example\nQuick 30 minute sync on Tuesday 20 Oct morning?"
+    show("Overlaps Felix's existing meeting", schedule(pair, model({"p": {"start_utc": "2026-10-20T08:30",
+        "duration_min": 30, "duration_quote": "30 minute sync", "attendees": all3[:2]}})))

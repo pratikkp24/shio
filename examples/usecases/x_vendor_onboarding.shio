@@ -1,0 +1,64 @@
+# Workflow: new vendor onboarding. Vet the ISO 9001 certificate (supplier_certificate.shio), screen the company and its
+# owners (sanctions_screening.shio), and read the bank's account confirmation letter here. Cross-step check: the legal
+# entity on the certificate is the party that was screened and the holder of the account we would pay.
+# (vendor_bank_change.shio is not chained: it changes accounts of vendors already in its master; a new vendor is not.)
+
+from common import model, grounded, norm, show
+from uses import use, step_ok
+
+supplier_certificate = use("supplier_certificate")
+sanctions_screening = use("sanctions_screening")
+vendor_bank_change = use("vendor_bank_change")      # only its IBAN checksum helper is used
+
+type Account:
+    holder: str            # the account holder's name exactly as the bank letter gives it
+    iban: str              # no spaces
+
+agent onboard(supplier_id: str, cert: str, kyb_docs: str, bank_letter: str, cert_llm, screen_llm, llm):
+    entity = supplier_certificate.SUPPLIERS[supplier_id]["name"]
+    vetted = supplier_certificate.vet(supplier_id, cert, cert_llm)
+    screened = sanctions_screening.screening(kyb_docs, screen_llm)
+    read acct: Account by llm:
+        Who holds the account in this bank confirmation letter, and what is the IBAN?
+
+        {bank_letter}
+
+    check certified: step_ok(vetted, "APPROVED SUPPLIER"), "certificate: {vetted.get('status')} {vetted.get('why', '')}"
+    check cleared: step_ok(screened, "CLEAR"), "screening: {screened.get('status')} {screened.get('why', '')}"
+    check account_read: grounded(acct.holder, bank_letter) and acct.iban in bank_letter.replace(" ", "") and vendor_bank_change.iban_ok(acct.iban), "account {acct.iban} / holder {acct.holder} not on the letter or fails mod-97"
+    check entity_screened after cleared: norm(entity) in [norm(n) for n in screened.get("screened", [])], "screened {screened.get('screened')}, but the certificate holder is {entity}"
+    check entity_holds_account: norm(acct.holder) == norm(entity), "account held by {acct.holder}, certificate holder is {entity}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "supplier": supplier_id, "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "ACTIVATE VENDOR", "supplier": supplier_id, "entity": entity, "pay_to": acct.iban}
+    return decision
+
+main:
+    cert = """CERTIFICATE No. NCL-Q-40917
+    Norvale Certification Ltd certifies that Ostrava Precision Components s.r.o. operates a quality management
+    system that complies with ISO 9001:2015.
+    Scope: CNC machining and anodising of aluminium parts for industrial equipment.
+    Issued: 2025-03-14  Expiry date: 2028-03-13"""
+    good_cert = model({"c": {"standard": "ISO 9001:2015", "holder": "Ostrava Precision Components s.r.o.", "issuer": "Norvale Certification Ltd",
+                             "scope": "CNC machining and anodising of aluminium parts for industrial equipment", "expiry": "2028-03-13"}})
+    kyb = "Company: Ostrava Precision Components s.r.o. Director: Marta Velasquez-Orr, born 03/11/1982."
+    company = {"name": "Ostrava Precision Components s.r.o.", "aliases": [], "dob": None}
+    marta = {"name": "Marta Velasquez-Orr", "aliases": [], "dob": "1982-11-03"}
+    clear = model({"o": {"people": [company, marta]}})
+    letter = "Komercni Banka confirms account CZ6508000000192000145399 is held by Ostrava Precision Components s.r.o."
+    acct = model({"acct": {"holder": "Ostrava Precision Components s.r.o.", "iban": "CZ6508000000192000145399"}})
+    show("Certified, screened, own account", onboard("SUP-118", cert, kyb, letter, good_cert, clear, acct))
+
+    sister = letter.replace("Components s.r.o.", "Holdings a.s.")
+    show("All steps pass, account held by a sister company", onboard("SUP-118", cert, kyb, sister, good_cert, clear,
+         model({"acct": {"holder": "Ostrava Precision Holdings a.s.", "iban": "CZ6508000000192000145399"}})))
+
+    other_kyb = kyb.replace("Components s.r.o.", "Components a.s.")
+    show("All steps pass, a different legal entity was screened", onboard("SUP-118", cert, other_kyb, letter, good_cert,
+         model({"o": {"people": [dict(company, name="Ostrava Precision Components a.s."), marta]}}), acct))
+
+    alias = kyb + " Shareholder: Erik Sandvold, also known as D. Volkanov, born 12/04/1971."
+    show("Owner's alias is on the sanctions list", onboard("SUP-118", cert, alias, letter, good_cert, model({"o": {"people": [
+         company, marta, {"name": "Erik Sandvold", "aliases": ["D. Volkanov"], "dob": "1971-04-12"}]}}), acct))

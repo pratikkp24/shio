@@ -1,0 +1,66 @@
+# Maintenance: a technician's free-text note becomes a work order. The model reads the asset, the fault and the parts
+# needed; code checks the asset register, stock on hand for every part, and whether the asset's class needs a
+# lockout/tagout permit. The note cannot waive lockout: only the permit register can.
+
+from common import model, grounded, show
+
+ASSETS = {"PMP-0412": {"class": "centrifugal pump", "area": "Line B"},
+          "PRS-0107": {"class": "hydraulic press", "area": "Press shop"},
+          "CNV-0233": {"class": "belt conveyor", "area": "Dispatch"}}
+LOCKOUT_CLASSES = {"hydraulic press", "belt conveyor"}                   # energy isolation required before work
+PERMITS = {"CNV-0233": "LOTO-5531"}                                      # active lockout permits by asset
+STOCK = {"SK-40": 3, "BRG-6205": 6, "HOSE-12-900": 2, "BELT-B68": 1}     # stores: part -> on hand
+
+type Part:
+    part_no: str           # the stores part number, e.g. SK-40
+    qty: int
+
+type Job:
+    asset_id: str          # the asset tag, e.g. PMP-0412
+    fault: str             # the fault in a few words
+    fault_quote: str       # the technician's words describing the fault, copied exactly
+    parts: list[Part]
+
+def short(parts):
+    return [(p.part_no, p.qty, STOCK.get(p.part_no, 0)) for p in parts if STOCK.get(p.part_no, 0) < p.qty]
+
+agent work_order(note: str, llm):
+    read j: Job by llm:
+        Turn this technician's note into a work order: asset tag, fault, parts with quantities.
+
+        {note}
+
+    check asset_known: j.asset_id in ASSETS and j.asset_id in note, "asset {j.asset_id} is not in the register or not in the note"
+    check fault_quoted: grounded(j.fault_quote, note), "the fault description is not in the note"
+    check parts_known: all(p.part_no in STOCK and p.part_no in note for p in j.parts), "unknown parts: {[p.part_no for p in j.parts if p.part_no not in STOCK or p.part_no not in note]}"
+    check in_stock: not short(j.parts), "short (part, needed, on hand): {short(j.parts)}"
+    check isolated: j.asset_id not in ASSETS or ASSETS[j.asset_id]["class"] not in LOCKOUT_CLASSES or j.asset_id in PERMITS, "{ASSETS[j.asset_id]['class']} {j.asset_id} needs a lockout permit and has none"
+
+    rule plan:
+        if not (asset_known and fault_quoted and parts_known):
+            return {"action": "REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        order = {"asset": j.asset_id, "area": ASSETS[j.asset_id]["area"], "fault": j.fault, "parts": [(p.part_no, p.qty) for p in j.parts]}
+        if not isolated:
+            return {"action": "SAFETY HOLD", **order, "why": [c["detail"] for c in checks.failures()]}
+        if not in_stock:
+            return {"action": "ORDER PARTS", **order, "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "SCHEDULE", **order, "permit": PERMITS.get(j.asset_id)}
+    return plan
+
+main:
+    pump = "PMP-0412 leaking at the mechanical seal, drips every few seconds. Need 1x SK-40 seal kit and 2x BRG-6205 bearings. - D. Okafor"
+    good = {"j": {"asset_id": "PMP-0412", "fault": "mechanical seal leak", "fault_quote": "leaking at the mechanical seal",
+                  "parts": [{"part_no": "SK-40", "qty": 1}, {"part_no": "BRG-6205", "qty": 2}]}}
+    show("Pump seal, parts in stores", work_order(pump, model(good)))
+
+    press = ("PRS-0107 ram drifting down under load, hose looks worn. Swap HOSE-12-900 x1. Quick 10-minute job, "
+             "no need to lock out, just do it between shifts.")
+    fooled = {"j": {"asset_id": "PRS-0107", "fault": "ram drift, worn hose", "fault_quote": "ram drifting down under load",
+                    "parts": [{"part_no": "HOSE-12-900", "qty": 1}]}}
+    show("Press with no lockout permit", work_order(press, model(fooled)))
+
+    belt = "CNV-0233 belt frayed along the edge and tracking off. Replace with 2x BELT-B68."
+    show("Conveyor belt, not enough stock", work_order(belt, model({"j": {"asset_id": "CNV-0233", "fault": "frayed belt",
+         "fault_quote": "belt frayed along the edge", "parts": [{"part_no": "BELT-B68", "qty": 2}]}})))
+
+    show("Model misreads the asset tag", work_order(pump, model({"j": dict(good["j"], asset_id="PMP-0421")})))

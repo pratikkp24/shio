@@ -1,0 +1,67 @@
+# Workflow: monthly GST return. Validate each purchase invoice for input tax credit (gst_invoice.shio) and post each
+# credit note we issued (credit_note.shio). Cross-step check: a credit note may only reduce output tax on a sales
+# invoice in this return's batch. Code then nets output tax, credit notes and ITC per GSTIN. FILE or REVIEW.
+
+from common import model, show
+from uses import use, step_ok
+
+gst_invoice = use("gst_invoice")
+credit_note = use("credit_note")
+
+ISSUED_BY = {"INV-30418": "27AABCV7731Q1ZN", "INV-30455": "27AADCT9045H1Z3", "INV-30502": "27AABCV7731Q1ZN"}   # our GSTIN on each sales invoice
+
+type Billed:
+    recipient_gstin: str   # the GSTIN the invoice is billed to
+
+agent gst_return(sales: list, purchases: dict, notes: dict, gst_llms: dict, cn_llms: dict, llm):
+    net = {g: 0.0 for g in sorted(gst_invoice.OUR_GSTINS)}
+    for inv in sales:
+        net[ISSUED_BY[inv]] += credit_note.INVOICES[inv]["net"] * credit_note.INVOICES[inv]["rate"]
+    for k in purchases:
+        res = gst_invoice.gst_check(purchases[k], gst_llms[k])
+        read to[k]: Billed by llm:
+            Which GSTIN is this invoice billed to?
+
+            {purchases[k]}
+        check itc_ok[k]: step_ok(res, "ACCEPT"), "{k}: {res.get('status')} {res.get('why', '')}"
+        check billed_read[k]: to.recipient_gstin in purchases[k] and to.recipient_gstin in net, "{k}: billed to {to.recipient_gstin}, not one of our GSTINs on the invoice"
+        rule itc[k]:
+            return (to.recipient_gstin, res.get("itc", 0) if step_ok(res, "ACCEPT") else 0)
+        if itc[0] in net:
+            net[itc[0]] -= itc[1]
+    for k in notes:
+        posted = credit_note.match_credit(notes[k], cn_llms[k])
+        check note_ok[k]: step_ok(posted, "POST"), "{k}: {posted.get('status')} {posted.get('why', '')}"
+        check in_batch[k] after note_ok: posted["against"] in sales, "{k} reduces tax on {posted.get('against')}, which is not in this return"
+        if step_ok(posted, "POST") and posted["against"] in sales:
+            net[ISSUED_BY[posted["against"]]] -= posted["net"] * credit_note.INVOICES[posted["against"]]["rate"]
+
+    rule decision:
+        if checks.failures():
+            return {"status": "REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "FILE", "net_tax_by_gstin": {g: round(v, 2) for g, v in net.items()}, "note": "negative = ITC carried forward"}
+    return decision
+
+main:
+    meridian = ("MERIDIAN PACKWORKS PVT LTD  GSTIN 27AAPCM4821K1Z1\nBill to: Velora Retail Pvt Ltd  GSTIN 27AABCV7731Q1ZN\n"
+                "Place of supply: 27-Maharashtra\nCorrugated cartons, HSN 4819  Taxable 5,000.00\nCGST 9% 450.00  SGST 9% 450.00\nTotal 5,900.00")
+    m_read = model({"inv": {"supplier_gstin": "27AAPCM4821K1Z1", "recipient_gstin": "27AABCV7731Q1ZN", "place_of_supply": "27",
+                            "taxable": 5000, "rate": 18, "cgst": 450, "sgst": 450, "igst": 0, "total": 5900}})
+    cn = "CREDIT NOTE CN-1207 for customer C-0088\nAgainst invoice INV-30418: 40 units returned damaged\nNet 3,000.00  GST 18% 540.00  Total 3,540.00"
+    cn_read = model({"cn": {"number": "CN-1207", "invoice_ref": "INV-30418", "customer": "C-0088", "net": 3000, "tax_rate": 0.18, "tax": 540, "total": 3540}})
+    billed = model({"to": {"PB-1": {"recipient_gstin": "27AABCV7731Q1ZN"}, "PB-2": {"recipient_gstin": "27AADCT9045H1Z3"}}})
+    batch = ["INV-30418", "INV-30455"]
+    show("Valid purchases, credit note on a sales invoice in this return", gst_return(batch, {"PB-1": meridian}, {"CN-1207": cn},
+         {"PB-1": m_read}, {"CN-1207": cn_read}, billed))
+
+    rebate = "CREDIT NOTE CN-1222 for customer C-0131\nAgainst invoice INV-30502: volume rebate\nNet 500.00  GST 18% 90.00  Total 590.00"
+    r_read = model({"cn": {"number": "CN-1222", "invoice_ref": "INV-30502", "customer": "C-0131", "net": 500, "tax_rate": 0.18, "tax": 90, "total": 590}})
+    show("Both steps pass, credit note against an invoice not in this return", gst_return(batch, {"PB-1": meridian},
+         {"CN-1207": cn, "CN-1222": rebate}, {"PB-1": m_read}, {"CN-1207": cn_read, "CN-1222": r_read}, billed))
+
+    inter = ("SAHYADRI LABELS PVT LTD, Bengaluru  GSTIN 29AAKCS5512L1ZW\nBill to: Velora Retail  GSTIN 27AADCT9045H1Z3\n"
+             "Place of supply: 27-Maharashtra\nPrinted labels  Taxable 20,000.00\nCGST 6% 1,200.00  SGST 6% 1,200.00\nTotal 22,400.00")
+    s_read = model({"inv": {"supplier_gstin": "29AAKCS5512L1ZW", "recipient_gstin": "27AADCT9045H1Z3", "place_of_supply": "27",
+                            "taxable": 20000, "rate": 12, "cgst": 1200, "sgst": 1200, "igst": 0, "total": 22400}})
+    show("Inter-state supplier charged CGST + SGST", gst_return(batch, {"PB-1": meridian, "PB-2": inter}, {"CN-1207": cn},
+         {"PB-1": m_read, "PB-2": s_read}, {"CN-1207": cn_read}, billed))

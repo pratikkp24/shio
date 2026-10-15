@@ -1,0 +1,50 @@
+# Workflow: field service close-out. The technician's note becomes a work order on the customer-site asset
+# (work_order), and the failed unit he pulled is returned under an RMA (rma_return). Cross-step check: the serial on
+# the RMA is the unit the work order says was removed, so a warranty swap cannot be claimed for a unit nobody
+# replaced. CLOSE the job, or REVIEW with the reasons.
+
+from common import model, grounded, show
+from uses import use, step_ok
+
+wo = use("work_order")
+returns = use("rma_return")
+
+type Removed:
+    serial: str            # the serial number of the unit the technician removed, e.g. VX-123456789
+    quote: str             # the note's words about removing it, copied exactly
+
+agent close_out(note: str, rma_email: str, customer: str, wo_llm, rma_llm, llm):
+    job = wo.work_order(note, wo_llm)
+    rma = returns.rma(rma_email, customer, rma_llm)
+    read pulled: Removed by llm:
+        Which serialised unit did the technician remove? Give its serial number.
+
+        {note}
+
+    check job_done: step_ok(job, "SCHEDULE"), "work order: {job.get('action')} {job.get('why', '')}"
+    check rma_approved: step_ok(rma, "REPLACE", "REPAIR"), "RMA: {rma.get('action')} {rma.get('why', '')}"
+    check removal_in_note: grounded(pulled.quote, note) and pulled.serial in pulled.quote, "{pulled.serial} is not what the note says was removed"
+    check same_unit after rma_approved, removal_in_note: rma.get("serial") == pulled.serial, "RMA is for {rma.get('serial')}, the work order removed {pulled.serial}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "CLOSE", "asset": job["asset"], "parts": job["parts"], "returned": rma["serial"], "rma": rma["action"]}
+    return decision
+
+main:
+    site = "ops@brightmere.example"
+    note = ("PMP-0412 leaking at the mechanical seal, drips every few seconds. Need 1x SK-40 seal kit and 2x BRG-6205 bearings. "
+            "Also removed the dead telemetry router VX-482130978 from the pump skid and fitted a spare. - D. Okafor")
+    job = {"j": {"asset_id": "PMP-0412", "fault": "mechanical seal leak", "fault_quote": "leaking at the mechanical seal",
+                 "parts": [{"part_no": "SK-40", "qty": 1}, {"part_no": "BRG-6205", "qty": 2}]}}
+    pulled = {"pulled": {"serial": "VX-482130978", "quote": "removed the dead telemetry router VX-482130978"}}
+    doa = "Hello, the R7 router we got last week (serial VX-482130978) won't power on at all, no lights. Rhea Lanford, Brightmere"
+    rma_doa = {"r": {"serial": "VX-482130978", "fault": "dead on arrival", "fault_quote": "won't power on at all, no lights"}}
+    show("RMA is for the unit the technician removed", close_out(note, doa, site, model(job), model(rma_doa), model(pulled)))
+
+    switch = "Our switch VX-318776044 keeps dropping connections every few hours. Please repair. Rhea Lanford"
+    rma_sw = {"r": {"serial": "VX-318776044", "fault": "intermittent fault", "fault_quote": "keeps dropping connections every few hours"}}
+    show("RMA claims a unit no work order replaced", close_out(note, switch, site, model(job), model(rma_sw), model(pulled)))
+
+    show("Work order step fails: asset tag misread", close_out(note, doa, site, model({"j": dict(job["j"], asset_id="PMP-0421")}), model(rma_doa), model(pulled)))

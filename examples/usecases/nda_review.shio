@@ -1,0 +1,73 @@
+# Legal operations: inbound NDAs against the company's NDA playbook. The model reads four terms, each with the exact
+# clause; code checks every clause is in the NDA, every number is in its clause, and applies the playbook. Only a
+# fully verified NDA inside the playbook is signed without review; anything else goes to a lawyer, who decides.
+
+import re
+from common import model, grounded, numbers, norm, show
+
+PLAYBOOK = {"max_years": 3, "laws": {"england and wales", "ireland", "singapore"}}
+
+type Term:
+    value: str?            # the term in a few words; null if the NDA does not have it
+    number: float?         # the number in it (years), null if none
+    clause: str            # the sentence it comes from, copied exactly; empty if the NDA does not have it
+
+type NDA:
+    duration: Term         # how long confidentiality lasts, in years
+    direction: Term        # "mutual" if both parties disclose and are bound, "one-way" if only one is
+    non_solicit: Term      # any promise not to hire or solicit the other party's staff or customers; null value if none
+    governing_law: Term    # the law that governs the NDA, e.g. "Ireland"
+
+TERMS = ("duration", "direction", "non_solicit", "governing_law")
+
+agent review(nda: str, llm):
+    read t: NDA by llm:
+        Read this non-disclosure agreement and extract each term with the exact clause it comes from.
+
+        {nda}
+
+    for name in TERMS:
+        check cited[name]: getattr(t, name).value is None or grounded(getattr(t, name).clause, nda), "{name}: clause not found in the NDA"
+        check number_in_clause[name]: getattr(t, name).number is None or getattr(t, name).number in numbers(getattr(t, name).clause), "{name}: {getattr(t, name).number} is not in its clause"
+    check solicit_accounted: t.non_solicit.value is not None or not re.search(r"\bsolicit", nda, re.I), "the NDA mentions soliciting but no non-solicit was reported"
+
+    rule outcome:
+        flags = []
+        if t.duration.number is None or t.duration.number > PLAYBOOK["max_years"]:
+            flags.append(f"confidentiality term {t.duration.number} years; playbook max {PLAYBOOK['max_years']}")
+        if norm(t.direction.value) != "mutual":
+            flags.append(f"NDA is {t.direction.value}, not mutual")
+        if t.non_solicit.value is not None:
+            flags.append(f"contains a non-solicit: {t.non_solicit.clause}")
+        if norm(t.governing_law.value).replace("the laws of ", "") not in PLAYBOOK["laws"]:
+            flags.append(f"governing law {t.governing_law.value} is not on the approved list")
+        unverified = [c["detail"] for c in checks.failures()]
+        if flags or unverified:
+            return {"action": "LEGAL", "flags": flags, "unverified": unverified}
+        return {"action": "SIGN", "term_years": t.duration.number, "law": t.governing_law.value}
+    return outcome
+
+main:
+    nda = ("1. Each party may disclose Confidential Information to the other, and each party shall protect what it receives.\n"
+           "6. The obligations in this Agreement last for two (2) years from the date of disclosure.\n"
+           "11. This Agreement is governed by the laws of Ireland.")
+    good = {"t": {"duration": {"value": "2 years", "number": 2, "clause": "last for two (2) years from the date of disclosure"},
+                  "direction": {"value": "mutual", "number": None, "clause": "Each party may disclose Confidential Information to the other"},
+                  "non_solicit": {"value": None, "number": None, "clause": ""},
+                  "governing_law": {"value": "Ireland", "number": None, "clause": "governed by the laws of Ireland"}}}
+    show("Mutual NDA inside the playbook", review(nda, model(good)))
+
+    longer = nda.replace("two (2) years", "five (5) years")
+    misread = {"t": dict(good["t"], duration={"value": "2 years", "number": 2, "clause": "last for five (5) years from the date of disclosure"})}
+    show("Model reports 2 years where the NDA says 5", review(longer, model(misread)))
+
+    tucked = nda + "\n14. For 12 months neither party shall solicit for employment any employee of the other party."
+    show("Model overlooks a non-solicit", review(tucked, model(good)))
+
+    oneway = ("1. Recipient shall keep confidential all information disclosed by Kestrel Biologics Inc.\n"
+              "5. These obligations survive for 3 years.\n9. Governing law: State of Delaware.")
+    show("One-way NDA under Delaware law", review(oneway, model({"t": {
+        "duration": {"value": "3 years", "number": 3, "clause": "These obligations survive for 3 years."},
+        "direction": {"value": "one-way", "number": None, "clause": "Recipient shall keep confidential all information disclosed by Kestrel Biologics Inc."},
+        "non_solicit": {"value": None, "number": None, "clause": ""},
+        "governing_law": {"value": "Delaware", "number": None, "clause": "Governing law: State of Delaware."}}})))

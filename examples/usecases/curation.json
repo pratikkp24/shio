@@ -1,0 +1,20 @@
+{
+ "domains": {
+  "Finance and accounting": ["expense", "three_way_match", "bank_statement_income", "payroll_change", "vendor_bank_change", "gst_invoice", "credit_note", "covenant_check", "fx_confirmation", "audit_sample", "x_procure_to_pay", "x_vendor_onboarding", "x_sme_loan", "x_month_end_close", "x_bec_defense", "x_treasury_payment", "x_gst_return", "x_expense_trip", "x_loan_tenant"],
+  "Insurance, healthcare administration and public sector": ["health_claim", "flight_delay_claim", "motor_claim", "prior_auth_packet", "lab_flag", "formulary_check", "benefit_eligibility", "rti_request", "building_permit", "x_health_claim_journey", "x_lab_to_pharmacy", "x_travel_claim", "x_motor_claim_full", "x_benefit_with_address", "x_citizen_requests", "x_permit_and_contractor", "x_benefit_employment", "x_insurer_payout"],
+  "Supply chain, logistics and manufacturing": ["shipment_eta", "customs_hs", "po_from_email", "quality_inspection", "freight_audit", "rma_return", "supplier_certificate", "work_order", "forecast_override", "x_import_shipment", "x_returns_desk", "x_maintenance_parts", "x_landed_cost", "x_field_service", "x_order_to_delivery", "x_incoming_quality", "x_demand_to_order", "x_supplier_risk", "x_global_listing"],
+  "Customers, sales and marketing": ["refund", "lead_qualify", "listing_compliance", "review_moderation", "order_status_bot", "promo_request", "cancellation_retention", "translation_qa", "email_campaign_compliance", "price_match", "x_support_desk", "x_churn_save", "x_global_launch", "x_lead_to_nda", "x_price_and_promo", "x_campaign_audience", "x_marketplace_seller", "x_review_to_listing", "x_kb_and_orders"],
+  "People, legal and compliance": ["kyc", "screening", "contract", "meeting_actions", "leave_request", "nda_review", "dsar_request", "sanctions_screening", "rental_application", "lease_abstract", "background_check", "policy_attestation", "x_hire_verified", "x_joiner_access", "x_conflict_of_interest", "x_tenancy", "x_deal_desk", "x_dsar_export", "x_hire_onboarding"],
+  "Engineering, security and data": ["phishing_triage", "access_request", "postmortem_timeline", "alert_triage", "license_compliance", "secret_scan_review", "terraform_change", "address_cleanup", "meeting_scheduler", "cited_answer", "x_privacy_incident", "x_release_gate", "x_phish_to_access", "x_meeting_followthrough"]
+ },
+ "left_out": {
+  "x_kb_and_orders": "Chains the HR policy answer with leave requests, not orders as its name says; the pairing is contrived.",
+  "x_global_listing": "Overlaps x_global_launch (the same price across languages) and x_price_and_promo (the minimum advertised price floor).",
+  "x_supplier_risk": "Overlaps x_vendor_onboarding: the same two steps and the same same-entity check.",
+  "x_demand_to_order": "Needs an invented mapping between two base files' SKUs to work.",
+  "x_incoming_quality": "Uses sales-ledger account codes as stand-ins for a supplier's credit.",
+  "x_review_to_listing": "Became a review quoted in a promo email, so the name no longer fits; its checks overlap listing and email compliance.",
+  "x_order_to_delivery": "Relies on two invented mapping tables; its ETA cross-check is close to x_import_shipment's.",
+  "x_hire_onboarding": "Superseded by x_hire_verified; kept as the short reference workflow in AUTHORING.md."
+ }
+}

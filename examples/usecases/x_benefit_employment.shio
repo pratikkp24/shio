@@ -1,0 +1,62 @@
+# Workflow: a welfare benefit application that declares a period out of work. Check eligibility (benefit_eligibility),
+# verify the last job with the employer's letter (background_check), then check across both: the employment the letter
+# confirms must end before the month the applicant says they became unemployed. ELIGIBLE or OFFICER REVIEW.
+
+from common import model, grounded, show
+from uses import use, step_ok
+
+benefit = use("benefit_eligibility")
+employment = use("background_check")
+
+type Declared:
+    since: str             # the month the applicant says they became unemployed, YYYY-MM
+    quote: str             # the words saying so, copied exactly
+
+def overlaps(job_end, since):
+    return job_end is None or employment.months(job_end) >= employment.months(since)
+
+agent apply(form: str, certificate: str, resume: str, letter: str, ben_llm, job_llm, llm):
+    decision = benefit.eligibility(form, certificate, ben_llm)
+    job = employment.verify(resume, letter, job_llm)
+    read u: Declared by llm:
+        Since when does the applicant say they have been unemployed?
+
+        {form}
+
+    check eligible: step_ok(decision, "ELIGIBLE"), "eligibility: {decision.get('status')} {decision.get('why', '')}"
+    check job_verified: step_ok(job, "VERIFIED"), "employment: {job.get('status')} {job.get('why', '')}"
+    check declared_read: grounded(u.quote, form) and employment.written(u.since, u.quote), "unemployed since {u.since} is not on the form as read"
+    check no_overlap after job_verified: not overlaps(job.get("to"), u.since), "employer confirms work until {job.get('to') or 'now'}, form declares unemployed since {u.since}"
+
+    rule outcome:
+        if checks.failures():
+            return {"status": "OFFICER REVIEW", "why": [c["detail"] for c in checks.failures()], "note": "the officer speaks to the applicant; nothing is refused here"}
+        return {"status": "ELIGIBLE", "applicant": decision["applicant"], "unemployed_since": u.since, "last_job_ended": job["to"]}
+    return outcome
+
+main:
+    form = "Applicant: Meera Joshi\nHousehold members: 4\nTotal annual income (Rs): 186,000\nDistrict: Tilwara\n" \
+           "Employment status: unemployed since September 2025"
+    cert = "OFFICE OF THE TEHSILDAR, TILWARA\nCertificate No. INC/2026/TW/004512   Date: 2026-03-11\nThis is to certify that " \
+           "the annual income of the family of Meera Joshi, resident of Tilwara, is Rs 186,000 from all sources."
+    f_ok = {"applicant": "Meera Joshi", "household_size": 4, "annual_income": 186000, "district": "Tilwara"}
+    c_ok = {"holder": "Meera Joshi", "annual_income": 186000, "income_line": "is Rs 186,000 from all sources",
+            "district": "Tilwara", "issued": "2026-03-11", "cert_no": "INC/2026/TW/004512"}
+    ben = model({"f": f_ok, "c": c_ok})
+    u_ok = {"u": {"since": "2025-09", "quote": "unemployed since September 2025"}}
+    resume = "Experience\nAccounts Assistant, Tilwara Agro Mills, Jan 2021 - Aug 2025: ledgers and GST returns."
+    letter = "Tilwara Agro Mills confirms that Meera Joshi was employed as Accounts Assistant from 4 January 2021 to 29 August 2025."
+    claim = {"employer": "Tilwara Agro Mills", "title": "Accounts Assistant", "start": "2021-01", "end": "2025-08",
+             "quote": "Accounts Assistant, Tilwara Agro Mills, Jan 2021 - Aug 2025"}
+    conf = {"employer": "Tilwara Agro Mills", "title": "Accounts Assistant", "start": "2021-01", "end": "2025-08",
+            "quote": "employed as Accounts Assistant from 4 January 2021 to 29 August 2025"}
+    show("Job ended before the declared unemployment", apply(form, cert, resume, letter, ben, model({"claim": claim, "conf": conf}), model(u_ok)))
+
+    later_r = resume.replace("Aug 2025", "Feb 2026")
+    later_l = letter.replace("29 August 2025", "27 February 2026")
+    show("Both steps pass, but the employer confirms work during the declared gap", apply(form, cert, later_r, later_l, ben,
+         model({"claim": dict(claim, end="2026-02", quote="Accounts Assistant, Tilwara Agro Mills, Jan 2021 - Feb 2026"),
+                "conf": dict(conf, end="2026-02", quote="employed as Accounts Assistant from 4 January 2021 to 27 February 2026")}), model(u_ok)))
+
+    show("Resume and employer letter disagree", apply(form, cert, resume, later_l, ben,
+         model({"claim": claim, "conf": dict(conf, end="2026-02", quote="employed as Accounts Assistant from 4 January 2021 to 27 February 2026")}), model(u_ok)))

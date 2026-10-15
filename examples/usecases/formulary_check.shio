@@ -1,0 +1,61 @@
+# Pharmacy: order check before dispensing. The model reads drug, strength and frequency from the prescription; code
+# works out the daily dose against the formulary maximum and checks the patient's medication record for listed
+# interaction pairs. Anything unusual goes to a pharmacist; code never changes a dose. Drug names are fictional.
+
+from common import model, grounded, numbers, show
+
+FORMULARY = {   # drug -> stocked strengths (mg) and maximum daily dose (mg)
+    "veltrazide": {"strengths": {10.0, 25.0}, "max_daily_mg": 50.0},
+    "corivastat": {"strengths": {20.0, 40.0}, "max_daily_mg": 80.0},
+    "lomarin": {"strengths": {2.5, 5.0}, "max_daily_mg": 10.0},
+}
+PER_DAY = {"once daily": 1, "twice daily": 2, "three times daily": 3, "four times daily": 4}
+INTERACTIONS = {frozenset({"lomarin", "corivastat"}): "lomarin + corivastat: listed interaction pair"}
+MED_RECORD = {"PT-7731": ["veltrazide"], "PT-8102": ["corivastat"], "PT-9050": []}   # current medicines
+
+type Order:
+    drug: str              # generic name, lower case
+    strength_mg: float     # strength of one tablet in mg
+    tablets_per_dose: float
+    frequency: "once daily" | "twice daily" | "three times daily" | "four times daily" | "other"
+    rx_line: str           # the prescription line with the drug and strength, copied exactly
+
+def daily_mg(strength, tablets, frequency):
+    return strength * tablets * PER_DAY.get(frequency, 0)
+
+def clashes(drug, patient):
+    return [INTERACTIONS[frozenset({drug, m})] for m in MED_RECORD.get(patient, []) if frozenset({drug, m}) in INTERACTIONS]
+
+agent check_order(patient: str, rx: str, llm):
+    read o: Order by llm:
+        Read the medicine order on this prescription: drug, tablet strength, tablets per dose and how often.
+
+        {rx}
+
+    check rx_line_matches: grounded(o.rx_line, rx) and o.drug in o.rx_line.lower() and o.strength_mg in numbers(o.rx_line), "{o.drug} {o.strength_mg} mg is not what the prescription line says"
+    check on_formulary: o.drug in FORMULARY, "{o.drug} is not on the formulary"
+    check strength_stocked: o.drug in FORMULARY and o.strength_mg in FORMULARY[o.drug]["strengths"], "{o.strength_mg} mg {o.drug} is not a stocked strength"
+    check standard_frequency: o.frequency in PER_DAY, "non-standard frequency"
+    check within_max: o.drug in FORMULARY and 0 < daily_mg(o.strength_mg, o.tablets_per_dose, o.frequency) <= FORMULARY[o.drug]["max_daily_mg"], "daily dose {daily_mg(o.strength_mg, o.tablets_per_dose, o.frequency)} mg, formulary maximum {FORMULARY.get(o.drug, {}).get('max_daily_mg')} mg"
+    check no_interaction: not clashes(o.drug, patient), "{'; '.join(clashes(o.drug, patient))}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "PHARMACIST REVIEW", "patient": patient, "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "DISPENSE", "patient": patient, "label": f"{o.drug} {o.strength_mg:g} mg, {o.tablets_per_dose:g} tablet(s) {o.frequency}"}
+    return decision
+
+main:
+    rx = "Rx  PT-7731  Corivastat 20 mg tablets - take 1 tablet once daily at night. 30 days."
+    ok = {"o": {"drug": "corivastat", "strength_mg": 20, "tablets_per_dose": 1, "frequency": "once daily", "rx_line": "Corivastat 20 mg tablets"}}
+    show("Standard order", check_order("PT-7731", rx, model(ok)))
+
+    big = "Rx  PT-9050  Veltrazide 25 mg - 1 tablet three times daily."
+    show("Daily dose above the formulary maximum", check_order("PT-9050", big, model({"o": {"drug": "veltrazide", "strength_mg": 25,
+         "tablets_per_dose": 1, "frequency": "three times daily", "rx_line": "Veltrazide 25 mg - 1 tablet three times daily"}})))
+
+    pair = "Rx  PT-8102  Lomarin 2.5 mg - 1 tablet twice daily."
+    lom = {"o": {"drug": "lomarin", "strength_mg": 2.5, "tablets_per_dose": 1, "frequency": "twice daily", "rx_line": "Lomarin 2.5 mg"}}
+    show("Interaction with a current medicine", check_order("PT-8102", pair, model(lom)))
+
+    show("Model reads 2.5 mg as 25 mg", check_order("PT-9050", pair.replace("PT-8102", "PT-9050"), model({"o": dict(lom["o"], strength_mg=25)})))

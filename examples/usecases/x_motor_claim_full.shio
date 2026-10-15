@@ -1,0 +1,82 @@
+# Workflow: a motor claim end to end. Price the garage's estimate (motor_claim), verify the claimant (kyc), then check
+# across both: the vehicle on the estimate is registered to the verified claimant, and the garage's authorised-repairer
+# certificate covers body repair and is in date. APPROVE or REVIEW by a motor surveyor. (supplier_certificate's
+# supplier table has no garages, so the workflow reads the garage certificate itself.)
+
+import re
+from common import model, grounded, norm, parse_date, TODAY, show
+from uses import use, step_ok
+
+motor = use("motor_claim")
+kyc = use("kyc")
+
+REGISTRY = {"MH12AB4410": {"owner": "PRIYA R SHARMA"}, "MH14CD2208": {"owner": "NEHA KAPOOR"}}   # transport registry
+SCOPE_NEEDED = "body repair"
+
+type Vehicle:
+    reg_no: str            # the vehicle registration number on the estimate
+    quote: str             # the words with it, copied exactly
+
+type GarageCert:
+    holder: str            # the garage the certificate is issued to, as printed
+    scope: str             # the scope of authorisation, copied exactly
+    expiry: str            # YYYY-MM-DD
+
+def reg(s):
+    return re.sub(r"\s", "", str(s or "")).upper()
+
+agent claim(claim_no: str, estimate: str, form: str, id_text: str, cert: str, motor_llm, kyc_llm, llm):
+    priced = motor.estimate(claim_no, estimate, motor_llm)
+    person = kyc.kyc(form, id_text, kyc_llm)
+    read v: Vehicle by llm:
+        Which vehicle is this repair estimate for?
+
+        {estimate}
+    read g: GarageCert by llm:
+        Read this garage's authorised-repairer certificate.
+
+        {cert}
+
+    check estimate_ok: step_ok(priced, "APPROVE"), "estimate: {priced.get('action')} {priced.get('why', '')}"
+    check verified: step_ok(person, "APPROVE"), "identity: {person.get('status')} {person.get('why', '')}"
+    check vehicle_read: grounded(v.quote, estimate) and reg(v.reg_no) in reg(v.quote), "vehicle {v.reg_no} is not on the estimate as read"
+    check owner_is_claimant after verified: reg(v.reg_no) in REGISTRY and kyc.same_name(REGISTRY[reg(v.reg_no)]["owner"], person.get("name", "")), "{v.reg_no} is registered to {REGISTRY.get(reg(v.reg_no), {}).get('owner')}, claimant is {person.get('name')}"
+    check cert_read: all(grounded(x, cert) for x in (g.holder, g.scope, g.expiry)), "certificate fields not as printed"
+    check cert_holder after estimate_ok: norm(g.holder) == norm(priced.get("garage")), "certificate is for {g.holder}, estimate is from {priced.get('garage')}"
+    check cert_scope: SCOPE_NEEDED in norm(g.scope), "certificate scope '{g.scope}' does not cover {SCOPE_NEEDED}"
+    check cert_in_date: parse_date(g.expiry) is not None and parse_date(g.expiry) > TODAY, "garage certificate expired {g.expiry}"
+
+    rule decision:
+        if checks.failures():
+            return {"action": "REVIEW", "claim": claim_no, "to": "motor surveyor", "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "APPROVE", "claim": claim_no, "owner": person["name"], "garage": priced["garage"], "amount": priced["amount"]}
+    return decision
+
+main:
+    estimate = """SAHYADRI MOTORS (GAR-PN-014)  Estimate for MH12 AB 4410
+    BMP-F-221 Front bumper   1 x 14,200.00
+    CLP-12 Bumper clips      2 x    240.00
+    Labour 4.0 h @ 950.00
+    GRAND TOTAL incl. GST 18%: 21,806.40"""
+    e_ok = {"e": {"garage_id": "GAR-PN-014", "labour_hours": 4.0, "labour_rate": 950.0, "total": 21806.40,
+                  "lines": [{"part_code": "BMP-F-221", "qty": 1, "unit_price": 14200.0}, {"part_code": "CLP-12", "qty": 2, "unit_price": 240.0}]}}
+    form = "Name: Priya R. Sharma\nDate of birth: 1994-03-07\nPAN: ABCPS1234K"
+    card = "INCOME TAX DEPARTMENT\nPRIYA R SHARMA\nDOB 07/03/1994\nPermanent Account Number ABCPS1234K"
+    me = {"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1234K"}
+    ids = {"applied": dict(me, name="Priya R. Sharma"), "card": me, "card_again": me}
+    cert = "AUTHORISED REPAIRER CERTIFICATE\nIssued to: Sahyadri Motors, Pune\nScope: accident body repair and paint, passenger cars\nValid until 2027-09-30"
+    g_ok = {"holder": "Sahyadri Motors", "scope": "accident body repair and paint, passenger cars", "expiry": "2027-09-30"}
+    v_ok = {"reg_no": "MH12 AB 4410", "quote": "Estimate for MH12 AB 4410"}
+    show("Owner verified, garage authorised for body repair", claim("MC-55012", estimate, form, card, cert, model(e_ok), model(ids), model({"v": v_ok, "g": g_ok})))
+
+    neha = {"name": "NEHA KAPOOR", "dob": "1996-01-02", "pan": "BCDPK5678L"}
+    other = {"applied": dict(neha, name="Neha Kapoor"), "card": neha, "card_again": neha}
+    show("Every step passes, but the claimant does not own the car", claim("MC-55015", estimate, "Name: Neha Kapoor", "NEHA KAPOOR",
+         cert, model(e_ok), model(other), model({"v": v_ok, "g": g_ok})))
+
+    service = cert.replace("accident body repair and paint", "periodic servicing and wheel alignment")
+    show("Garage certificate covers servicing only", claim("MC-55012", estimate, form, card, service, model(e_ok), model(ids),
+         model({"v": v_ok, "g": dict(g_ok, scope="periodic servicing and wheel alignment, passenger cars")})))
+
+    show("Model misreads the estimate total", claim("MC-55012", estimate, form, card, cert, model({"e": dict(e_ok["e"], total=27806.40)}),
+         model(ids), model({"v": v_ok, "g": g_ok})))

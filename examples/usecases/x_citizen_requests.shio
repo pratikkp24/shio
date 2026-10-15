@@ -1,0 +1,75 @@
+# Workflow: the day's citizen requests. Triage an RTI request (rti_request) and a data-subject request (dsar_request),
+# then cross-check the two registers in code: an RTI request that names a private individual whose own data request
+# or erasure is pending goes to exemption review, even when the RTI step alone would route it. ROUTE / EXEMPTION REVIEW.
+
+from common import model, grounded, norm, show
+from uses import use, step_ok
+
+rti = use("rti_request")
+dsar = use("dsar_request")
+
+DATA_SUBJECTS = {"CU-55821": "Helena Vance", "CU-61037": "Oskar Brandt"}       # privacy register: account -> person
+OPEN_ERASURES = {"oskar brandt": "ERASURE-2026-0193"}                          # erasure requests still in progress
+
+type Person:
+    name: str              # a private individual named in the request (not an officer acting in office)
+    quote: str             # the words naming them, copied exactly
+
+type Named:
+    people: list[Person]   # empty if the request names no private individual
+
+def pending(dsar_out):
+    open_now = dict(OPEN_ERASURES)
+    if step_ok(dsar_out, "FULFIL"):
+        open_now[norm(DATA_SUBJECTS[dsar_out["customer"]])] = f"DSAR for {dsar_out['customer']}, respond by {dsar_out['respond_by']}"
+    return open_now
+
+agent requests(rti_text: str, filed_on: str, letter: str, sender: str, received: str, rti_llm, dsar_llm, llm):
+    info = rti.rti(rti_text, filed_on, rti_llm)
+    subject = dsar.dsar(letter, sender, received, dsar_llm)
+    read n: Named by llm:
+        List every private individual this RTI request names, with the words that name them.
+
+        {rti_text}
+
+    check rti_routed: step_ok(info, "ROUTE"), "RTI: {info.get('action')} {info.get('why', '')}"
+    check names_read: all(grounded(p.quote, rti_text) and norm(p.name) in norm(p.quote) for p in n.people), "a named person is not in the request as written"
+    check no_open_case: not [p.name for p in n.people if norm(p.name) in pending(subject)], "request names {[p.name + ': ' + pending(subject)[norm(p.name)] for p in n.people if norm(p.name) in pending(subject)]}"
+
+    rule decision:
+        clash = info.get("action") == "EXEMPTION REVIEW" or not no_open_case or not names_read
+        if clash:
+            return {"action": "EXEMPTION REVIEW", "to": "Public Information Officer", "due": info.get("due"), "dsar": subject["action"],
+                    "why": [c["detail"] for c in checks.failures()]}
+        if not rti_routed:
+            return {"action": info["action"], "dsar": subject["action"], "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "ROUTE", "to": info["to"], "due": info["due"], "dsar": subject["action"]}
+    return decision
+
+main:
+    text = "To the PIO, Varunpur Municipal Council. Under the RTI Act please provide (1) the sanctioned cost of the Ward 9 " \
+           "water pipeline replacement and (2) copies of the completion certificate. Fee paid, receipt RTI-FEE-55821. - Kabir Anand"
+    r_ok = {"r": {"applicant": "Kabir Anand", "department": "Water Supply", "fee_receipt": "RTI-FEE-55821",
+                  "asks": [{"summary": "sanctioned cost", "quote": "the sanctioned cost of the Ward 9 water pipeline replacement"},
+                           {"summary": "completion certificate", "quote": "copies of the completion certificate"}]}}
+    letter = ("Under Article 15 GDPR, please send me a copy of all personal data you hold about me, including call recordings. "
+              "My account number is CU-55821 and my postcode is BS1 4DJ. Helena Vance")
+    d_ok = {"r": {"name": "Helena Vance", "postcode": "BS1 4DJ", "account": "CU-55821", "subject": "self", "subject_name": "Helena Vance",
+                  "scope": ["all personal data", "call recordings"], "quote": "please send me a copy of all personal data you hold about me"}}
+    show("RTI names nobody; DSAR accepted", requests(text, "2026-10-05", letter, "h.vance@mailbox.example", "2026-10-12",
+         model(r_ok), model(d_ok), model({"n": {"people": []}})))
+
+    ask = "copies of the complaints filed by resident Helena Vance"
+    named = text.replace("copies of the completion certificate", ask)
+    r_named = {"r": dict(r_ok["r"], asks=[r_ok["r"]["asks"][0], {"summary": "complaints", "quote": ask}])}
+    show("Both steps pass, but the RTI names someone with an open DSAR", requests(named, "2026-10-05", letter, "h.vance@mailbox.example",
+         "2026-10-12", model(r_named), model(d_ok), model({"n": {"people": [{"name": "Helena Vance", "quote": "resident Helena Vance"}]}})))
+
+    short = text.replace("RTI-FEE-55821", "RTI-FEE-55940")
+    show("RTI fee short paid", requests(short, "2026-10-14", letter, "h.vance@mailbox.example", "2026-10-12",
+         model({"r": dict(r_ok["r"], fee_receipt="RTI-FEE-55940")}), model(d_ok), model({"n": {"people": []}})))
+
+    oskar = "copies of the complaints filed by resident Oskar Brandt"
+    show("RTI names someone whose erasure is in progress", requests(text.replace("copies of the completion certificate", oskar), "2026-10-05",
+         letter, "h.vance@mailbox.example", "2026-10-12", model({"r": dict(r_ok["r"], asks=[r_ok["r"]["asks"][0], {"summary": "complaints", "quote": oskar}])}),
+         model(d_ok), model({"n": {"people": [{"name": "Oskar Brandt", "quote": "resident Oskar Brandt"}]}})))

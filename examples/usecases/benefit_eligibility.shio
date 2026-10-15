@@ -1,0 +1,76 @@
+# Public sector: a welfare benefit application. The model reads the application form and the attached income
+# certificate; code cross-checks the two, applies the income threshold for the household size and the district list,
+# and checks the certificate's age. Any mismatch goes to an eligibility officer; code does not refuse on its own.
+
+import re
+from common import model, grounded, norm, numbers, parse_date, TODAY, show
+
+THRESHOLD = {1: 120000, 2: 160000, 3: 200000, 4: 240000, 5: 280000}   # annual household income limit, by size (5 = 5+)
+DISTRICTS = {"Varunpur", "Kesar Nagar", "Tilwara"}                       # where the scheme runs
+CERT_NO = re.compile(r"^INC/20\d\d/[A-Z]{2}/\d{6}$")
+CERT_VALID_DAYS = 365
+
+type Form:
+    applicant: str
+    household_size: int
+    annual_income: float   # household income the applicant declares, per year
+    district: str
+
+type Certificate:
+    holder: str
+    annual_income: float   # income certified, per year
+    income_line: str       # the sentence with the certified income, copied exactly
+    district: str
+    issued: str            # issue date, YYYY-MM-DD
+    cert_no: str
+
+def limit(size):
+    return THRESHOLD[min(max(size, 1), 5)]
+
+agent eligibility(form: str, certificate: str, llm):
+    read f: Form by llm:
+        Read this benefit application form.
+
+        {form}
+    read c: Certificate by llm:
+        Read this income certificate.
+
+        {certificate}
+
+    check cert_number: bool(CERT_NO.match(c.cert_no)), "certificate number {c.cert_no} is not in the issuing format"
+    check cert_income_read: grounded(c.income_line, certificate) and c.annual_income in numbers(c.income_line), "certified income {c.annual_income} is not in the certificate as quoted"
+    check cert_current: parse_date(c.issued) is not None and 0 <= (TODAY - parse_date(c.issued)).days <= CERT_VALID_DAYS, "certificate issued {c.issued}, older than {CERT_VALID_DAYS} days"
+    check same_person: sorted(norm(f.applicant).split()) == sorted(norm(c.holder).split()), "form names {f.applicant}, certificate names {c.holder}"
+    check same_income: f.annual_income == c.annual_income, "form declares {f.annual_income:,.0f}, certificate says {c.annual_income:,.0f}"
+    check same_district: norm(f.district) == norm(c.district), "form district {f.district}, certificate district {c.district}"
+    check in_scheme_area: c.district in DISTRICTS, "{c.district} is outside the scheme area"
+    check under_threshold: c.annual_income <= limit(f.household_size), "income {c.annual_income:,.0f} above the {limit(f.household_size):,} limit for {f.household_size}"
+
+    rule decision:
+        others = [x["detail"] for x in checks.failures() if x["name"] not in ("under_threshold", "in_scheme_area")]
+        if others:
+            return {"status": "OFFICER REVIEW", "why": others}
+        if not (under_threshold and in_scheme_area):
+            return {"status": "PROPOSED INELIGIBLE", "officer_to_confirm": True, "why": [x["detail"] for x in checks.failures()]}
+        return {"status": "ELIGIBLE", "applicant": c.holder, "household": f.household_size, "income": c.annual_income}
+    return decision
+
+main:
+    form = "Applicant: Meera Joshi\nHousehold members: 4\nTotal annual income (Rs): 186,000\nDistrict: Tilwara"
+    cert = "OFFICE OF THE TEHSILDAR, TILWARA\nCertificate No. INC/2026/TW/004512   Date: 2026-03-11\nThis is to certify that " \
+           "the annual income of the family of Meera Joshi, resident of Tilwara, is Rs 186,000 from all sources."
+    f_ok = {"applicant": "Meera Joshi", "household_size": 4, "annual_income": 186000, "district": "Tilwara"}
+    c_ok = {"holder": "Meera Joshi", "annual_income": 186000, "income_line": "is Rs 186,000 from all sources",
+            "district": "Tilwara", "issued": "2026-03-11", "cert_no": "INC/2026/TW/004512"}
+    show("Eligible household", eligibility(form, cert, model({"f": f_ok, "c": c_ok})))
+
+    under = form.replace("186,000", "126,000")
+    cert2 = cert.replace("186,000", "261,000")
+    show("Form understates income vs certificate", eligibility(under, cert2, model({"f": dict(f_ok, annual_income=126000),
+         "c": dict(c_ok, annual_income=261000, income_line="is Rs 261,000 from all sources")})))
+
+    old = cert.replace("2026-03-11", "2025-06-02")
+    show("Certificate more than a year old", eligibility(form, old, model({"f": f_ok, "c": dict(c_ok, issued="2025-06-02")})))
+
+    small = form.replace("Household members: 4", "Household members: 2")
+    show("Income above the limit for two people", eligibility(small, cert, model({"f": dict(f_ok, household_size=2), "c": c_ok})))

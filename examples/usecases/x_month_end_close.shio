@@ -1,0 +1,60 @@
+# Workflow: month-end close sign-off. Post the period's credit note (credit_note.shio) and pay the expense claim
+# (expense.shio), then test segregation of duties across both: nobody approves their own expense or credit note, and
+# two people do not approve each other's. CLOSE or EXCEPTIONS.
+# (audit_sample.shio is not chained: its fixed ledger sample always holds an over-limit approval, so it never passes.)
+
+from common import model, grounded, norm, show
+from uses import use, step_ok
+
+credit_note = use("credit_note")
+expense = use("expense")
+
+type Signoff:
+    raised_by: str         # who raised the credit note, as signed on it
+    approved_by: str       # who approved it, as signed on it
+    quote: str             # the sign-off line, copied exactly
+
+agent close(claim: dict, receipt: str, note_text: str, exp_llm, cn_llm, llm):
+    paid = expense.expense(claim, receipt, exp_llm)
+    posted = credit_note.match_credit(note_text, cn_llm)
+    read cn: Signoff by llm:
+        Who raised and who approved this credit note?
+
+        {note_text}
+
+    check expense_ok: step_ok(paid, "PAY"), "expense: {paid.get('status')} {paid.get('why', '')}"
+    check credit_ok: step_ok(posted, "POST"), "credit note: {posted.get('status')} {posted.get('why', '')}"
+    check signoff_on_note: grounded(cn.quote, note_text) and cn.raised_by in cn.quote and cn.approved_by in cn.quote, "sign-off {cn.raised_by} / {cn.approved_by} is not on the credit note"
+    check expense_not_self: norm(claim["employee"]) != norm(claim["approver"]), "{claim['employee']} approved their own expense"
+    check credit_not_self: norm(cn.raised_by) != norm(cn.approved_by), "{cn.raised_by} approved their own credit note"
+    check not_reciprocal: not (norm(claim["approver"]) == norm(cn.raised_by) and norm(cn.approved_by) == norm(claim["employee"])), "{claim['approver']} and {claim['employee']} approved each other's items"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "EXCEPTIONS", "why": [c["detail"] for c in checks.failures()], "to": "financial controller"}
+        return {"status": "CLOSE", "expense_paid": paid["amount"], "credit_posted": posted["note"]}
+    return decision
+
+def note(raised, approved):
+    return ("CREDIT NOTE CN-1207 for customer C-0088\nAgainst invoice INV-30418: 40 units returned damaged\n"
+            f"Net 3,000.00  GST 18% 540.00  Total 3,540.00\nRaised by {raised}, approved by {approved}")
+
+def signoff(raised, approved):
+    return model({"cn": {"raised_by": raised, "approved_by": approved, "quote": f"Raised by {raised}, approved by {approved}"}})
+
+main:
+    receipt = "BLUE DOOR BISTRO  2026-10-07\nPasta 24.00\nSalad 12.50\nTip 7.30\nTOTAL 43.80"
+    dinner = model({"r": {"merchant": "Blue Door Bistro", "date": "2026-10-07", "total": 43.80, "category": "meals", "line_items": [24.00, 12.50, 7.30]}})
+    cn = model({"cn": {"number": "CN-1207", "invoice_ref": "INV-30418", "customer": "C-0088", "net": 3000, "tax_rate": 0.18, "tax": 540, "total": 3540}})
+    claim = {"amount": 43.80, "employee": "Anil Rao", "approver": "Mei Tan"}
+    show("Independent approvers", close(claim, receipt, note("Bea Costa", "Mei Tan"), dinner, cn, signoff("Bea Costa", "Mei Tan")))
+
+    swap = dict(claim, approver="Bea Costa")
+    show("Both steps pass, two people approve each other's items", close(swap, receipt, note("Bea Costa", "Anil Rao"), dinner, cn,
+         signoff("Bea Costa", "Anil Rao")))
+
+    show("Both steps pass, credit note self-approved", close(claim, receipt, note("Bea Costa", "Bea Costa"), dinner, cn,
+         signoff("Bea Costa", "Bea Costa")))
+
+    show("Expense claimed as 143.80", close(dict(claim, amount=143.80), receipt, note("Bea Costa", "Mei Tan"), dinner, cn,
+         signoff("Bea Costa", "Mei Tan")))

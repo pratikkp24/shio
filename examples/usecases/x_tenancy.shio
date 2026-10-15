@@ -1,0 +1,75 @@
+# Workflow: letting a flat. Check the applicant can afford the advertised rent (rental_application), verify their
+# identity (kyc), and abstract the lease drawn up for signature (lease_abstract). Cross-step checks: the tenant named on
+# the lease is the person whose identity was verified, and the lease's year-1 rent is the monthly rent the
+# affordability check used. Code decides SIGN LEASE or HOLD.
+
+from common import model, grounded, money_eq, show
+from uses import use, step_ok
+
+rental = use("rental_application")
+kyc = use("kyc")
+lease_step = use("lease_abstract")
+
+type Party:
+    tenant: str            # the tenant's full name as the lease names them
+    quote: str             # the sentence naming the tenant, copied exactly
+
+agent let(payslips: str, reference: str, rent: float, form: str, id_text: str, lease: str, rent_llm, kyc_llm, lease_llm, llm):
+    afford = rental.apply(payslips, reference, rent, rent_llm)
+    identity = kyc.kyc(form, id_text, kyc_llm)
+    abstract = lease_step.abstract(lease, lease_llm)
+    read party: Party by llm:
+        Who is the tenant under this lease?
+
+        {lease}
+
+    check affordable: step_ok(afford, "APPROVE"), "affordability: {afford.get('action')} {afford.get('why', afford.get('rent_to_income'))}"
+    check identity_ok: step_ok(identity, "APPROVE"), "identity: {identity.get('why')}"
+    check lease_abstracted: step_ok(abstract, "ABSTRACT FILED"), "lease: {abstract.get('why')}"
+    check tenant_quoted: grounded(party.quote, lease) and grounded(party.tenant, party.quote), "the tenant's name is not quoted from the lease"
+    check same_tenant after identity_ok: kyc.same_name(party.tenant, identity["name"]), "lease names {party.tenant}; identity verified for {identity.get('name')}"
+    check same_rent after lease_abstracted: money_eq(abstract["base_rent"] / 12, rent, 0.5), "lease rent {abstract.get('base_rent', 0) / 12:,.2f}/month; affordability was checked at {rent:,.2f}"
+
+    rule decision:
+        if checks.failures():
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+        return {"status": "SIGN LEASE", "tenant": identity["name"], "monthly_rent": rent, "rent_to_income": afford["rent_to_income"]}
+    return decision
+
+main:
+    slips = ("CORVID ANALYTICS LTD  Payslip 2026-07  Gross 5,600.00  Net 4,210.40  YTD gross 39,200.00\n"
+             "CORVID ANALYTICS LTD  Payslip 2026-08  Gross 5,600.00  Net 4,210.40  YTD gross 44,800.00\n"
+             "CORVID ANALYTICS LTD  Payslip 2026-09  Gross 5,850.00  Net 4,377.90  YTD gross 50,650.00")
+    ref = "From: hr@corvid-analytics.example\nWe confirm Nadia Ferreira has been employed as Senior Analyst since 2023."
+    p = [{"month": "2026-07", "gross": 5600, "net": 4210.40, "ytd_gross": 39200}, {"month": "2026-08", "gross": 5600, "net": 4210.40, "ytd_gross": 44800},
+         {"month": "2026-09", "gross": 5850, "net": 4377.90, "ytd_gross": 50650}]
+    pay = {"a": {"employer": "Corvid Analytics Ltd", "payslips": p, "reference_email": "hr@corvid-analytics.example"}}
+    form, card = "Name: Nadia Ferreira\nDate of birth: 1991-08-22\nPAN: ABCPF1234K", "NADIA FERREIRA\nDOB 22/08/1991\nABCPF1234K"
+    me = {"name": "NADIA FERREIRA", "dob": "1991-08-22", "pan": "ABCPF1234K"}
+    ids = {"applied": dict(me, name="Nadia Ferreira"), "card": me, "card_again": me}
+
+    def lease_of(tenant, annual, rows):
+        text = (f"1.1 This lease is granted to {tenant} (the Tenant) for Flat 3, 14 Quay Street.\n"
+                f"4.1 The Tenant shall pay an annual base rent of {annual:,.2f} in the first lease year.\n"
+                "4.2 The rent shall increase by 3% every 2 years on the review date.\n2.1 The term is 2 years from the commencement date.\n"
+                f"Schedule 2 Rent: Year 1 {rows[0]:,.2f}; Year 2 {rows[1]:,.2f}")
+        read = {"l": {"base_rent": {"value": annual, "clause": f"annual base rent of {annual:,.2f} in the first lease year"},
+                      "escalation_pct": {"value": 3, "clause": "The rent shall increase by 3% every 2 years"},
+                      "every_years": {"value": 2, "clause": "The rent shall increase by 3% every 2 years"},
+                      "term_years": {"value": 2, "clause": "The term is 2 years from the commencement date"},
+                      "table": [{"year": 1, "rent": rows[0]}, {"year": 2, "rent": rows[1]}]}}
+        who = {"party": {"tenant": tenant, "quote": f"This lease is granted to {tenant} (the Tenant)"}}
+        return text, model(read), model(who)
+
+    lease, l_llm, who = lease_of("Nadia Ferreira", 16200, [16200, 16200])
+    show("Verified tenant, rent as checked", let(slips, ref, 1350, form, card, lease, model(pay), model(ids), l_llm, who))
+
+    lease, l_llm, who = lease_of("Nadia Ferreira", 19800, [19800, 19800])
+    show("Lease drawn up at 1,650/month; affordability checked at 1,350", let(slips, ref, 1350, form, card, lease, model(pay), model(ids), l_llm, who))
+
+    lease, l_llm, who = lease_of("Nadia Ferreira and Rui Ferreira", 16200, [16200, 16200])
+    show("Lease adds a second tenant nobody verified", let(slips, ref, 1350, form, card, lease, model(pay), model(ids), l_llm, who))
+
+    misread = dict(ids, card=dict(me, pan="ABCPF1284K"))
+    lease, l_llm, who = lease_of("Nadia Ferreira", 16200, [16200, 16200])
+    show("Identity check misreads a digit", let(slips, ref, 1350, form, card, lease, model(pay), model(misread), l_llm, who))

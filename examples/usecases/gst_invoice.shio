@@ -1,0 +1,74 @@
+# Tax: Indian GST tax invoice validation before input tax credit is claimed. The model reads the invoice; code checks
+# both GSTINs (format and check character), that the recipient is registered in the place of supply, that the right
+# tax applies (CGST+SGST within a state, IGST across states), and that the tax arithmetic is right.
+
+import re
+from common import model, money_eq, show
+
+OUR_GSTINS = {"27AABCV7731Q1ZN", "27AADCT9045H1Z3"}                 # our registrations (both in Maharashtra)
+STATES = {"27": "Maharashtra", "29": "Karnataka", "33": "Tamil Nadu", "07": "Delhi"}
+GSTIN = re.compile(r"^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
+B36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+type GstInvoice:
+    supplier_gstin: str
+    recipient_gstin: str
+    place_of_supply: str   # the 2-digit state code of the place of supply
+    taxable: float         # taxable value
+    rate: float            # GST rate in percent, e.g. 18
+    cgst: float            # 0 if not charged
+    sgst: float
+    igst: float
+    total: float           # invoice total including tax
+
+def gstin_ok(g):
+    """Format, a known state code, and the GSTN check character (weights 1,2 alternating, base 36)."""
+    g = str(g or "").upper()
+    if not GSTIN.match(g) or g[:2] not in STATES:
+        return False
+    s = sum((B36.index(c) * (1 + i % 2)) // 36 + (B36.index(c) * (1 + i % 2)) % 36 for i, c in enumerate(g[:14]))
+    return B36[(36 - s % 36) % 36] == g[14]
+
+def expected(inv):
+    tax = round(inv.taxable * inv.rate / 100, 2)
+    if inv.supplier_gstin[:2] == inv.place_of_supply:
+        return {"cgst": tax / 2, "sgst": tax / 2, "igst": 0}
+    return {"cgst": 0, "sgst": 0, "igst": tax}
+
+agent gst_check(invoice_text: str, llm):
+    read inv: GstInvoice by llm:
+        Read this GST tax invoice.
+
+        {invoice_text}
+
+    check supplier_gstin_valid: gstin_ok(inv.supplier_gstin), "supplier GSTIN {inv.supplier_gstin} fails format or check character"
+    check billed_to_us: inv.recipient_gstin in OUR_GSTINS, "recipient GSTIN {inv.recipient_gstin} is not one of ours"
+    check pos_is_recipient_state: inv.place_of_supply == inv.recipient_gstin[:2], "place of supply {inv.place_of_supply}, recipient registered in {inv.recipient_gstin[:2]}"
+    check right_tax_type: (inv.igst == 0) == (expected(inv)["igst"] == 0), "{'intra' if expected(inv)['igst'] == 0 else 'inter'}-state supply charged as {'IGST' if inv.igst else 'CGST+SGST'}"
+    check tax_amounts: all(money_eq(getattr(inv, k), v, 1.0) for k, v in expected(inv).items()), "tax is CGST {inv.cgst} SGST {inv.sgst} IGST {inv.igst}; expected {expected(inv)}"
+    check total_adds: money_eq(inv.taxable + inv.cgst + inv.sgst + inv.igst, inv.total, 1.0), "taxable plus tax is not the total {inv.total}"
+
+    rule decision:
+        if not supplier_gstin_valid or not billed_to_us:
+            return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()], "note": "verify the GSTIN on the GST portal"}
+        if checks.failures():
+            return {"status": "RETURN TO SUPPLIER", "why": [c["detail"] for c in checks.failures()], "note": "ask for a corrected invoice; no ITC until then"}
+        return {"status": "ACCEPT", "itc": round(inv.cgst + inv.sgst + inv.igst, 2), "state": STATES[inv.place_of_supply]}
+    return decision
+
+main:
+    local = ("MERIDIAN PACKWORKS PVT LTD  GSTIN 27AAPCM4821K1Z1\nBill to: Velora Retail Pvt Ltd  GSTIN 27AABCV7731Q1ZN\n"
+             "Place of supply: 27-Maharashtra\nCorrugated cartons, HSN 4819  Taxable 50,000.00\nCGST 9% 4,500.00  SGST 9% 4,500.00\nTotal 59,000.00")
+    ok = {"supplier_gstin": "27AAPCM4821K1Z1", "recipient_gstin": "27AABCV7731Q1ZN", "place_of_supply": "27",
+          "taxable": 50000, "rate": 18, "cgst": 4500, "sgst": 4500, "igst": 0, "total": 59000}
+    show("Intra-state invoice, CGST + SGST", gst_check(local, model({"inv": ok})))
+    show("Model misreads one GSTIN digit", gst_check(local, model({"inv": dict(ok, supplier_gstin="27AAPCM4827K1Z1")})))
+
+    inter = ("SAHYADRI LABELS PVT LTD, Bengaluru  GSTIN 29AAKCS5512L1ZW\nBill to: Velora Retail  GSTIN 27AADCT9045H1Z3\n"
+             "Place of supply: 27-Maharashtra\nPrinted labels  Taxable 20,000.00\nCGST 6% 1,200.00  SGST 6% 1,200.00\nTotal 22,400.00")
+    show("Karnataka supplier charges CGST + SGST to Maharashtra", gst_check(inter, model({"inv": {
+        "supplier_gstin": "29AAKCS5512L1ZW", "recipient_gstin": "27AADCT9045H1Z3", "place_of_supply": "27",
+        "taxable": 20000, "rate": 12, "cgst": 1200, "sgst": 1200, "igst": 0, "total": 22400}})))
+
+    wrong_tax = local.replace("4,500.00  SGST 9% 4,500.00\nTotal 59,000.00", "4,750.00  SGST 9% 4,750.00\nTotal 59,500.00")
+    show("Supplier over-charges tax", gst_check(wrong_tax, model({"inv": dict(ok, cgst=4750, sgst=4750, total=59500)})))

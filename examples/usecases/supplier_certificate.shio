@@ -1,0 +1,65 @@
+# Procurement: supplier compliance certificates. The model reads the standard, holder, issuer, scope and expiry from
+# an uploaded certificate, quoting each; code checks the issuer is an accredited body, the certificate is in date,
+# the holder is the supplier and the scope covers what we buy from them. Any failure suspends the supplier.
+
+from common import model, grounded, norm, parse_date, TODAY, show
+
+ACCREDITED = {"Norvale Certification Ltd", "Brightwater Assessment Services", "Kestrel Registrars GmbH"}
+SUPPLIERS = {"SUP-118": {"name": "Ostrava Precision Components s.r.o.", "buys": "machined aluminium parts"},
+             "SUP-204": {"name": "Linthwaite Plastics Ltd", "buys": "injection moulded housings"}}
+SCOPE_WORDS = {"machined aluminium parts": ["machining", "aluminium"], "injection moulded housings": ["injection moulding"]}
+RENEW_WARNING_DAYS = 60
+
+type Certificate:
+    standard: str          # e.g. ISO 9001:2015
+    holder: str            # the certified organisation, as printed
+    issuer: str            # the certification body, as printed
+    scope: str             # the scope of certification, copied exactly
+    expiry: str            # the expiry date as printed, YYYY-MM-DD
+
+agent vet(supplier_id: str, cert_text: str, llm):
+    sup = SUPPLIERS[supplier_id]
+    read c: Certificate by llm:
+        Read this management-system certificate.
+
+        {cert_text}
+
+    check is_9001: c.standard.startswith("ISO 9001"), "certificate is for {c.standard}, ISO 9001 required"
+    check quoted: all(grounded(x, cert_text) for x in (c.holder, c.issuer, c.scope, c.expiry)), "not on the certificate: {[x for x in (c.holder, c.issuer, c.scope, c.expiry) if not grounded(x, cert_text)]}"
+    check holder_matches: norm(c.holder) == norm(sup["name"]), "certificate holder {c.holder} is not {sup['name']}"
+    check accredited_issuer: c.issuer in ACCREDITED, "{c.issuer} is not an accredited certification body"
+    check in_date: parse_date(c.expiry) is not None and parse_date(c.expiry) > TODAY, "expired on {c.expiry}"
+    check scope_covers: all(w in norm(c.scope) for w in SCOPE_WORDS[sup["buys"]]), "scope '{c.scope}' does not cover {sup['buys']}"
+
+    rule status:
+        if not quoted:
+            return {"supplier": supplier_id, "status": "REVIEW", "why": [x["detail"] for x in checks.failures()]}
+        if checks.failures():
+            return {"supplier": supplier_id, "status": "SUSPEND", "why": [x["detail"] for x in checks.failures()]}
+        days_left = (parse_date(c.expiry) - TODAY).days
+        note = f"renewal due in {days_left} days" if days_left <= RENEW_WARNING_DAYS else None
+        return {"supplier": supplier_id, "status": "APPROVED SUPPLIER", "expires": c.expiry, "note": note}
+    return status
+
+main:
+    cert = """CERTIFICATE No. NCL-Q-40917
+    Norvale Certification Ltd certifies that Ostrava Precision Components s.r.o. operates a quality management
+    system that complies with ISO 9001:2015.
+    Scope: CNC machining and anodising of aluminium parts for industrial equipment.
+    Issued: 2025-03-14  Expiry date: 2028-03-13"""
+    good = {"c": {"standard": "ISO 9001:2015", "holder": "Ostrava Precision Components s.r.o.", "issuer": "Norvale Certification Ltd",
+                  "scope": "CNC machining and anodising of aluminium parts for industrial equipment", "expiry": "2028-03-13"}}
+    show("Valid certificate", vet("SUP-118", cert, model(good)))
+
+    old = cert.replace("2025-03-14", "2022-09-01").replace("2028-03-13", "2025-08-31")
+    show("Model reads an expired date as current", vet("SUP-118", old, model({"c": dict(good["c"], expiry="2028-08-31")})))
+
+    mill = """Global Quality Assurance Board - Certificate of Registration
+    Linthwaite Plastics Ltd - ISO 9001:2015
+    Scope: Distribution of plastic components.
+    Valid until 2027-11-30"""
+    show("Unaccredited issuer, scope too narrow", vet("SUP-204", mill, model({"c": {"standard": "ISO 9001:2015", "holder": "Linthwaite Plastics Ltd",
+         "issuer": "Global Quality Assurance Board", "scope": "Distribution of plastic components.", "expiry": "2027-11-30"}})))
+
+    other = cert.replace("Ostrava Precision Components s.r.o.", "Ostrava Precision Holdings a.s.")
+    show("Certificate belongs to a sister company", vet("SUP-118", other, model({"c": dict(good["c"], holder="Ostrava Precision Holdings a.s.")})))

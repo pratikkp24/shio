@@ -1,0 +1,64 @@
+# Demand planning: a sales rep's note overriding the statistical forecast. The model reads the quantity, the reason
+# and any reference it cites; code computes the normal band from demand history (mean +/- k standard deviations).
+# Inside the band the override stands; outside it, it needs a quoted reason backed by a real promotion or contract.
+
+from statistics import mean, stdev
+from common import model, grounded, numbers, show
+
+HISTORY = {   # weekly units shipped, last 12 weeks
+    "GLD-500": [410, 395, 430, 388, 402, 445, 418, 391, 425, 407, 399, 436],
+    "ORB-120": [96, 104, 88, 110, 93, 101, 97, 105, 90, 99, 102, 95],
+}
+K = 2.0
+EVIDENCE = {"PRM-2611": {"sku": "GLD-500", "kind": "promotion", "week": "2026-W46"},       # trade promotion calendar
+            "CTR-0782": {"sku": "ORB-120", "kind": "new contract", "week": "2026-W45"}}    # signed customer contracts
+
+def band(sku):
+    h = HISTORY[sku]
+    return round(mean(h) - K * stdev(h), 1), round(mean(h) + K * stdev(h), 1)
+
+type Override:
+    sku: str
+    qty: int               # the weekly quantity the rep wants planned
+    reason: "promotion" | "new contract" | "lost customer" | "seasonal" | "gut feel" | "other"
+    reason_quote: str      # the rep's words giving the reason, copied exactly
+    evidence_ref: str?     # a promotion (PRM-...) or contract (CTR-...) id the rep cites; null if none
+
+agent review(note: str, llm):
+    read o: Override by llm:
+        Read this forecast override from a sales rep: SKU, weekly quantity, reason, and any promotion or contract id.
+
+        {note}
+
+    check known_sku: o.sku in HISTORY, "no demand history for {o.sku}"
+    check qty_in_note: o.qty in numbers(note), "{o.qty} is not a number in the note"
+    when big: o.sku in HISTORY and not band(o.sku)[0] <= o.qty <= band(o.sku)[1]
+    if big:
+        check reason_quoted: grounded(o.reason_quote, note), "the reason is not in the note"
+        check evidence_cited: o.evidence_ref is not None and o.evidence_ref in note, "{o.qty} is outside {band(o.sku)} and the note cites no promotion or contract id (model gave {o.evidence_ref})"
+        check evidence_real: o.evidence_ref is None or o.evidence_ref in EVIDENCE and EVIDENCE[o.evidence_ref]["sku"] == o.sku and EVIDENCE[o.evidence_ref]["kind"] == o.reason, "{o.evidence_ref} is not a {o.reason} for {o.sku} on record"
+
+    rule decision:
+        if not (known_sku and qty_in_note):
+            return {"action": "PLANNER REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        lo, hi = band(o.sku)
+        if checks.failures():
+            return {"action": "PLANNER REVIEW", "sku": o.sku, "qty": o.qty, "band": (lo, hi), "why": [c["detail"] for c in checks.failures()]}
+        return {"action": "ACCEPT", "sku": o.sku, "qty": o.qty, "band": (lo, hi), "evidence": o.evidence_ref if big else None}
+    return decision
+
+main:
+    show("Small override inside the band", review("GLD-500: plan 440 next week, distributor restocking after the long weekend.",
+         model({"o": {"sku": "GLD-500", "qty": 440, "reason": "seasonal", "reason_quote": "distributor restocking after the long weekend", "evidence_ref": None}})))
+
+    promo = "GLD-500 week 46: please plan 720. Endcap promotion PRM-2611 at Fenwick Mart is confirmed, 30% off."
+    show("Big override backed by a promotion", review(promo, model({"o": {"sku": "GLD-500", "qty": 720, "reason": "promotion",
+         "reason_quote": "Endcap promotion PRM-2611 at Fenwick Mart is confirmed", "evidence_ref": "PRM-2611"}})))
+
+    gut = "ORB-120 should be 260 a week from now on, I have a feeling Q4 is going to be huge."
+    show("Big override on a hunch", review(gut, model({"o": {"sku": "ORB-120", "qty": 260, "reason": "gut feel",
+         "reason_quote": "I have a feeling Q4 is going to be huge", "evidence_ref": None}})))
+
+    vague = "ORB-120 to 240/week, new customer coming on board soon."
+    show("Model invents a contract id", review(vague, model({"o": {"sku": "ORB-120", "qty": 240, "reason": "new contract",
+         "reason_quote": "new customer coming on board soon", "evidence_ref": "CTR-0782"}})))

@@ -1,0 +1,49 @@
+# Workflow: hiring to onboarding. Screen the resume, then verify the new hire's identity, then check that the person
+# on the ID is the person who applied. Each step is its own use case (screening.shio, kyc.shio); this program only
+# adds the cross-step check and the final decision.
+
+from common import model, norm, show
+from uses import use, step_ok
+
+screening = use("screening")
+kyc = use("kyc")
+
+type Applicant:
+    name: str              # the candidate's name as written at the top of the resume
+
+agent hire(resume: str, form: str, id_text: str, screen_llm, kyc_llm, llm):
+    shortlist = screening.screen(resume, screen_llm)
+    identity = kyc.kyc(form, id_text, kyc_llm)
+    read who: Applicant by llm:
+        Whose resume is this?
+
+        {resume}
+
+    check passed_screen: step_ok(shortlist, "SHORTLIST"), "screening: {shortlist.get('decision')}"
+    check identity_ok: step_ok(identity, "APPROVE"), "identity: {identity.get('status')} {identity.get('why', '')}"
+    check same_person: identity.get("name") is not None and sorted(norm(who.name).split()) == sorted(norm(identity.get("name")).replace(".", "").split()), "resume is {who.name}, ID is {identity.get('name')}"
+
+    rule decision:
+        if passed_screen and identity_ok and same_person:
+            return {"status": "SEND OFFER", "name": identity["name"]}
+        return {"status": "HOLD", "why": [c["detail"] for c in checks.failures()]}
+    return decision
+
+main:
+    resume = "Priya R Sharma - Data Engineer\n2020-present  Data Engineer, Lumen Retail: built Airflow pipelines in Python, SQL models"
+    skills = {"p": {"skills": [{"skill": "python", "quote": "built Airflow pipelines in Python"}, {"skill": "airflow", "quote": "built Airflow pipelines"},
+                               {"skill": "sql", "quote": "SQL models"}],
+                    "jobs": [{"title": "Data Engineer", "start_year": 2020, "end_year": None, "quote": "2020-present  Data Engineer"}], "rating": 9}}
+    form = "Name: Priya R. Sharma\nDate of birth: 1994-03-07\nPAN: ABCPS1234K"
+    card = "PRIYA R SHARMA\nDOB 07/03/1994\nABCPS1234K"
+    person = {"name": "PRIYA R SHARMA", "dob": "1994-03-07", "pan": "ABCPS1234K"}
+    ids = {"applied": dict(person, name="Priya R. Sharma"), "card": person, "card_again": person}
+    show("Shortlisted and verified", hire(resume, form, card, model(skills), model(ids), model({"who": {"name": "Priya R Sharma"}})))
+
+    impostor = {"applied": {"name": "Neha Kapoor", "dob": "1996-01-02", "pan": "BCDPK5678L"},
+                "card": {"name": "NEHA KAPOOR", "dob": "1996-01-02", "pan": "BCDPK5678L"},
+                "card_again": {"name": "NEHA KAPOOR", "dob": "1996-01-02", "pan": "BCDPK5678L"}}
+    show("A different person shows up with valid ID", hire(resume, "Name: Neha Kapoor", "NEHA KAPOOR", model(skills), model(impostor), model({"who": {"name": "Priya R Sharma"}})))
+
+    weak = {"p": dict(skills["p"], skills=skills["p"]["skills"][:1])}
+    show("Did not pass screening", hire(resume, form, card, model(weak), model(ids), model({"who": {"name": "Priya R Sharma"}})))
