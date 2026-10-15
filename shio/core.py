@@ -31,11 +31,12 @@ def _blocked(what):
 
 class Reading:
     """What a model proposed. Opaque outside a @check or @rule."""
-    __slots__ = ("id", "name", "model", "request", "raw", "_value", "error", "schema", "run_id")
+    __slots__ = ("id", "name", "model", "request", "raw", "_value", "error", "schema", "run_id", "item")
 
-    def __init__(self, name, model, request, raw, value, error, schema, run_id):
+    def __init__(self, name, model, request, raw, value, error, schema, run_id, item=None):
         self.id, self.name, self.model, self.request, self.raw = uuid.uuid4().hex[:12], name, model, request, raw
         self._value, self.error, self.schema, self.run_id = value, error, schema, run_id
+        self.item = item         # (path, index) for one item of a list inside another reading
 
     @property
     def value(self):
@@ -45,6 +46,13 @@ class Reading:
 
     def __repr__(self):
         return f"<Reading {self.name} by {self.model}>"
+
+    def _part(self, path, index, value):
+        """One item of a list inside this reading: still a proposal, and traced back to this reading."""
+        r = Reading(f"{self.name}.{path}[{index}]" if path else f"{self.name}[{index}]", self.model, self.request,
+                    None, value, None, None, self.run_id, (path, index))
+        r.id = self.id
+        return r
 
     __bool__ = _blocked("branch on")
     __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = _blocked("compare")
@@ -173,7 +181,21 @@ def _flat(x):
     return [x]
 
 
+def each(reading, path=""):
+    """The items of a list the model returned (reading.path), each still a reading. For `for x in r.items:`."""
+    if not isinstance(reading, Reading):
+        raise BoundaryError(f"each() takes a reading, got {type(reading).__name__}")
+    v = reading._value
+    for p in path.split(".") if path else []:
+        v = None if v is None else (v.get(p) if isinstance(v, dict) else getattr(v, p, None))
+    if v is None:
+        return []
+    return [reading._part(path, i, x) for i, x in enumerate(v)]
+
+
 def _arg_spec(a):
+    if isinstance(a, Reading) and a.item:
+        return {"item": [a.id, a.item[0], a.item[1]]}
     if isinstance(a, Reading):
         return {"reading": a.id}
     try:
@@ -185,7 +207,7 @@ def _arg_spec(a):
     return {"opaque": repr(a)[:200]}           # would not come back the same from JSON, so it cannot be replayed
 
 
-def check(fn=None, *, name=None, reward=True):
+def check(fn=None, *, name=None, reward=True, after=()):
     """A deterministic test over readings. Returns True/False to the agent, and is recorded in the trace, where it
     doubles as a training reward (reward=False: a `when`, which only steers control flow). The function may return a
     bool or (bool, detail)."""
@@ -197,6 +219,13 @@ def check(fn=None, *, name=None, reward=True):
         @functools.wraps(fn)
         def wrapper(*args, key=None, **kwargs):
             run = _current(f"check {cname}")
+            blocked = [c["name"] for c in run.checks if c["name"] in after and not c["passed"]
+                       and (c["key"] is None or key is None or c["key"] == key)]
+            if blocked:      # `check b after a`: when a failed, b says nothing either way
+                run.checks.append({"name": cname, "fn": ref, "key": key, "passed": False, "skipped": True,
+                                   "detail": f"not checked: {', '.join(dict.fromkeys(blocked))} failed",
+                                   "reward": False, "args": [], "kwargs": {}, "readings": []})
+                return False
             tok = _open.set(True)
             try:
                 out = fn(*[_uncover(a) for a in args], **{k: _uncover(v) for k, v in kwargs.items()})
@@ -211,7 +240,7 @@ def check(fn=None, *, name=None, reward=True):
                 try:
                     detail = "" if passed else str(detail())
                 except Exception as e:
-                    detail = f"(detail failed: {type(e).__name__}: {e})"
+                    detail = f"{cname} failed (its explanation could not be written: {type(e).__name__}: {e})"
                 finally:
                     _open.reset(tok)
             run.checks.append({"name": cname, "fn": ref, "key": key, "passed": passed, "detail": detail, "reward": reward,
@@ -238,13 +267,19 @@ class Checks:
         return bool(m) and all(c["passed"] for c in m)
 
     def failed(self, name, key=None):
-        return any(not c["passed"] for c in self._match(name, key))
+        """The check ran and failed (a check skipped because an earlier one failed does not count)."""
+        return any(not c["passed"] and not c.get("skipped") for c in self._match(name, key))
 
     def ran(self, name, key=None):
         return bool(self._match(name, key))
 
     def failures(self, key=None):
-        return [c for c in self.records if not c["passed"] and c.get("reward", True) and (key is None or c["key"] == key)]
+        """Failed checks (not whens, not skipped), optionally only those with this key."""
+        return [c for c in self.records if not c["passed"] and c.get("reward", True) and not c.get("skipped")
+                and (key is None or c["key"] == key)]
+
+    def skipped(self, key=None):
+        return [c for c in self.records if c.get("skipped") and (key is None or c["key"] == key)]
 
 
 def rule(fn=None, *, name=None):

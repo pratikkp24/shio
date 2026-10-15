@@ -52,7 +52,8 @@ def build(patterns, agent=None, min_reward=1.0):
             ok = [c for c in mine if _replayable(c)]
             stats["not_replayable"] += len(mine) - len(ok)
             if ok:
-                refs = {a["reading"] for c in ok for a in [*c["args"], *c["kwargs"].values()] if "reading" in a}
+                refs = {a["reading"] if "reading" in a else a["item"][0]
+                        for c in ok for a in [*c["args"], *c["kwargs"].values()] if "reading" in a or "item" in a}
                 grpo.append({"prompt": prompt, "shio": json.dumps({
                     "reading": x["id"], "schema": x["schema"],
                     "checks": [{k: c[k] for k in ("name", "fn", "args", "kwargs")} for c in ok],
@@ -62,28 +63,60 @@ def build(patterns, agent=None, min_reward=1.0):
 
 
 def score(spec, completion):
-    """Mean of the reading's checks re-run with `completion` as the reading. Unparseable -> 0."""
+    """Share of the reading's checks that pass when re-run with `completion` as the reading. Unparseable -> 0.
+
+    A check made per item of a list in the reading (`for x in r.items:`) is re-run over every item of the new
+    completion's list and counts once, as the share of items that pass."""
     spec = json.loads(spec) if isinstance(spec, str) else spec
     schema = load_schema(spec["schema"])
     value, err = parse(schema, completion)
     if err:
         return 0.0
 
-    def arg(a):
+    def walk(base, path):
+        for part in path.split(".") if path else []:
+            base = base.get(part) if isinstance(base, dict) else getattr(base, part)
+        return base
+
+    def arg(a, index=None):
+        if "item" in a:
+            rid, path, i = a["item"]
+            return walk(arg({"reading": rid}), path)[i if index is None or rid != spec["reading"] else index]
         if "reading" in a:
             if a["reading"] == spec["reading"]:
                 return value
             ref, data = spec["values"][a["reading"]]
             return from_jsonable(load_schema(ref), data)
         return a["const"]
-    total = 0.0
-    for c in spec["checks"]:
+
+    def run(c, index=None):
         try:
-            out = CHECKS[c["fn"]](*[arg(a) for a in c["args"]], **{k: arg(v) for k, v in c["kwargs"].items()})
-            total += bool(out[0] if isinstance(out, tuple) else out)
+            out = CHECKS[c["fn"]](*[arg(a, index) for a in c["args"]],
+                                  **{k: arg(v, index) for k, v in c["kwargs"].items()})
+            return bool(out[0] if isinstance(out, tuple) else out)
         except Exception:
-            pass
-    return total / len(spec["checks"])
+            return False
+
+    def mine(a):
+        return "item" in a and a["item"][0] == spec["reading"]
+
+    scores, groups = [], {}
+    for c in spec["checks"]:
+        items = [a for a in [*c["args"], *c["kwargs"].values()] if mine(a)]
+        if not items:
+            scores.append(float(run(c)))
+            continue
+        shape = json.dumps([c["fn"], [a["item"][:2] if mine(a) else a for a in c["args"]],
+                            {k: (v["item"][:2] if mine(v) else v) for k, v in c["kwargs"].items()}], sort_keys=True)
+        groups.setdefault(shape, (c, items[0]["item"][1]))
+    for c, path in groups.values():
+        try:
+            n = len(walk(value, path) or [])
+        except Exception:
+            n = 0
+        if n:
+            scores.append(sum(run(c, i) for i in range(n)) / n)
+    return sum(scores) / len(scores) if scores else 0.0
 
 
 def reward(prompts, completions, shio, **kwargs):

@@ -6,7 +6,9 @@ Shio is Python's expression and statement language plus six forms:
   model  a model declaration
   agent  a unit of work; the only place `read` may appear
   read   ask a model for a value: the result is a reading, a proposal
-  check  a claim about readings that should hold; a boolean to the agent, a reward to `train`
+  check  a claim about readings that should hold; a boolean to the agent, a reward to `train`.
+         `check b after a:` is skipped (not failed) when check a failed, so one unknown value does not
+         set off a cascade of misleading failures
   when   a condition over readings that only steers control flow (recorded, never a reward)
   rule   a block of code that settles an outcome from readings and checks
   train  fine-tune an open model on an agent's traces, with its checks as the reward
@@ -17,6 +19,7 @@ a when, a rule, or a later read's `seeing` clause. Any other use (an `if`, an as
 is a compile error, because that would let the model's proposal decide.
 """
 import ast
+import builtins
 import io
 import re
 import textwrap
@@ -26,7 +29,11 @@ PY_COMPOUND = re.compile(r"^(for|async\s+for|if|elif|else|while|with|async\s+wit
 READ = re.compile(r"^read\s+(?P<name>[A-Za-z_]\w*)(?:\[(?P<key>.+?)\])?\s*:\s*(?P<type>.+?)"
                   r"(?:\s+from\s+(?P<src>.+?))?\s+by\s+(?P<model>.+?)(?P<blind>\s+blind)?"
                   r"(?:\s+seeing\s+(?P<seeing>[\w\s,]+?))?\s*:$")
-CHECK = re.compile(r"^(?:check|when)\s+(?P<name>[A-Za-z_]\w*)(?:\[(?P<key>.+?)\])?\s*:\s*(?P<body>.+)$", re.S)
+CHECK = re.compile(r"^(?:check|when)\s+(?P<name>[A-Za-z_]\w*)(?:\[(?P<key>.+?)\])?"
+                   r"(?:\s+after\s+(?P<after>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*))?\s*:\s*(?P<body>.+)$", re.S)
+# for item in reading.path:   /   for i, item in enumerate(reading.path):
+EACH = re.compile(r"^for\s+(?:(?P<idx>[A-Za-z_]\w*)\s*,\s*)?(?P<var>[A-Za-z_]\w*)\s+in\s+(?P<enum>enumerate\(\s*)?"
+                  r"(?P<root>[A-Za-z_]\w*)(?P<path>(?:\.[A-Za-z_]\w*)*)\s*(?(enum)\))\s*:$")
 RULE = re.compile(r"^rule\s+(?P<name>[A-Za-z_]\w*)(?:\[(?P<key>.+?)\])?\s*:$")
 AGENT = re.compile(r"^agent\s+(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*(?:->\s*(?P<ret>.+?))?\s*:$", re.S)
 TYPE = re.compile(r"^type\s+(?P<name>[A-Za-z_]\w*)\s*:$")
@@ -134,6 +141,42 @@ def _free_names(code, mode="exec"):
     return [x for x in dict.fromkeys(loads) if x not in stores]
 
 
+def _comprehension_names(code):
+    """Names bound by comprehensions and lambdas inside a fragment of code."""
+    for attempt in (code, code.rstrip().rstrip(":") + ": pass", code.rstrip().rstrip(":")):
+        try:
+            tree = ast.parse(attempt)
+            break
+        except SyntaxError:
+            tree = None
+    names = set()
+    for n in ast.walk(tree) if tree else []:
+        if isinstance(n, ast.comprehension):
+            names |= {x.id for x in ast.walk(n.target) if isinstance(x, ast.Name)}
+        elif isinstance(n, ast.Lambda):
+            names |= {a.arg for a in n.args.args}
+    return names
+
+
+def _bound_names(tree):
+    """Every name a module binds anywhere (lenient: a name bound in any scope counts)."""
+    names = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load):
+            names.add(n.id)
+        elif isinstance(n, ast.arg):
+            names.add(n.arg)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(n.name)
+        elif isinstance(n, ast.alias):
+            names.add((n.asname or n.name).split(".")[0])
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            names.add(n.name)
+        elif isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names):
+            return None          # a star import: anything may be defined
+    return names
+
+
 class _Locals(ast.NodeVisitor):
     """Names bound in a function body, not counting comprehensions, lambdas and nested definitions."""
 
@@ -171,6 +214,7 @@ class Compiler:
         self.tail = []         # module-level helpers emitted after everything else (checks, rules)
         self.agents = set()
         self.trains = []
+        self.uses = []         # (names, line, where) used in prompts and checks, verified once the module is known
 
     # ---------------- helpers ----------------
     def error(self, line, msg):
@@ -205,14 +249,32 @@ class Compiler:
             self.error(i + 1, "unclosed bracket or string")
         return text, j
 
-    def block(self, i, parent_indent):
-        """Physical lines after i that belong to a block indented deeper than parent_indent. -> (lines, next i)."""
+    def block(self, i, parent_indent, raw=False):
+        """Lines after i that belong to a block indented deeper than parent_indent. -> (lines, next i).
+        A statement's continuation lines (inside brackets or a triple-quoted string) belong to it whatever their
+        indentation; raw=True (prompt text, type bodies) goes by indentation alone."""
         j = i
-        while j < len(self.src) and (not self.src[j].strip() or self.indent(self.src[j]) > parent_indent):
-            j += 1
+        while j < len(self.src):
+            if not self.src[j].strip():
+                j += 1
+                continue
+            if self.indent(self.src[j]) <= parent_indent:
+                break
+            if raw:
+                j += 1
+                continue
+            try:
+                j = self.logical(j)[1]
+            except ShioError:
+                j += 1
         while j > i and not self.src[j - 1].strip():
             j -= 1
         return self.src[i:j], j
+
+    @staticmethod
+    def code(text):
+        """A one-line statement without its trailing comment (multi-line statements are left as they are)."""
+        return _strip_comment(text)[0] if "\n" not in text else text
 
     def scan(self, text, line, readings, where):
         """The boundary: a reading's name may not appear in plain code."""
@@ -222,8 +284,9 @@ class Compiler:
             toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
         except (tokenize.TokenError, SyntaxError, IndentationError):
             toks = []
+        local = _comprehension_names(text)
         for k, t in enumerate(toks):
-            if t.type != tokenize.NAME or t.string not in readings:
+            if t.type != tokenize.NAME or t.string not in readings or t.string in local:
                 continue
             prev = toks[k - 1].string if k else ""
             nxt = toks[k + 1].string if k + 1 < len(toks) else ""
@@ -250,6 +313,7 @@ class Compiler:
             if self.indent(self.src[i]):
                 self.error(line, "unexpected indent")
             text, j = self.logical(i)
+            text = self.code(text)
             word = text.split(None, 1)[0].rstrip(":")
             if word == "type":
                 i = self.type_decl(i, text)
@@ -262,10 +326,10 @@ class Compiler:
                 i = self.agent_decl(i, j, text)
             elif text == "main:":
                 self.emit(0, "def __shio_main__():", line)
-                body, i = self.block(j, 0)
+                body, _ = self.block(j, 0)
                 if not any(s.strip() and not s.strip().startswith("#") for s in body):
                     self.error(line, "main: needs a body")
-                self.body(j, 0, 1, {"kind": "main", "readings": set(), "agent": None})
+                i = self.body(j, 0, 1, {"kind": "main", "readings": set(), "agent": None})
             elif word == "train":
                 m = TRAIN.match(text) or self.error(
                     line, 'expected: train AGENT on "traces/*.json" with model "Qwen/Qwen3-8B" [using grpo|sft] [into "dir"]')
@@ -299,7 +363,7 @@ class Compiler:
         line = i + 1
         m = TYPE.match(header) or self.error(line, "expected: type NAME:")
         self.emit(0, f"class {m['name']}(_ShioType):", line)
-        body, k = self.block(i + 1, 0)
+        body, k = self.block(i + 1, 0, raw=True)
         fields = 0
         for n, raw in enumerate(body, i + 2):
             s = raw.strip()
@@ -340,7 +404,7 @@ class Compiler:
         if readings:
             self.emit(1, " = ".join(sorted(readings)) + " = None", line)
         ctx = {"kind": "agent", "readings": readings, "agent": name, "pending": []}
-        self.body(j, 0, 1, ctx)
+        k = self.body(j, 0, 1, ctx)
         # now that the whole body is known, give each check and rule the agent locals it uses
         fn_src = "\n".join(t for t, _ in self.out[start:])
         try:
@@ -364,15 +428,18 @@ class Compiler:
             self.emit(0, "", p["line"], self.tail)
             self.emit(0, p["decorator"], p["line"], self.tail)
             self.emit(0, f"def {p['fn']}({sig}):", p["line"], self.tail)
-            for text, ln in p["body"]:
-                self.emit(1, text, ln, self.tail)
+            for text, ln, *raw in p["body"]:
+                if raw and raw[0]:
+                    self.tail.append([text, ln])        # a string's own line: exactly as written
+                else:
+                    self.emit(1, text, ln, self.tail)
         return k
 
     def reads_in(self, lines, start=0):
         names = set()
         for raw in lines:
             r = re.match(r"^\s*read\s+([A-Za-z_]\w*)", raw)
-            if r and READ.match(raw.strip()):
+            if r and READ.match(_strip_comment(raw.strip())[0]):
                 names.add(r.group(1))
         return names
 
@@ -393,8 +460,24 @@ class Compiler:
                 self.error(i + 1, "unexpected indent" if ind > own else "unindent does not match any outer level")
             line = i + 1
             text, j = self.logical(i)
+            text = self.code(text)
             word = text.split(None, 1)[0].rstrip(":")
             readings, kind = ctx["readings"], ctx["kind"]
+            each = EACH.match(text) if kind == "agent" else None
+            if each and each["root"] in readings:
+                # iterating over what the model returned: each item is still a reading, for checks and rules only
+                if each["var"] == each["root"] or each["idx"] in readings:
+                    self.error(line, "the loop variable must be a new name")
+                items = f"__shio.each({each['root']}, {each['path'].lstrip('.')!r})"
+                head = f"for {each['idx']}, {each['var']} in enumerate({items}):" if each["idx"] else \
+                    f"for {each['var']} in {items}:"
+                readings.add(each["var"])
+                self.emit(level, head, line)
+                inner = sorted(self.reads_in(self.block(j, ind)[0]))
+                if inner:
+                    self.emit(level + 1, " = ".join(inner) + " = None", line)
+                i = self.body(j, ind, level + 1, ctx)
+                continue
             if word in ("read", "check", "rule", "when") and READ.match(text) or CHECK.match(text) and \
                     word in ("check", "when") or RULE.match(text) and word == "rule":
                 if kind != "agent":
@@ -421,6 +504,7 @@ class Compiler:
                 continue
             if re.match(r"^(def|class|async\s+def)\b", text):
                 blk, k = self.block(j, ind)
+                text = self.src[i].strip() if "\n" not in text else text
                 self.scan("\n".join([text] + blk), line, readings, "a nested function")
                 self.emit(level, text, line)
                 for n, raw in enumerate(blk, j + 1):
@@ -460,6 +544,7 @@ class Compiler:
                     expr, spec = ":".join(pieces[:-1]).strip(), pieces[-1]
                 self.py(expr, line, "eval")
                 self.scan(expr, line, readings, "a prompt (use 'seeing' to show the model another reading)")
+                self.uses.append((_free_names(expr, "eval"), line, f"the prompt's {{{expr}}}"))
                 if buf:
                     parts.append(repr(buf))
                 parts.append(f"format({expr}, {spec!r})")
@@ -475,7 +560,7 @@ class Compiler:
     def stmt_read(self, i, j, text, ind, level, ctx):
         line = i + 1
         m = READ.match(text)
-        lines, k = self.block(j, ind)
+        lines, k = self.block(j, ind, raw=True)
         prompt = self.prompt_expr(lines, line, ctx["readings"])
         t = self.type_expr(m["type"].strip(), line)
         for part in ("src", "model", "key"):
@@ -500,12 +585,13 @@ class Compiler:
         self.emit(level, f"{m['name']} = __shio.read({', '.join(args)})", line)
         return k
 
-    def _pending(self, ctx, kind, name, key, line, free, body, level, reward=True):
+    def _pending(self, ctx, kind, name, key, line, free, body, level, reward=True, after=()):
         n = len(ctx["pending"]) + 1
         fn = f"__shio_{kind}_{ctx['agent']}_{name}_{n}"
         ph = f"__SHIO_PENDING_{n}__"
         slot = self.emit(level, f"{name} = {ph}", line)
-        deco = f"@__shio.{kind}(name={name!r}" + ("" if reward else ", reward=False") + ")"
+        deco = f"@__shio.{kind}(name={name!r}" + ("" if reward else ", reward=False") + \
+            (f", after={after!r}" if after else "") + ")"
         ctx["pending"].append({"kind": kind, "fn": fn, "placeholder": ph, "slot": slot, "key": key, "line": line,
                                "free": free, "body": body, "decorator": deco})
 
@@ -524,9 +610,15 @@ class Compiler:
             self.py(m["key"], line, "eval")
             self.scan(m["key"], line, ctx["readings"], "a check's key")
         free = _free_names(body, "eval") + (_free_names(detail, "eval") if detail else [])
+        self.uses.append((free, line, f"check {m['name']}"))
+        after = tuple(a.strip() for a in (m["after"] or "").split(",") if a.strip())
+        for a in after:
+            if a not in ctx.setdefault("checks", set()):
+                self.error(line, f"'after {a}': there is no check or when named {a} before this line")
+        ctx.setdefault("checks", set()).add(m["name"])
         ret = f"return bool({body})" + (f", (lambda: {detail})" if detail else "")
         self._pending(ctx, "check", m["name"], m["key"], line, list(dict.fromkeys(free)), [(ret, line)], level,
-                      reward=text.startswith("check"))
+                      reward=text.startswith("check"), after=after)
         return j
 
     def stmt_rule(self, i, j, text, ind, level, ctx):
@@ -535,7 +627,9 @@ class Compiler:
         lines, k = self.block(j, ind)
         if not any(s.strip() for s in lines):
             self.error(line, "a rule needs a body that returns the outcome")
-        code = textwrap.dedent("\n".join(lines))
+        base = next(self.indent(x) for x in lines if x.strip())
+        own = [x[base:] if not x[:base].strip() else x for x in lines]   # a string's column-0 lines stay as they are
+        code = "\n".join(own)
         for n, raw in enumerate(lines, j + 1):
             s = raw.strip()
             if re.match(r"^(read|check|rule|when)\s+\w+.*:", s):
@@ -550,8 +644,9 @@ class Compiler:
             self.py(m["key"], line, "eval")
             self.scan(m["key"], line, ctx["readings"], "a rule's key")
         free = [x for x in _free_names(code) if x != "checks"]
-        base = min(self.indent(s) for s in lines if s.strip())
-        body = [(raw[base:] if raw.strip() else "", n) for n, raw in enumerate(lines, j + 1)]
+        body = [(x if x.strip() else "", n, bool(x[:base].strip())) for n, x in zip(range(j + 1, j + 1 + len(lines)), lines)]
+        body = [(own[k] if not raw else lines[k], n, raw) if lines[k].strip() else ("", n, False)
+                for k, (_, n, raw) in enumerate(body)]
         self._pending(ctx, "rule", m["name"], m["key"], line, free, body, level)
         return k
 
@@ -562,6 +657,17 @@ def compile_source(source, path="<shio>"):
     rows = c.compile()
     py = PRELUDE + "\n".join(t for t, _ in rows) + "\n"
     lines = [0] * PRELUDE.count("\n") + [ln for _, ln in rows]
+    try:
+        bound = _bound_names(ast.parse(py))
+    except SyntaxError:
+        bound = None             # reported with its .shio line by to_code
+    if bound is not None:
+        known = bound | set(dir(builtins)) | {"argv", "__file__", "__name__", "checks"}
+        for names, line, where in c.uses:
+            for n in names:
+                if n not in known:
+                    hint = " (write {{ and }} for literal braces)" if where.startswith("the prompt") else ""
+                    c.error(line, f"'{n}' is not defined, in {where}{hint}")
     return py, lines
 
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from . import train  # noqa: F401  (shio.train.reward is what generated training scripts use)
 from .compiler import ShioError, compile_source, to_code
-from .core import (BoundaryError, Checks, Reading, Source, agent, check, configure, parallel, read,  # noqa: F401
+from .core import (BoundaryError, Checks, Reading, Source, agent, check, configure, each, parallel, read,  # noqa: F401
                    rule)
 
 __version__ = "0.1.0"
