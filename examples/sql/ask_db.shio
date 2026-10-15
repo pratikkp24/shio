@@ -1,0 +1,27 @@
+# Ask a database a question in English. The model writes SQL; code decides whether it runs.
+#
+#   shio run ask_db.shio "Which city spends the most?" [qwen2.5-coder:7b | llama3.2:3b | replay]
+
+from shop_db import open_db, schema, tables, explains, run, model
+
+type Query:
+    sql: str                # one SQLite SELECT statement that answers the question
+    tables: list[str]       # every table the query reads
+
+agent ask(question: str, db, llm):
+    read q: Query from Source("schema", text=schema(db)) by llm:
+        Write one SQLite query that answers this question: {question}
+
+    check read_only: q.sql.lstrip().upper().startswith("SELECT") and ";" not in q.sql.strip().rstrip(";"), "not a single SELECT: {q.sql}"
+    check known_tables: set(q.tables) <= tables(db), "unknown tables: {q.tables}"
+    check plans: explains(db, q.sql), "SQLite cannot plan: {q.sql}"
+
+    rule answer:
+        if read_only and known_tables and plans:
+            return {"sql": q.sql, "rows": run(db, q.sql)}
+        return {"refused": [c["detail"] for c in checks.failures()]}
+    return answer
+
+main:
+    question = argv[0] if argv else "Which city spends the most?"
+    return ask(question, open_db(), model(argv[1] if len(argv) > 1 else "qwen2.5-coder:7b"))

@@ -1,0 +1,35 @@
+# Read an invoice total twice, independently, and let code decide whether it stands.
+
+type Amount:
+    "A money amount printed on the invoice."
+    value: float?            # the amount as a number, null if it is not printed
+    as_printed: str          # exactly as printed, with currency and commas
+    status: "found" | "missing"
+
+model local = ollama("qwen3:8b")
+
+agent invoice_total(doc: Source):
+    read total: Amount from doc by local:
+        What is the invoice's grand total (after tax)?
+    read again: Amount from doc by local blind:
+        Find the total amount payable on this invoice.
+    read lines: list[float] from doc by local:
+        List every line-item amount, before tax.
+
+    check printed: total.value is not None, "no total printed"
+    check agree: again.value == total.value, "second read gives {again.as_printed} vs {total.as_printed}"
+    check adds_up: abs(sum(lines) * 1.18 - total.value) < 1, "lines x 1.18 = {sum(lines) * 1.18:,.2f} vs {total.value}"
+
+    rule status:
+        if not printed:
+            return {"status": "QUESTION", "total": None}
+        if agree and adds_up:
+            return {"status": "OK", "total": total.value}
+        return {"status": "REVIEW", "total": total.value, "why": [c["detail"] for c in checks.failures()]}
+    return status
+
+main:
+    doc = Source("invoice", text="INVOICE 1042\nWidget  1,000.00\nGadget  500.00\nGST 18%  270.00\nTOTAL  Rs 1,770.00")
+    return invoice_total(doc)
+
+train invoice_total on "../shio-traces/*.json" with model "Qwen/Qwen3-0.6B"

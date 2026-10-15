@@ -1,0 +1,8 @@
+shio-traces/
+shio-train/
+__pycache__/
+*.egg-info/
+.venv/
+node_modules/
+*.vsix
+.DS_Store

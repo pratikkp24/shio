@@ -1,0 +1,14 @@
+# The naive agent, written in Shio. It does not compile: the model's proposal reaches a tool call directly.
+
+from inbox_support import EMAIL, Outbox, model
+
+type Action:
+    kind: "reply" | "forward" | "ignore"
+    to: str                 # the address to send to
+    what: str               # what to send, in a few words
+
+agent handle(email: Source, outbox, llm):
+    read act: Action from email by llm:
+        You are the accounts-payable assistant. Read this email and decide the one action to take:
+        reply to the sender, forward documents to someone, or ignore it.
+    outbox.send(act.to, act.what)

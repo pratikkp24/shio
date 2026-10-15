@@ -1,0 +1,104 @@
+{
+  "name": "shio",
+  "displayName": "Shio",
+  "description": "Shio language support: highlighting for .shio files, and the read/decide boundary checked on save.",
+  "version": "0.1.0",
+  "publisher": "aonami-labs",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "shio",
+    "agents",
+    "llm",
+    "aonami"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "shio",
+        "aliases": [
+          "Shio",
+          "shio"
+        ],
+        "extensions": [
+          ".shio"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "shio",
+        "scopeName": "source.shio",
+        "path": "./syntaxes/shio.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.inline.python": "python"
+        }
+      },
+      {
+        "scopeName": "markdown.shio.codeblock",
+        "path": "./syntaxes/shio-markdown.tmLanguage.json",
+        "injectTo": [
+          "text.html.markdown"
+        ],
+        "embeddedLanguages": {
+          "meta.embedded.block.shio": "shio"
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "shio.check",
+        "title": "Shio: Check This File"
+      },
+      {
+        "command": "shio.run",
+        "title": "Shio: Run This File"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "shio.check",
+          "when": "editorLangId == shio"
+        },
+        {
+          "command": "shio.run",
+          "when": "editorLangId == shio"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Shio",
+      "properties": {
+        "shio.python": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Python interpreter that has Shio installed (`pip install -e .` in the Shio repo). Empty means `python.defaultInterpreterPath`, then `python3` (`python` on Windows)."
+        },
+        "shio.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run `shio check` when a .shio file is opened or saved, and show its error in the Problems panel."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "test": "node test/grammar.test.js && node test/check.test.js",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.2.0",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.2.0"
+  }
+}

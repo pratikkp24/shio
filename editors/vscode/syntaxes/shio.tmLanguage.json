@@ -1,0 +1,629 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Shio",
+  "scopeName": "source.shio",
+  "fileTypes": [
+    "shio"
+  ],
+  "patterns": [
+    {
+      "include": "#type-block"
+    },
+    {
+      "include": "#model-decl"
+    },
+    {
+      "include": "#agent-decl"
+    },
+    {
+      "include": "#read-block"
+    },
+    {
+      "include": "#read-incomplete"
+    },
+    {
+      "include": "#check-stmt"
+    },
+    {
+      "include": "#rule-stmt"
+    },
+    {
+      "include": "#train-stmt"
+    },
+    {
+      "include": "#main-block"
+    },
+    {
+      "include": "source.python"
+    }
+  ],
+  "injections": {
+    "L:source.shio -string -comment -meta.prompt.shio -meta.type-block.shio": {
+      "patterns": [
+        {
+          "include": "#shio-names"
+        }
+      ]
+    }
+  },
+  "repository": {
+    "shio-names": {
+      "patterns": [
+        {
+          "match": "\\b(checks)\\s*(\\.)\\s*(failed|failures)\\b",
+          "captures": {
+            "1": {
+              "name": "variable.language.checks.shio"
+            },
+            "2": {
+              "name": "punctuation.separator.period.python"
+            },
+            "3": {
+              "name": "support.function.checks.shio"
+            }
+          }
+        },
+        {
+          "match": "(?<![\\w.])(ollama|openai_compat|replay|pdf)(?=\\s*\\()",
+          "name": "support.function.model.shio"
+        },
+        {
+          "match": "(?<![\\w.])Source\\b",
+          "name": "support.class.source.shio"
+        },
+        {
+          "match": "(?<![\\w.])argv\\b",
+          "name": "variable.language.argv.shio"
+        }
+      ]
+    },
+    "type-block": {
+      "name": "meta.type-block.shio",
+      "begin": "^(type)\\s+([A-Za-z_]\\w*)\\s*(:)\\s*(#.*)?$",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.type.type.shio"
+        },
+        "2": {
+          "name": "entity.name.type.shio"
+        },
+        "3": {
+          "name": "punctuation.separator.colon.shio"
+        },
+        "4": {
+          "name": "comment.line.number-sign.shio"
+        }
+      },
+      "end": "^(?=\\S)",
+      "patterns": [
+        {
+          "match": "^\\s*(#.*)$",
+          "captures": {
+            "1": {
+              "name": "comment.line.number-sign.shio"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(\"[^\"]*\"|'[^']*')\\s*$",
+          "captures": {
+            "1": {
+              "name": "string.quoted.docstring.type.shio"
+            }
+          }
+        },
+        {
+          "include": "#type-field"
+        }
+      ]
+    },
+    "type-field": {
+      "name": "meta.field.shio",
+      "begin": "^\\s+([A-Za-z_]\\w*)\\s*(:)",
+      "beginCaptures": {
+        "1": {
+          "name": "variable.other.field.shio"
+        },
+        "2": {
+          "name": "punctuation.separator.annotation.shio"
+        }
+      },
+      "end": "$",
+      "patterns": [
+        {
+          "include": "#field-description"
+        },
+        {
+          "name": "meta.default.shio",
+          "begin": "(=)(?!=)",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.operator.assignment.shio"
+            }
+          },
+          "end": "(?=\\s*#)|$",
+          "patterns": [
+            {
+              "include": "source.python#expression"
+            }
+          ]
+        },
+        {
+          "include": "#type-expr"
+        }
+      ]
+    },
+    "field-description": {
+      "match": "(#)\\s*(.*)$",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.description.shio"
+        },
+        "2": {
+          "name": "string.quoted.docstring.description.shio"
+        }
+      }
+    },
+    "type-expr": {
+      "patterns": [
+        {
+          "match": "\"[^\"]*\"|'[^']*'",
+          "name": "string.quoted.choice.shio"
+        },
+        {
+          "match": "\\|",
+          "name": "keyword.operator.choice.shio"
+        },
+        {
+          "match": "\\?",
+          "name": "keyword.operator.optional.shio"
+        },
+        {
+          "match": "\\b(str|int|float|bool|bytes|list|dict|tuple|set|Optional|Literal|Any)\\b",
+          "name": "support.type.python"
+        },
+        {
+          "match": "\\bNone\\b",
+          "name": "constant.language.python"
+        },
+        {
+          "match": "\\b[A-Za-z_]\\w*\\b",
+          "name": "entity.name.type.shio"
+        },
+        {
+          "match": "[\\[\\],]",
+          "name": "punctuation.separator.type.shio"
+        }
+      ]
+    },
+    "model-decl": {
+      "match": "^(model)\\s+([A-Za-z_]\\w*)\\s*(=)(?!=)",
+      "captures": {
+        "1": {
+          "name": "storage.type.model.shio"
+        },
+        "2": {
+          "name": "entity.name.variable.model.shio"
+        },
+        "3": {
+          "name": "keyword.operator.assignment.shio"
+        }
+      }
+    },
+    "agent-decl": {
+      "name": "meta.agent.shio",
+      "begin": "^\\s*(agent)\\s+([A-Za-z_]\\w*)\\s*(\\()",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.type.agent.shio"
+        },
+        "2": {
+          "name": "entity.name.function.agent.shio"
+        },
+        "3": {
+          "name": "punctuation.definition.parameters.begin.shio"
+        }
+      },
+      "end": "(\\))\\s*(?:(->)\\s*([^:]+?))?\\s*(:)",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.parameters.end.shio"
+        },
+        "2": {
+          "name": "punctuation.separator.annotation.result.shio"
+        },
+        "3": {
+          "patterns": [
+            {
+              "include": "#type-expr"
+            }
+          ]
+        },
+        "4": {
+          "name": "punctuation.section.agent.begin.shio"
+        }
+      },
+      "patterns": [
+        {
+          "match": "(?:(?<=\\()|(?<=,)|^)\\s*(\\*{0,2})([A-Za-z_]\\w*)",
+          "captures": {
+            "1": {
+              "name": "keyword.operator.unpacking.parameter.shio"
+            },
+            "2": {
+              "name": "variable.parameter.function.shio"
+            }
+          }
+        },
+        {
+          "match": ",",
+          "name": "punctuation.separator.parameters.shio"
+        },
+        {
+          "match": ":",
+          "name": "punctuation.separator.annotation.shio"
+        },
+        {
+          "match": "=",
+          "name": "keyword.operator.assignment.shio"
+        },
+        {
+          "include": "source.python#expression"
+        }
+      ]
+    },
+    "read-block": {
+      "comment": "read NAME[KEY]: TYPE from SOURCES by MODEL [blind] [seeing A, B]: then the prompt, indented. Mirrors READ in shio/compiler.py.",
+      "name": "meta.read.shio",
+      "begin": "^(\\s*)(read)\\s+([A-Za-z_]\\w*)(?:(\\[)(.+?)(\\]))?\\s*(:)\\s*(.+?)(?:\\s+(from)\\s+(.+?))?\\s+(by)\\s+(.+?)(?:\\s+(blind))?(?:\\s+(seeing)\\s+([\\w\\s,]+?))?\\s*(:)\\s*$",
+      "beginCaptures": {
+        "2": {
+          "name": "keyword.other.read.shio"
+        },
+        "3": {
+          "name": "entity.name.variable.reading.shio"
+        },
+        "4": {
+          "name": "punctuation.definition.key.begin.shio"
+        },
+        "5": {
+          "patterns": [
+            {
+              "include": "source.python#expression"
+            }
+          ]
+        },
+        "6": {
+          "name": "punctuation.definition.key.end.shio"
+        },
+        "7": {
+          "name": "punctuation.separator.annotation.shio"
+        },
+        "8": {
+          "patterns": [
+            {
+              "include": "#type-expr"
+            }
+          ]
+        },
+        "9": {
+          "name": "keyword.other.from.shio"
+        },
+        "10": {
+          "patterns": [
+            {
+              "include": "source.python#expression"
+            }
+          ]
+        },
+        "11": {
+          "name": "keyword.other.by.shio"
+        },
+        "12": {
+          "patterns": [
+            {
+              "include": "source.python#expression"
+            }
+          ]
+        },
+        "13": {
+          "name": "storage.modifier.blind.shio"
+        },
+        "14": {
+          "name": "keyword.other.seeing.shio"
+        },
+        "15": {
+          "patterns": [
+            {
+              "match": "[A-Za-z_]\\w*",
+              "name": "entity.name.variable.reading.shio"
+            },
+            {
+              "match": ",",
+              "name": "punctuation.separator.element.shio"
+            }
+          ]
+        },
+        "16": {
+          "name": "punctuation.section.read.begin.shio"
+        }
+      },
+      "end": "^(?!\\1[ \\t]+\\S)(?![ \\t]*$)",
+      "contentName": "meta.prompt.shio",
+      "patterns": [
+        {
+          "include": "#prompt-text"
+        }
+      ]
+    },
+    "read-incomplete": {
+      "comment": "a read header still being typed: highlight the keyword and name only",
+      "match": "^\\s*(read)\\s+([A-Za-z_]\\w*)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.read.shio"
+        },
+        "2": {
+          "name": "entity.name.variable.reading.shio"
+        }
+      }
+    },
+    "prompt-text": {
+      "patterns": [
+        {
+          "match": "\\{\\{|\\}\\}",
+          "name": "constant.character.escape.brace.shio"
+        },
+        {
+          "include": "#interpolation"
+        },
+        {
+          "match": "[^{}]+",
+          "name": "string.unquoted.prompt.shio"
+        }
+      ]
+    },
+    "interpolation": {
+      "name": "meta.interpolation.shio",
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.begin.shio"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.interpolation.end.shio"
+        }
+      },
+      "contentName": "meta.embedded.inline.python source.python",
+      "patterns": [
+        {
+          "include": "#interpolation-expr"
+        }
+      ]
+    },
+    "interpolation-expr": {
+      "patterns": [
+        {
+          "match": "(:)([^{}\\[\\]()'\"]*)(?=\\})",
+          "captures": {
+            "1": {
+              "name": "punctuation.separator.format-spec.shio"
+            },
+            "2": {
+              "name": "storage.type.format.shio"
+            }
+          }
+        },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.dict.begin.python"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.dict.end.python"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#interpolation-expr"
+            }
+          ]
+        },
+        {
+          "include": "source.python#expression"
+        }
+      ]
+    },
+    "check-stmt": {
+      "comment": "check NAME[KEY]: EXPR, \"detail with {expr}\"  and  when NAME[KEY]: EXPR",
+      "name": "meta.check.shio",
+      "begin": "^\\s*(check|when)\\s+([A-Za-z_]\\w*)(?:(\\[)(.+?)(\\]))?\\s*(:)",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.other.$1.shio"
+        },
+        "2": {
+          "name": "entity.name.function.$1.shio"
+        },
+        "3": {
+          "name": "punctuation.definition.key.begin.shio"
+        },
+        "4": {
+          "patterns": [
+            {
+              "include": "source.python#expression"
+            }
+          ]
+        },
+        "5": {
+          "name": "punctuation.definition.key.end.shio"
+        },
+        "6": {
+          "name": "punctuation.separator.colon.shio"
+        }
+      },
+      "end": "$",
+      "patterns": [
+        {
+          "include": "#detail-string"
+        },
+        {
+          "include": "source.python#expression"
+        }
+      ]
+    },
+    "detail-string": {
+      "comment": "a check's detail string: plain text with {expr} interpolations, like a prompt",
+      "patterns": [
+        {
+          "name": "string.quoted.double.detail.shio",
+          "begin": "(?<![\\w\"'])\"(?!\"\")",
+          "end": "\"|$",
+          "patterns": [
+            {
+              "match": "\\\\.",
+              "name": "constant.character.escape.python"
+            },
+            {
+              "include": "#detail-interp"
+            }
+          ],
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.shio"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.shio"
+            }
+          }
+        },
+        {
+          "name": "string.quoted.single.detail.shio",
+          "begin": "(?<![\\w\"'])'(?!'')",
+          "end": "'|$",
+          "patterns": [
+            {
+              "match": "\\\\.",
+              "name": "constant.character.escape.python"
+            },
+            {
+              "include": "#detail-interp"
+            }
+          ],
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.shio"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.shio"
+            }
+          }
+        }
+      ]
+    },
+    "detail-interp": {
+      "patterns": [
+        {
+          "match": "\\{\\{|\\}\\}",
+          "name": "constant.character.escape.brace.shio"
+        },
+        {
+          "name": "meta.interpolation.shio",
+          "begin": "\\{",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.begin.shio"
+            }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.end.shio"
+            }
+          },
+          "contentName": "meta.embedded.inline.python",
+          "patterns": [
+            {
+              "include": "#interpolation-expr"
+            }
+          ]
+        }
+      ]
+    },
+    "rule-stmt": {
+      "match": "^\\s*(rule)\\s+([A-Za-z_]\\w*)(?:(\\[)(.+?)(\\]))?\\s*(:)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.rule.shio"
+        },
+        "2": {
+          "name": "entity.name.function.rule.shio"
+        },
+        "3": {
+          "name": "punctuation.definition.key.begin.shio"
+        },
+        "4": {
+          "patterns": [
+            {
+              "include": "source.python#expression"
+            }
+          ]
+        },
+        "5": {
+          "name": "punctuation.definition.key.end.shio"
+        },
+        "6": {
+          "name": "punctuation.section.rule.begin.shio"
+        }
+      }
+    },
+    "train-stmt": {
+      "name": "meta.train.shio",
+      "begin": "^(train)\\s+([A-Za-z_]\\w*)",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.other.train.shio"
+        },
+        "2": {
+          "name": "entity.name.function.agent.shio"
+        }
+      },
+      "end": "$",
+      "patterns": [
+        {
+          "match": "\\b(on|with|model|using|into)\\b",
+          "name": "keyword.other.train.shio"
+        },
+        {
+          "match": "\\b(grpo|sft)\\b",
+          "name": "constant.language.method.shio"
+        },
+        {
+          "include": "source.python#expression"
+        }
+      ]
+    },
+    "main-block": {
+      "match": "^(main)\\s*(:)",
+      "captures": {
+        "1": {
+          "name": "storage.type.main.shio"
+        },
+        "2": {
+          "name": "punctuation.section.main.begin.shio"
+        }
+      }
+    }
+  }
+}

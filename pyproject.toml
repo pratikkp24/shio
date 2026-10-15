@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shio-lang"
+version = "0.1.0"
+description = "Shio: a language for agents in which the model reads and code decides. Checks double as training rewards."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Aonami Labs" }]
+requires-python = ">=3.10"
+dependencies = ["pydantic>=2"]
+
+[project.optional-dependencies]
+pdf = ["pypdf>=4"]
+train = ["trl>=0.20", "datasets", "peft"]
+
+[project.scripts]
+shio = "shio.cli:main"
+
+[tool.setuptools]
+packages = ["shio"]

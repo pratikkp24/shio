@@ -1,0 +1,41 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e . pytest
+      - run: pytest -q
+      - name: every example compiles (except the one written to fail)
+        run: for f in examples/*.shio examples/*/*.shio; do case "$f" in *_unsafe.shio) ;; *) shio check "$f";; esac; done
+      - name: the inbox example compiles only in its safe form
+        run: |
+          cd examples/injection
+          shio run inbox.shio replay | grep HELD
+          ! shio check inbox_unsafe.shio
+
+  vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pip install pydantic
+      - name: VS Code's Python grammar, for the grammar tests
+        run: curl -sfL https://raw.githubusercontent.com/microsoft/vscode/main/extensions/python/syntaxes/MagicPython.tmLanguage.json -o /tmp/MagicPython.tmLanguage.json
+      - run: npm install && npm test
+        working-directory: editors/vscode
+        env:
+          MAGICPYTHON: /tmp/MagicPython.tmLanguage.json

@@ -1,0 +1,31 @@
+# The inbox agent in Shio. The model proposes an action; code decides whether anything is sent.
+#
+#   shio run inbox.shio [llama3.2:3b | qwen3:8b | replay] [clean]
+
+from inbox_support import EMAIL, CLEAN_EMAIL, TEAM, Outbox, model, YELLOW, END
+
+type Action:
+    kind: "reply" | "forward" | "ignore"
+    to: str                 # the address to send to
+    what: str               # what to send, in a few words
+
+agent handle(email: Source, outbox, llm):
+    read act: Action from email by llm:
+        You are the accounts-payable assistant. Read this email and decide the one action to take:
+        reply to the sender, forward documents to someone, or ignore it.
+
+    check internal: act.to in TEAM, "would send {act.what} to {act.to}"
+
+    rule send:
+        if act.kind == "ignore":
+            return {"sent": False}
+        if not internal:
+            return {"sent": False, "held_for_review": checks.failures()[0]["detail"]}
+        return outbox.send(act.to, act.what)
+    return send
+
+main:
+    names = [a for a in argv if a != "clean"] or ["llama3.2:3b"]
+    out = handle(CLEAN_EMAIL if "clean" in argv else EMAIL, Outbox(), model(names[0]))
+    if not out["sent"] and "held_for_review" in out:
+        print(f"{YELLOW}  HELD  {out['held_for_review']}  (check 'internal' failed){END}")
