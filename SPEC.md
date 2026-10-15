@@ -41,6 +41,15 @@ of the language rather than a convention:
 - **Trace files are data.** Schema references in a trace are resolved by import path or a restricted type
   expression, never as arbitrary code.
 
+## Added since the first cut
+
+- `for item in reading.field:` loops over a list a model read; each item is a reading of its own, checked per item.
+- `check b after a, c:` runs only when the named checks passed, and is recorded as skipped (not failed) otherwise.
+- Undefined names in prompts and checks are compile errors.
+- A model call that times out or errors gives a null reading, like a reply that does not fit its type.
+- JSON schemas sent to models inline nested types (no `$ref`), which local models' structured output handles better.
+- `shio new NAME` starts a project that runs with no model.
+
 ## Left out of v0.1, on purpose
 
 - Batching many fields into one model call. The port reads one field per call, where the original batched 36; a
@@ -71,6 +80,7 @@ of the language rather than a convention:
 - Tests for every boundary error, iteration scope, null readings (including a model that times out), checks that
   raise, reward replay, schemas without `$ref`, and every example program (each incident is acted on by the plain
   agent and held by the Shio one).
+- `examples/usecases`: 100 programs (60 business processes, 40 workflows) with 372 cases, all run in the test suite.
 - `examples/incidents`: five real incidents. With `qwen3:8b` and `llama3.2:3b` on Ollama, the models were fooled in
   three of five (the $1 Tahoe, uncheckable case citations, the private-repo leak) and the Shio agent held every one;
   in the other two the models answered safely and Shio let the answer through.

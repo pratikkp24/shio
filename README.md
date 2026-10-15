@@ -97,6 +97,11 @@ acted on it while the Shio agent held it; where the model was not fooled, Shio l
 [gallery](https://github.com/Aonami-Labs/shio/tree/main/examples/incidents) has all five, the results per model, and
 sources for every incident.
 
+Beyond the incidents, [`examples/usecases`](https://github.com/Aonami-Labs/shio/tree/main/examples/usecases) has
+**100 use cases** across finance, insurance, supply chain, customers, legal and engineering: 60 business processes
+and 40 workflows that chain them, each with a clean case and cases where the model misreads, invents or is
+manipulated. `python3 examples/usecases/run_all.py` runs them all offline.
+
 ## How it works
 
 A model call in Shio returns a **reading**: a proposal, not a value. The compiler only lets you look at a reading in
@@ -178,7 +183,9 @@ outcome. That gives you three things:
 | `agent name(params):` | A unit of work. Each call is saved as one trace. Agents nest. |
 | `read x[key]: T from sources by model [blind] [seeing a, b]:` | Asks a model for a `T`, with the prompt indented below and `{expr}` interpolating plain values. `blind` is an independent read that sees no other reading. A reply that does not fit `T` is a null reading, not a crash. |
 | `check name[key]: expr, "detail"` | A claim about readings. A check that raises counts as failed. |
+| `check b after a, c: expr` | Runs only if the checks it names passed; otherwise it is skipped, not failed. |
 | `when name[key]: expr` | A condition over readings that only routes control flow. |
+| `for item in reading.field:` | Loops over a list the model read. Each `item` is itself a reading, so the checks and rules inside the loop decide item by item. |
 | `rule name[key]:` | Code that settles an outcome from readings and checks, and returns it. `checks.failed(...)` and `checks.failures()` are available inside. |
 | `train agent on "glob" with model "hf/id"` | Turns the agent's traces into training data and a training script. |
 | `main:` | The entry point for `shio run`. `argv` holds the arguments. |
