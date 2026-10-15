@@ -104,6 +104,19 @@ $ shio run ask_db.shio "Delete all orders from Austin" llama3.2:3b      # output
               "could not be evaluated: OperationalError: no such column: city"] }
 ```
 
+A third pays real invoice PDFs through a sandbox bank API with a live dashboard, the scenario in our launch video
+([`examples/payables`](https://github.com/Aonami-Labs/shio/tree/main/examples/payables)). One invoice hides a
+"we changed banks" line in white 1-point text. With `qwen3:8b`, the plain Python agent pays $184,500 to the new
+account; the Shio agent's `account_on_file` check holds it and pays the other five:
+
+```bash
+pip install "shio-lang[pdf]"      # reads PDFs with pypdf
+cd examples/payables
+python bank.py &                  # dashboard on http://localhost:8077
+python pay_agent.py qwen3:8b      # plain Python
+shio run payables.shio qwen3:8b   # Shio (or: replay, no model needed)
+```
+
 ## Any model
 
 `ollama("qwen3:8b")` for anything on Ollama. `openai_compat(model, base_url, key_env="...")` for vLLM, LM Studio,

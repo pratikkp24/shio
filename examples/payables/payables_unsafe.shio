@@ -1,0 +1,17 @@
+# The plain Python agent, written in Shio. It does not compile: what the model read goes straight to the bank.
+
+from bank import Bank
+from erp import ERP
+
+type Invoice:
+    vendor: str             # the supplier's name as printed
+    invoice_no: str
+    po: str                 # the purchase order number
+    amount: float           # the total due
+    account: str            # the bank account to pay, digits only
+    routing: str            # the bank routing number, digits only
+
+agent pay_invoice(doc: Source, bank, llm):
+    read inv: Invoice from doc by llm:
+        Read this invoice and give the payment to make.
+    bank.pay(inv.vendor, inv.account, inv.routing, inv.amount, inv.invoice_no)

@@ -1,0 +1,45 @@
+# The payables agent in Shio. The model reads each invoice; code decides what gets paid.
+#
+#   python bank.py &                 # the sandbox bank, dashboard on http://localhost:8077
+#   shio run payables.shio qwen3:8b  # or llama3.2:3b, or replay (no model needed)
+
+from bank import Bank
+from erp import ERP
+from support import GREEN, YELLOW, DIM, END, held, invoices, line, model, paid
+
+type Invoice:
+    vendor: str             # the supplier's name as printed
+    invoice_no: str
+    po: str                 # the purchase order number
+    amount: float           # the total due
+    account: str            # the bank account to pay, digits only
+    routing: str            # the bank routing number, digits only
+
+agent pay_invoice(doc: Source, erp, bank, llm):
+    read inv: Invoice from doc by llm:
+        You are the accounts-payable agent for Acme Industries. Read this invoice and give the payment to make:
+        the vendor, invoice number, PO number, total due, and the bank account and routing number to pay.
+
+    check known_vendor: erp.vendor(inv.vendor) is not None, "{inv.vendor} is not in the vendor master"
+    check account_on_file: inv.account == erp.account_on_file(inv.vendor), "pay to {inv.account}? vendor master has {erp.account_on_file(inv.vendor)}"
+    check matches_po: erp.open_po(inv.po) == {"vendor": inv.vendor, "amount": inv.amount}, "no open {inv.po} for {inv.vendor} at {inv.amount:,.2f}"
+
+    rule pay:
+        if known_vendor and account_on_file and matches_po:
+            tx = bank.pay(inv.vendor, inv.account, inv.routing, inv.amount, f"{inv.invoice_no} / {inv.po}")
+            erp.close_po(inv.po)
+            return paid(inv, tx)
+        return held(inv, checks.failures())
+    return pay
+
+main:
+    bank, erp, llm = Bank(), ERP(), model(argv[0] if argv else "qwen3:8b")
+    bank.reset()
+    erp.reset()
+    for doc in invoices():
+        print(f"{DIM}  read  {doc.name}{END}", flush=True)
+        r = pay_invoice(doc, erp, bank, llm)
+        if r["paid"]:
+            line("PAID", GREEN, r["invoice"], r["vendor"], r["amount"], f"-> {r['to']}  {r['tx']}")
+        else:
+            line("HELD", YELLOW, r["invoice"], r["vendor"], r["amount"], r["why"])

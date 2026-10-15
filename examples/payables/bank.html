@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Northbank Business · Payments</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root { --ink:#0f1115; --muted:#6b7280; --line:#eceef1; --bg:#f6f7f9; --card:#fff; --green:#0e8a5f; --red:#d23b3b; --navy:#0b2545; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:Inter, system-ui, sans-serif; background:var(--bg); color:var(--ink); -webkit-font-smoothing:antialiased; }
+  header { background:var(--navy); color:#fff; padding:16px 32px; display:flex; align-items:center; gap:14px; }
+  .logo { width:28px; height:28px; border-radius:7px; background:linear-gradient(135deg,#3d7bff,#7fb2ff); display:grid; place-items:center; font-weight:700; font-size:15px; }
+  header b { font-weight:600; font-size:15px; } header span { opacity:.6; font-size:13px; }
+  header .live { margin-left:auto; font-size:12px; opacity:.85; display:flex; align-items:center; gap:7px; }
+  header .dot { width:7px; height:7px; border-radius:50%; background:#3ee08f; box-shadow:0 0 0 4px rgba(62,224,143,.18); }
+  main { padding:26px 32px; max-width:1240px; margin:0 auto; }
+  .top { display:grid; grid-template-columns:1.3fr 1fr 1fr; gap:16px; margin-bottom:22px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; }
+  .label { font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; font-weight:600; }
+  .big { font-size:30px; font-weight:600; letter-spacing:-.02em; margin-top:6px; font-variant-numeric:tabular-nums; }
+  .sub { font-size:12.5px; color:var(--muted); margin-top:4px; }
+  .alert .big { color:var(--red); }
+  h2 { font-size:15px; margin:0 0 12px; font-weight:600; display:flex; align-items:center; gap:10px; }
+  h2 small { color:var(--muted); font-weight:500; font-size:12.5px; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+  th { text-align:left; font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; font-weight:600; padding:12px 16px; border-bottom:1px solid var(--line); background:#fbfbfc; }
+  td { padding:15px 16px; border-bottom:1px solid var(--line); font-size:14px; vertical-align:middle; }
+  tr:last-child td { border-bottom:none; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; font-weight:600; }
+  .mono { font-family:"JetBrains Mono", monospace; font-size:13px; }
+  .pill { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; padding:4px 10px; border-radius:99px; background:#e7f6ef; color:var(--green); }
+  .pill.new { background:#fdeaea; color:var(--red); }
+  tr.new td { background:#fff6f6; }
+  tr.enter td { animation:enter .55s cubic-bezier(.2,.8,.2,1); }
+  @keyframes enter { from { background:#eaf1ff; } }
+  .empty { text-align:center; color:var(--muted); padding:44px; }
+  .who { font-weight:600; } .ref { color:var(--muted); font-size:12.5px; margin-top:2px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">N</div><b>Northbank Business</b><span>Acme Industries · Operating account ••4410</span>
+  <div class="live"><div class="dot"></div>Live payments API</div>
+</header>
+<main>
+  <div class="top">
+    <div class="card"><div class="label">Available balance</div><div class="big" id="bal">$2,840,000.00</div><div class="sub">Opening $2,840,000.00</div></div>
+    <div class="card"><div class="label">Paid today</div><div class="big" id="paid">$0.00</div><div class="sub" id="count">0 payments</div></div>
+    <div class="card" id="newcard"><div class="label">New beneficiaries</div><div class="big" id="newn">0</div><div class="sub" id="newsub">First-time payee accounts</div></div>
+  </div>
+  <h2>Outgoing payments <small>executed via API</small></h2>
+  <table>
+    <thead><tr><th>Time</th><th>Beneficiary</th><th>Account</th><th>Bank routing</th><th style="text-align:right">Amount</th><th>Status</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="6" class="empty">No payments yet today</td></tr></tbody>
+  </table>
+</main>
+<script>
+const usd = n => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+let seen = new Set();
+async function tick() {
+  try {
+    const d = await (await fetch("/api/payments")).json();
+    const ps = d.payments;
+    document.getElementById("bal").textContent = usd(d.balance);
+    document.getElementById("paid").textContent = usd(d.opening - d.balance);
+    document.getElementById("count").textContent = ps.length + (ps.length === 1 ? " payment" : " payments");
+    const nn = ps.filter(p => p.new_beneficiary);
+    document.getElementById("newn").textContent = nn.length;
+    document.getElementById("newcard").classList.toggle("alert", nn.length > 0);
+    document.getElementById("newsub").textContent = nn.length ? usd(nn.reduce((a, p) => a + p.amount, 0)) + " to accounts never paid before" : "First-time payee accounts";
+    const rows = document.getElementById("rows");
+    if (!ps.length) { rows.innerHTML = '<tr><td colspan="6" class="empty">No payments yet today</td></tr>'; seen = new Set(); return; }
+    rows.innerHTML = ps.slice().reverse().map(p => `
+      <tr class="${p.new_beneficiary ? "new" : ""} ${seen.has(p.id) ? "" : "enter"}">
+        <td class="mono">${p.time}</td>
+        <td><div class="who">${p.beneficiary}</div><div class="ref">${p.reference}</div></td>
+        <td class="mono">${p.account}</td>
+        <td class="mono">${p.routing}</td>
+        <td class="num">${usd(p.amount)}</td>
+        <td>${p.new_beneficiary ? '<span class="pill new">● Executed · new beneficiary</span>' : '<span class="pill">● Executed</span>'}</td>
+      </tr>`).join("");
+    ps.forEach(p => seen.add(p.id));
+  } catch (e) {}
+}
+setInterval(tick, 250); tick();
+</script>
+</body>
+</html>
