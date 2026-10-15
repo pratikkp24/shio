@@ -1,8 +1,9 @@
 # Hiring: resume screening. The model may only claim a skill with a quote from the resume, and code decides what
 # the resume says: hidden text (white-on-white, display:none) is stripped before any quote is checked. Years of
-# experience are computed by code from the dates the model reads, and the model's own rating is never used.
+# experience are computed by code from the dates the model reads, and the model's own rating is never used. Only
+# clean, verified evidence can shortlist or turn a candidate down; evidence that does not hold up goes to a person.
 
-from common import model, grounded, visible_text, show
+from common import model, grounded, norm, visible_text, show
 
 REQUIRED = {"python", "sql", "airflow"}
 MIN_YEARS = 3
@@ -22,6 +23,13 @@ type Profile:
     jobs: list[Job]
     rating: int            # your overall rating 1-10 (recorded, never used)
 
+def line_of(quote, text):
+    """The resume line a quote comes from (code finds it; the model only points)."""
+    return next((line for line in text.splitlines() if grounded(quote, line)), None)
+
+def evidences(skill, quote, text):
+    return grounded(quote, text) and skill in norm(quote)
+
 agent screen(resume: str, llm):
     seen = visible_text(resume)          # code, not the model, decides what counts as the resume
     read p: Profile by llm:
@@ -29,19 +37,23 @@ agent screen(resume: str, llm):
 
         {resume}
 
-    check skills_grounded: all(grounded(e.quote, seen) and e.skill.lower() in e.quote.lower() for e in p.skills), "a skill is claimed without a matching resume line"
-    check jobs_grounded: all(grounded(j.quote, seen) and str(j.start_year) in j.quote for j in p.jobs), "a job's dates are not in the resume"
+    check skills_grounded: all(grounded(e.quote, seen) for e in p.skills), "a skill is claimed without a matching resume line"
+    check jobs_grounded: all(line_of(j.quote, seen) and str(j.start_year) in line_of(j.quote, seen) for j in p.jobs), "a job's dates are not on the resume line it quotes"
 
     rule result:
         if p is None:
             return {"decision": "HUMAN REVIEW", "why": ["the model gave no usable answer"]}
-        shown = {e.skill.lower() for e in p.skills if grounded(e.quote, seen) and e.skill.lower() in e.quote.lower()}
-        years = sum((j.end_year or 2026) - j.start_year for j in p.jobs if grounded(j.quote, seen))
+        # which required skills the verified quotes show is decided here, from the quotes; the model's labels are ignored
+        shown = {s for s in REQUIRED if any(evidences(s, e.quote, seen) for e in p.skills)}
+        years = sum((j.end_year or 2026) - j.start_year for j in p.jobs
+                    if line_of(j.quote, seen) and str(j.start_year) in line_of(j.quote, seen))
         missing = sorted(REQUIRED - shown)
         if not missing and years >= MIN_YEARS:
             return {"decision": "SHORTLIST", "years": years, "skills": sorted(shown & REQUIRED)}
-        return {"decision": "NOT NOW", "years": years, "missing": missing,
-                "notes": [c["detail"] for c in checks.failures()]}
+        if checks.failures():           # the model's evidence did not hold up: a person looks, nobody is rejected on it
+            return {"decision": "HUMAN REVIEW", "years": years, "missing": missing,
+                    "why": [c["detail"] for c in checks.failures()]}
+        return {"decision": "NOT NOW", "years": years, "missing": missing}
     return result
 
 main:

@@ -25,6 +25,13 @@ the reference style.
 Be honest: Shio does not stop a model from being fooled. It stops a fooled model's output from deciding. Never
 write comments or outputs that claim otherwise.
 
+**Let code do the matching.** Check the model's quotes and numbers against the source, but never depend on how
+the model words or labels things. Decide which required skill a verified quote shows by looking in the quote; find
+the source line a quote comes from and check its date there. A real model labelled a skill "airflow pipelines" and
+quoted a job's description rather than its dates, and a check that demanded exact labels turned a qualified
+candidate down ([LIVE.md](LIVE.md)). When the evidence does not hold up, route to a person rather than decide
+against someone.
+
 ## The language, in short
 
 ```shio

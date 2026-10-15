@@ -2094,8 +2094,8 @@
  {
   "name": "screening",
   "kind": "use case",
-  "summary": "Hiring: resume screening. The model may only claim a skill with a quote from the resume, and code decides what the resume says: hidden text (white-on-white, display:none) is stripped before any quote is checked. Years of experience are computed by code from the dates the model reads, and the model's own rating is never used.",
-  "lines": 71,
+  "summary": "Hiring: resume screening. The model may only claim a skill with a quote from the resume, and code decides what the resume says: hidden text (white-on-white, display:none) is stripped before any quote is checked. Years of experience are computed by code from the dates the model reads, and the model's own rating is never used. Only clean, verified evidence can shortlist or turn a candidate down; evidence that does not hold up goes to a person.",
+  "lines": 83,
   "runs": true,
   "cases": [
    {
@@ -2105,8 +2105,8 @@
    },
    {
     "title": "Hidden text in the resume",
-    "outcome": "NOT NOW",
-    "why": ""
+    "outcome": "HUMAN REVIEW",
+    "why": "['a skill is claimed without a matching resume line']"
    },
    {
     "title": "Skills present, too little experience",
