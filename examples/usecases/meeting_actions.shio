@@ -23,6 +23,10 @@ agent actions(notes: str, attendees: list, held: str, llm):
             From this agenda item of meeting notes, read the action assigned, if any.
 
             {part}
+        check read_ok[k]: a is not None, "agenda item {k + 1} could not be read"
+        if not read_ok:                 # an unreadable item is reported, never silently skipped
+            dropped.append({"task": f"agenda item {k + 1}", "drop": ["the model gave no usable answer"]})
+            continue
         when assigns[k]: a.has_action
         if assigns:
             check owner_attended[k]: norm(a.owner) in people, "{a.owner} was not at the meeting"

@@ -37,6 +37,8 @@ agent moderate(customer: str, sku: str, text: str, llm):
     when off_topic: r.off_topic and grounded(r.off_topic_quote, text)
 
     rule decision:
+        if r is None:
+            return {"status": "HOLD", "why": ["the model gave no usable answer"]}
         labels = ["Received free product"] if INCENTIVE.search(text) else []
         labels += ["Verified purchase"] if verified_purchase else []
         if checks.failures():

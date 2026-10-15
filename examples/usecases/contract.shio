@@ -26,6 +26,8 @@ agent review(contract: str, llm):
         check number_matches[name]: getattr(t, name).number is None or getattr(t, name).number in numbers(getattr(t, name).clause), "{name}: {getattr(t, name).number} is not in its clause"
 
     rule risks:
+        if t is None:
+            return {"verdict": "LAWYER", "why": ["the model gave no usable answer"]}
         flags = []
         if t.auto_renews.value and (t.auto_renews.number or 0) < PLAYBOOK["min_notice_days"]:
             flags.append(f"auto-renews with only {t.auto_renews.number:.0f} days' notice")

@@ -40,6 +40,8 @@ agent confirm(email: str, llm):
     check settles_ahead: parse_date(c.value_date) >= TODAY and parse_date(c.value_date).weekday() < 5, "value date {c.value_date} is past or not a business day"
 
     rule match:
+        if c is None:
+            return {"status": "BREAK", "why": ["the model gave no usable answer"], "to": "middle office"}
         if checks.failures():
             return {"status": "BREAK", "trade": c.trade_ref, "why": [x["detail"] for x in checks.failures()], "to": "middle office"}
         return {"status": "MATCHED", "trade": c.trade_ref, "settles": c.value_date}

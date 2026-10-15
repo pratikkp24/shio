@@ -43,6 +43,8 @@ agent kyc(form: str, id_text: str, llm):
             {id_text}
 
     rule doc:                       # what the card says: two of three reads must agree on it
+        if card is None or card_again is None:
+            return None
         if not disputed:
             return {"name": card.name, "dob": card.dob, "pan": card.pan, "reads": "two reads agree"}
         for r in (card, card_again):

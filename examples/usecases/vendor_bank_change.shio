@@ -39,6 +39,8 @@ agent bank_change(letter: str, sender: str, llm):
     check iban_visible: grounded(req.iban_quote, seen) and req.new_iban in seen.replace(" ", ""), "IBAN {req.new_iban} is not in the visible letter"
 
     rule decision:
+        if req is None:
+            return {"action": "HOLD", "why": ["the model gave no usable answer"]}
         if checks.failures():
             flag = ["the letter claims the change is already approved (a common fraud pattern)"] if req.says_preapproved else []
             return {"action": "HOLD", "alert": "possible payment fraud; do not reply to the sender", "why": [c["detail"] for c in checks.failures()] + flag}

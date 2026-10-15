@@ -38,6 +38,8 @@ agent match_credit(note_text: str, llm):
     check total_printed: cn.total in numbers(note_text), "total {cn.total} is not on the credit note"
 
     rule posting:
+        if cn is None:
+            return {"status": "REVIEW", "why": ["the model gave no usable answer"]}
         if checks.failures():
             return {"status": "REVIEW", "note": cn.number, "why": [c["detail"] for c in checks.failures()]}
         return {"status": "POST", "note": cn.number, "against": cn.invoice_ref, "net": cn.net,

@@ -33,6 +33,8 @@ agent screen(resume: str, llm):
     check jobs_grounded: all(grounded(j.quote, seen) and str(j.start_year) in j.quote for j in p.jobs), "a job's dates are not in the resume"
 
     rule result:
+        if p is None:
+            return {"decision": "HUMAN REVIEW", "why": ["the model gave no usable answer"]}
         shown = {e.skill.lower() for e in p.skills if grounded(e.quote, seen) and e.skill.lower() in e.quote.lower()}
         years = sum((j.end_year or 2026) - j.start_year for j in p.jobs if grounded(j.quote, seen))
         missing = sorted(REQUIRED - shown)

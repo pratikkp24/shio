@@ -78,8 +78,11 @@ Rules the compiler enforces (it will tell you the line):
   skipped checks out; `checks.skipped()` lists them.
 - Literal braces in a prompt are `{{` and `}}`. A `{name}` that is not defined anywhere is a compile error, and so
   is an undefined name in a check.
-- A model reply that does not fit the type gives a null reading: checks on it fail, and a rule should handle
-  `r is None`.
+- A model reply that does not fit the type, or a call that times out, gives a null reading: checks on it fail,
+  and **a rule must handle `r is None` first** (return the cautious outcome with `"the model gave no usable
+  answer"`). `SHIO_MODEL=null python3 examples/usecases/run_all.py <name>` runs your program with every read
+  failing; it must finish, and must not approve, pay, ship or publish anything. `tests/test_usecases.py` checks
+  this for every program.
 - `rule` bodies cannot contain `read`, `check`, `when` or another `rule`.
 - Pass plain values (strings, numbers, dicts) to checks, not objects, so traces can be replayed for training.
 
@@ -104,6 +107,7 @@ a checksum, in your own `.shio` file as a plain `def`.
 - [ ] Names, companies, IDs and documents are fictional. Format-valid fake IDs are fine (and checksums should
       pass where the case is meant to pass).
 - [ ] 50 to 110 lines, with a header comment of 2 to 4 lines.
+- [ ] `SHIO_MODEL=null python3 examples/usecases/run_all.py <name>` passes and decides nothing positive.
 - [ ] No network, no files outside this folder, and no new dependencies.
 - [ ] Medical, legal and financial cases are administrative (completeness, matching, limits, routing) and always
       route judgment calls to a qualified person. Shio flags; it does not diagnose or advise.

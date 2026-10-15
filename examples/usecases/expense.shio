@@ -26,6 +26,8 @@ agent expense(claim: dict, receipt_text: str, llm):
     check under_limit: r.category in POLICY and r.total <= POLICY[r.category], "{r.total} is over the {r.category} limit"
 
     rule outcome:
+        if r is None:
+            return {"status": "REVIEW", "why": ["the model gave no usable answer"]}
         if not allowed:
             return {"status": "REJECT", "why": f"{r.category} is not reimbursable"}
         if checks.failures():

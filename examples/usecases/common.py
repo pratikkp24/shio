@@ -1,5 +1,6 @@
 """Shared by the use-case programs: a model that answers from a script (or a real model), and small deterministic
 helpers that checks use. Nothing here calls a model to decide anything."""
+import dataclasses
 import os
 import re
 from datetime import date
@@ -11,10 +12,13 @@ TODAY = date(2026, 10, 16)       # fixed, so every run of the examples decides t
 
 def model(answers, name="scripted"):
     """Scripted answers by reading name: a value, {key: value} for keyed reads, or a function of the request.
-    Set SHIO_MODEL (e.g. qwen3:8b) to run the same program on a real model through Ollama instead."""
+    Set SHIO_MODEL (e.g. qwen3:8b) to run the same program on a real model through Ollama instead, or
+    SHIO_MODEL=null for a model whose every answer is unusable (the fail-closed test)."""
     live = os.getenv("SHIO_MODEL")
+    if live == "null":                      # every read fails: nothing may be approved, nothing may crash
+        return replay(lambda req: "no usable answer", "null")
     if live:
-        return ollama(live)
+        return NoThink(ollama(live, timeout=int(os.getenv("SHIO_TIMEOUT_CALL", 1800))))
 
     def answer(req):
         a = answers.get(req.name, "no answer")
@@ -28,6 +32,16 @@ def model(answers, name="scripted"):
             a = {"value": a}
         return a
     return replay(answer, name)
+
+
+class NoThink:
+    """Qwen3-style models think at length before answering; for structured reads, ask them not to (/no_think)."""
+
+    def __init__(self, inner):
+        self.inner, self.name = inner, inner.name
+
+    def propose(self, req):
+        return self.inner.propose(dataclasses.replace(req, ask=req.ask.rstrip() + "\n\n/no_think"))
 
 
 def norm(s):

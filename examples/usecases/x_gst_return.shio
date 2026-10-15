@@ -26,6 +26,8 @@ agent gst_return(sales: list, purchases: dict, notes: dict, gst_llms: dict, cn_l
         check itc_ok[k]: step_ok(res, "ACCEPT"), "{k}: {res.get('status')} {res.get('why', '')}"
         check billed_read[k]: to.recipient_gstin in purchases[k] and to.recipient_gstin in net, "{k}: billed to {to.recipient_gstin}, not one of our GSTINs on the invoice"
         rule itc[k]:
+            if to is None:
+                return (None, 0)
             return (to.recipient_gstin, res.get("itc", 0) if step_ok(res, "ACCEPT") else 0)
         if itc[0] in net:
             net[itc[0]] -= itc[1]

@@ -50,6 +50,8 @@ agent triage(sender: str, body: str, llm):
     check ask_in_email: grounded(t.ask_quote, visible_text(body)), "the quoted ask is not in the visible email"
 
     rule action:
+        if t is None:
+            return {"action": "SOC", "risk": max(floor, "medium", key=RANK.get), "why": ["the model gave no usable answer"] + signals}
         risk = max(t.risk, floor, key=RANK.get)
         if checks.failures():
             return {"action": "SOC", "risk": risk, "why": [c["detail"] for c in checks.failures()] + signals}

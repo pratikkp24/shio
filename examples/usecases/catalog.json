@@ -366,7 +366,7 @@
   "name": "cited_answer",
   "kind": "use case",
   "summary": "Knowledge base Q&A with citations. The answer goes out only if every citation points to a real passage, quotes it exactly, and every number in the answer appears in a quoted passage. Otherwise the user gets \"I don't know\".",
-  "lines": 49,
+  "lines": 51,
   "runs": true,
   "cases": [
    {
@@ -403,7 +403,7 @@
   "name": "contract",
   "kind": "use case",
   "summary": "Legal: contract risk review. Every term the model extracts must come with the clause it was read from, and the number in that clause must be the number it reports. Risk flags are code against the company's playbook.",
-  "lines": 62,
+  "lines": 64,
   "runs": true,
   "cases": [
    {
@@ -482,7 +482,7 @@
   "name": "credit_note",
   "kind": "use case",
   "summary": "Accounts receivable: matching a credit note to the invoice it reverses. The model reads the credit note; code checks the referenced invoice exists for that customer, the credit fits in what is left to credit, the tax rate is the invoice's own, and the tax arithmetic holds. Only then is it posted against the invoice.",
-  "lines": 59,
+  "lines": 61,
   "runs": true,
   "cases": [
    {
@@ -645,7 +645,7 @@
   "name": "expense",
   "kind": "use case",
   "summary": "Finance: expense claims against receipts. The model reads the receipt; the claim is paid only if the receipt total, the date and the category agree with what the employee claimed and with the travel policy.",
-  "lines": 42,
+  "lines": 44,
   "runs": true,
   "cases": [
    {
@@ -845,7 +845,7 @@
   "name": "fx_confirmation",
   "kind": "use case",
   "summary": "Treasury operations: FX trade confirmation matching. The model reads the counterparty's confirmation email; code matches it field by field against our booking, checks the figures are in the email, and that the rate is within today's market range. Any difference is a BREAK for the middle office, never an automatic amendment.",
-  "lines": 63,
+  "lines": 65,
   "runs": true,
   "cases": [
    {
@@ -971,7 +971,7 @@
   "name": "kyc",
   "kind": "use case",
   "summary": "KYC onboarding: an applicant's form against their identity document. The model reads both; matching, the PAN format and the age limit are code. A blind second read of the document guards against a misread digit; when the two reads disagree, a third read sees both, and code accepts a value only if two of the three reads agree on it.",
-  "lines": 86,
+  "lines": 88,
   "runs": true,
   "cases": [
    {
@@ -1139,7 +1139,7 @@
   "name": "leave_request",
   "kind": "use case",
   "summary": "HR: leave requests by email. The model reads the dates and leave type; code counts the working days (half days included), checks them against the HR balance table, blackout dates and how many teammates are already off, and against the day count the employee wrote. Anything that does not clear goes to the manager.",
-  "lines": 65,
+  "lines": 67,
   "runs": true,
   "cases": [
    {
@@ -1260,7 +1260,7 @@
   "name": "meeting_actions",
   "kind": "use case",
   "summary": "Operations: meeting notes to action items. Code splits the notes by agenda item; the model reads the action in each. An item is sent to its owner only if the owner was in the meeting, the due date parses and falls after the meeting, and the task is quoted from the notes. Anything else is dropped with the reason, for the chair to fix by hand.",
-  "lines": 57,
+  "lines": 61,
   "runs": true,
   "cases": [
    {
@@ -1280,14 +1280,14 @@
    }
   ],
   "reads": 1,
-  "checks": 4,
+  "checks": 5,
   "whens": 1,
   "rules": 1,
   "blind": 0,
   "seeing": 0,
   "after": 0,
   "per_item": 0,
-  "keyed": 7,
+  "keyed": 8,
   "visible_text": false,
   "steps": [],
   "domain": "People, legal and compliance",
@@ -1381,7 +1381,7 @@
   "name": "nda_review",
   "kind": "use case",
   "summary": "Legal operations: inbound NDAs against the company's NDA playbook. The model reads four terms, each with the exact clause; code checks every clause is in the NDA, every number is in its clause, and applies the playbook. Only a fully verified NDA inside the playbook is signed without review; anything else goes to a lawyer, who decides.",
-  "lines": 73,
+  "lines": 75,
   "runs": true,
   "cases": [
    {
@@ -1507,7 +1507,7 @@
   "name": "phishing_triage",
   "kind": "use case",
   "summary": "Security operations: triage of an email an employee reported as phishing. The model says what the email asks for and lists every link it saw; code extracts the links and sender domain itself, flags lookalike domains and links whose text names a different site, and the model may raise that risk but never lower it.",
-  "lines": 74,
+  "lines": 76,
   "runs": true,
   "cases": [
    {
@@ -1922,7 +1922,7 @@
   "name": "review_moderation",
   "kind": "use case",
   "summary": "E-commerce: product review moderation. The model reads sentiment, competitor mentions and whether the review is about the product; code checks the purchase record, near-duplicate text against published reviews, link and phone spam, and adds the \"received free product\" label itself. Sentiment is recorded, never used: bad reviews publish.",
-  "lines": 66,
+  "lines": 68,
   "runs": true,
   "cases": [
    {
@@ -2095,7 +2095,7 @@
   "name": "screening",
   "kind": "use case",
   "summary": "Hiring: resume screening. The model may only claim a skill with a quote from the resume, and code decides what the resume says: hidden text (white-on-white, display:none) is stripped before any quote is checked. Years of experience are computed by code from the dates the model reads, and the model's own rating is never used.",
-  "lines": 69,
+  "lines": 71,
   "runs": true,
   "cases": [
    {
@@ -2374,7 +2374,7 @@
   "name": "vendor_bank_change",
   "kind": "use case",
   "summary": "Vendor master: a supplier letter asks to change the remittance account, the classic business email compromise. The model reads the letter; code checks the sender's domain against the vendor master, the IBAN checksum, and that the IBAN is in the visible letter. Above a spend threshold a callback on the number already on file is required.",
-  "lines": 72,
+  "lines": 74,
   "runs": true,
   "cases": [
    {
@@ -3076,7 +3076,7 @@
   "name": "x_gst_return",
   "kind": "workflow",
   "summary": "Workflow: monthly GST return. Validate each purchase invoice for input tax credit (gst_invoice.shio) and post each credit note we issued (credit_note.shio). Cross-step check: a credit note may only reduce output tax on a sales invoice in this return's batch. Code then nets output tax, credit notes and ITC per GSTIN. FILE or REVIEW.",
-  "lines": 67,
+  "lines": 69,
   "runs": true,
   "cases": [
    {

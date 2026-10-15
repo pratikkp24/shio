@@ -32,6 +32,8 @@ agent ask(question: str, llm):
     check numbers_sourced: all(n in sum((numbers(c.quote) for c in a.citations), []) for n in numbers(a.text)), "the answer has a number no citation contains"
 
     rule reply:
+        if a is None:
+            return {"answer": "I don't know from the documents I have.", "why": ["the model gave no usable answer"]}
         if checks.failures():
             return {"answer": "I don't know from the documents I have.", "held_back": a.text, "why": [c["detail"] for c in checks.failures()]}
         return {"answer": a.text, "sources": [c.doc for c in a.citations]}

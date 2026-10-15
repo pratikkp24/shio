@@ -32,6 +32,8 @@ agent review(nda: str, llm):
     check solicit_accounted: t.non_solicit.value is not None or not re.search(r"\bsolicit", nda, re.I), "the NDA mentions soliciting but no non-solicit was reported"
 
     rule outcome:
+        if t is None:
+            return {"action": "LEGAL", "why": ["the model gave no usable answer"]}
         flags = []
         if t.duration.number is None or t.duration.number > PLAYBOOK["max_years"]:
             flags.append(f"confidentiality term {t.duration.number} years; playbook max {PLAYBOOK['max_years']}")

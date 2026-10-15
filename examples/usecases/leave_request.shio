@@ -41,6 +41,8 @@ agent leave(email: str, sender: str, llm):
     check team_cover: all(len(TEAM_OFF.get(d, [])) + 1 <= MAX_OFF for d in workdays(r.start, r.end)), "more than {MAX_OFF} of the team off on {[d for d in workdays(r.start, r.end) if len(TEAM_OFF.get(d, [])) + 1 > MAX_OFF]}"
 
     rule decision:
+        if r is None:
+            return {"action": "MANAGER", "why": ["the model gave no usable answer"]}
         days = len(workdays(r.start, r.end)) - 0.5 * len(r.half_days)
         if checks.failures():
             return {"action": "MANAGER", "days": days, "why": [c["detail"] for c in checks.failures()]}
