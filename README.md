@@ -153,6 +153,10 @@ shio run payables.shio qwen3:8b   # Shio (or: replay, no model needed)
 llama.cpp server, OpenAI, Gemini, OpenRouter and anything else that speaks the OpenAI API. Keys come from the
 environment, never from code or traces. `replay(fn)` answers from saved data, for tests and demos.
 
+Shio asks for structured output (`response_format` with a JSON schema) by default. If a provider rejects it, pass
+`structured=False`: the schema still goes in the prompt and the reply is still parsed and checked. A reply that does
+not fit, a timeout or a provider error gives a null reading, which fails its checks instead of crashing the agent.
+
 ## Checks are tests, and rewards
 
 Every run is saved as a trace: each reading's prompt and raw completion, each check's arguments and result, and the
