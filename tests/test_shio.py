@@ -304,3 +304,32 @@ class Training(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_model_that_fails_gives_a_null_reading_not_a_crash(tmp_path):
+    from shio.core import configure
+    configure(str(tmp_path))
+    src = '''
+type Answer:
+    n: int
+
+def boom(req):
+    raise TimeoutError("timed out")
+
+model broken = replay(boom)
+
+agent ask(doc: Source):
+    read a: Answer from doc by broken:
+        What is the number?
+    check got: a is not None and a.n > 0, "no number"
+    rule out:
+        if got:
+            return a.n
+        return None
+    return out
+'''
+    p = tmp_path / "broken.shio"
+    p.write_text(src)
+    import shio
+    mod = shio.load(str(p))
+    assert mod.ask(mod.Source("d", text="x")) is None

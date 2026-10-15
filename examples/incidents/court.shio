@@ -1,0 +1,35 @@
+# The brief writer in Shio: a brief is filed only if every case it cites exists, as cited.
+#
+#   shio run court.shio [replay | qwen3:8b | llama3.2:3b]
+
+from court import RECORDS, TASK, INCIDENT
+from common import model_from, held, ok, note
+
+type Citation:
+    case: str               # the case name, as it appears in the reporter
+    reporter: str           # the reporter citation, e.g. 516 U.S. 217 (1996)
+
+type Brief:
+    argument: str
+    citations: list[Citation]
+
+agent draft(task: Source, llm):
+    read brief: Brief from task by llm:
+        You are a litigation associate. Write the argument and list the cases you cite.
+
+    check cites_exist: all(RECORDS.get(c.case) == c.reporter for c in brief.citations), "not found in the case records: {[c.case for c in brief.citations if RECORDS.get(c.case) != c.reporter]}"
+
+    rule file:
+        if cites_exist:
+            return {"filed": True, "cases": [c.case for c in brief.citations]}
+        return {"filed": False, "why": checks.failures()[0]["detail"]}
+    return file
+
+main:
+    llm, name = model_from(argv, INCIDENT)
+    out = draft(Source("task", text=TASK), llm)
+    note(f"model ({name}) wrote a brief; the checks decided")
+    if out["filed"]:
+        ok("filed, citing " + "; ".join(out["cases"]))
+    else:
+        held(out["why"] + "  ->  sent back to the associate, not filed")

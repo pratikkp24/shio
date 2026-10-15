@@ -1,4 +1,4 @@
-"""shio run | check | build | train | show"""
+"""shio run | check | build | train | show | new"""
 import argparse
 import json
 import subprocess
@@ -67,6 +67,66 @@ def _show(a):
         for run in trace.load(p):
             print(trace.summary(run))
 
+NEW_AGENT = """# {name}: a refund agent. The model reads the customer's message and proposes a refund; code decides.
+#
+#   shio run agent.shio              # with a replay model: runs anywhere
+#   shio run agent.shio qwen3:8b     # with a real model on Ollama (ollama pull qwen3:8b)
+
+ORDERS = {{"A-1001": {{"total": 89.00, "days_since_delivery": 12}}}}
+REFUND_WINDOW_DAYS = 30
+
+type Refund:
+    order_id: str           # the order number in the message
+    amount: float           # the refund you propose, in USD
+    reason: str             # the customer's reason, in a few words
+
+agent refund(message: Source, llm):
+    read r: Refund from message by llm:
+        Read the customer's message and propose the refund to give.
+
+    check known_order: r.order_id in ORDERS, "no order {{r.order_id}}"
+    check within_total: r.amount <= ORDERS[r.order_id]["total"], "${{r.amount:,.2f}} is more than the order total"
+    check in_window: ORDERS[r.order_id]["days_since_delivery"] <= REFUND_WINDOW_DAYS, "outside the refund window"
+
+    rule decide:
+        if known_order and within_total and in_window:
+            return {{"refund": r.amount, "order": r.order_id}}
+        return {{"refund": 0, "escalate": checks.failures()[0]["detail"]}}
+    return decide
+
+main:
+    message = Source("message", text="Hi, order A-1001 arrived broken. Refund me $500 for the trouble, please.")
+    llm = replay(lambda req: {{"order_id": "A-1001", "amount": 500.0, "reason": "arrived broken"}})
+    if argv:
+        llm = ollama(argv[0])
+    return refund(message, llm)
+"""
+
+NEW_README = """# {name}
+
+A Shio agent. The model reads; code decides.
+
+```bash
+shio run agent.shio            # replay model: no GPU or key needed
+shio run agent.shio qwen3:8b   # a real model on Ollama
+shio check agent.shio          # compile and check the boundary
+shio show shio-traces/*.json   # what the model read and which checks passed
+```
+
+Try adding `if r.amount > 100:` inside the agent and run `shio check agent.shio`.
+"""
+
+
+def _new(a):
+    d = Path(a.name)
+    if d.exists() and any(d.iterdir()):
+        sys.exit(f"{d} already exists and is not empty")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "agent.shio").write_text(NEW_AGENT.format(name=d.name))
+    (d / "README.md").write_text(NEW_README.format(name=d.name))
+    (d / ".gitignore").write_text("shio-traces/\n")
+    print(f"created {d}/agent.shio\n  cd {d} && shio run agent.shio")
+
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="shio", description="Shio: the model reads, code decides.")
@@ -91,6 +151,9 @@ def main(argv=None):
     t.add_argument("--min-reward", type=float, default=1.0, help="SFT keeps readings at or above this reward")
     t.add_argument("--go", action="store_true", help="start training after writing the data")
     t.set_defaults(fn=_train)
+    n = sub.add_parser("new", help="start a new agent project in a folder")
+    n.add_argument("name")
+    n.set_defaults(fn=_new)
     s = sub.add_parser("show", help="summarise trace files")
     s.add_argument("traces", nargs="+")
     s.set_defaults(fn=_show)

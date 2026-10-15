@@ -1,0 +1,33 @@
+# The support bot in Shio: an answer goes out only if it rests on a clause that is really in the policy.
+#
+#   shio run airline.shio [replay | qwen3:8b | llama3.2:3b]
+
+from airline import POLICY, QUESTION, INCIDENT
+from common import model_from, held, ok, note
+
+type Answer:
+    reply: str              # your answer to the customer
+    quote: str              # the clause of the policy your answer rests on, copied word for word
+
+agent support(policy: Source, question: Source, llm):
+    read answer: Answer from policy, question by llm:
+        You are the airline's support agent. Answer the customer using the policy, and quote the clause your
+        answer rests on.
+
+    check quoted: answer.quote.strip() != "" and answer.quote.strip() in POLICY, "the quote is not in the policy: {answer.quote}"
+
+    rule respond:
+        if quoted:
+            return {"sent": True, "reply": answer.reply}
+        return {"sent": False, "reply": "I've passed this to a colleague who will reply within a day.",
+                "why": checks.failures()[0]["detail"]}
+    return respond
+
+main:
+    llm, name = model_from(argv, INCIDENT)
+    out = support(Source("policy", text=POLICY), Source("question", text=QUESTION), llm)
+    note(f"model ({name}) drafted a reply; the checks decided")
+    if out["sent"]:
+        ok(f'sent: "{out["reply"]}"')
+    else:
+        held(f'{out["why"]}  ->  sent instead: "{out["reply"]}"')

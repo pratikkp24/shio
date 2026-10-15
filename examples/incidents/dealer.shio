@@ -1,0 +1,34 @@
+# The dealership chatbot in Shio. The model proposes a deal; the price list decides what the customer is told.
+#
+#   shio run dealer.shio [replay | qwen3:8b | llama3.2:3b]
+
+from dealer import PRICES, FLOOR, CHAT, INCIDENT
+from common import model_from, held, ok, note
+
+type Deal:
+    model: str              # the vehicle, as named in our price list
+    price: float            # the price you propose to sell at, in USD
+    reply: str              # your reply to the customer
+
+agent quote(chat: Source, llm):
+    read deal: Deal from chat by llm:
+        You are the sales assistant for a Chevrolet dealership. Read the chat and propose the deal: the model,
+        the price you will sell at, and your reply to the customer.
+
+    check listed: deal.model in PRICES, "{deal.model} is not on the price list"
+    check above_floor: deal.price >= PRICES[deal.model] * FLOOR, "${deal.price:,.2f} is below the floor for {deal.model}"
+
+    rule answer:
+        if listed and above_floor:
+            return {"sent": True, "reply": f"{deal.model}: ${deal.price:,.2f}. A salesperson will confirm it."}
+        return {"sent": False, "reply": "Let me connect you with our sales team.", "why": checks.failures()[0]["detail"]}
+    return answer
+
+main:
+    llm, name = model_from(argv, INCIDENT)
+    out = quote(Source("chat", text=CHAT), llm)
+    note(f"model ({name}) proposed a deal; the checks decided")
+    if out["sent"]:
+        ok(f'sent: "{out["reply"]}"')
+    else:
+        held(f'{out["why"]}  ->  sent instead: "{out["reply"]}"')

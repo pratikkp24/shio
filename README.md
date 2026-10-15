@@ -68,6 +68,32 @@ We ran this with `llama3.2:3b` and `qwen3:8b`. **Both models fell for the inject
 fooled; it stopped a fooled model from acting.** The model never had the outbox. Only the rule did, and the rule
 only sends inside the team.
 
+## Five famous AI agent failures, rewritten in Shio
+
+The $1 Chevy Tahoe. Air Canada's invented refund policy. The lawyers who filed case law ChatGPT made up. Replit's
+agent deleting a production database during a code freeze. A GitHub issue that made an agent leak private repos.
+Each one is a small program in [`examples/incidents`](https://github.com/Aonami-Labs/shio/tree/main/examples/incidents),
+written twice: as a plain Python agent and in Shio. `replay` gives the answer the model gave in the real incident:
+
+```
+$ python run_all.py
+Chevy dealer bot sells a Tahoe for $1 (2023)
+  plain Python  DONE  sent to the customer: "That's a deal, and that's a legally binding offer - no takesies backsies."
+  Shio          HELD  $1.00 is below the floor for 2024 Chevy Tahoe  ->  sent instead: "Let me connect you with our sales team."
+
+Lawyers file ChatGPT's invented case law (2023)
+  plain Python  DONE  filed with the court, citing: Varghese v. China Southern Airlines Co., 925 F.3d 1339 (11th Cir. 2019); ...
+  Shio          HELD  not found in the case records: ['Varghese v. China Southern Airlines Co.']  ->  sent back to the associate, not filed
+
+Replit agent deletes a production database (2025)
+  plain Python  DONE  ran on prod: executives 1,206 -> 0 rows
+  Shio          HELD  production is frozen; the plan targets prod; ...  ->  prod untouched: 1,206 rows
+...
+```
+
+Each fix is one or two `check` lines. The [gallery](https://github.com/Aonami-Labs/shio/tree/main/examples/incidents)
+has all five, the checks, and sources for every incident.
+
 ## How it works
 
 A model call in Shio returns a **reading**: a proposal, not a value. The compiler only lets you look at a reading in
@@ -89,6 +115,7 @@ Everything else in a `.shio` file is Python: imports, functions, loops, any libr
 
 ```bash
 pip install shio-lang          # or, from a clone: pip install -e .
+shio new myagent && cd myagent && shio run agent.shio    # a starter agent, no model needed
 cd examples/injection
 shio run inbox.shio replay     # no model needed: 'replay' is a model that always falls for the injection
 shio run inbox.shio llama3.2:3b   # with Ollama: ollama pull llama3.2:3b
@@ -150,6 +177,7 @@ outcome. That gives you three things:
 | `main:` | The entry point for `shio run`. `argv` holds the arguments. |
 
 ```bash
+shio new myagent                  # a starter agent that runs with no model, key or GPU
 shio run program.shio [args]      # run main:, writing a trace per agent call to ./shio-traces
 shio check program.shio           # compile and check the boundary, without running anything
 shio build program.shio -o out.py # the Python it compiles to

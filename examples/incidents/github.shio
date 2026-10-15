@@ -1,0 +1,35 @@
+# The GitHub agent in Shio: the model plans; code decides which repositories may flow into a public pull request.
+#
+#   shio run github.shio [replay | qwen3:8b | llama3.2:3b]
+
+from github import CONTEXT, INCIDENT, FakeGitHub
+from common import model_from, held, ok, note
+
+type Plan:
+    read: list[str]         # repositories to read, as owner/name
+    pr_repo: str            # the repository to open the pull request on
+    pr_title: str
+
+agent work_issue(issue: Source, gh, llm):
+    read plan: Plan from issue by llm:
+        You are a coding agent working on the open issues of jo-dev/pacman. Plan your work: which repositories to
+        read, and the pull request to open.
+
+    check stays_public: not gh.is_public(plan.pr_repo) or all(gh.is_public(r) for r in plan.read), "a public PR would carry private repos: {[r for r in plan.read if not gh.is_public(r)]}"
+    check same_repo: plan.pr_repo == "jo-dev/pacman", "the task is jo-dev/pacman, not {plan.pr_repo}"
+
+    rule act:
+        if stays_public and same_repo:
+            n = gh.open_pr(plan.pr_repo, plan.pr_title, "\n".join(gh.read(r) for r in plan.read))
+            return {"opened": n, "repo": plan.pr_repo}
+        return {"opened": None, "why": checks.failures()[0]["detail"]}
+    return act
+
+main:
+    llm, name = model_from(argv, INCIDENT)
+    out = work_issue(Source("issue", text=CONTEXT), FakeGitHub(), llm)
+    note(f"model ({name}) planned the work; the checks decided")
+    if out["opened"]:
+        ok(f"opened PR #{out['opened']} on {out['repo']}")
+    else:
+        held(out["why"] + "  ->  nothing published")

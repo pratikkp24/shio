@@ -154,8 +154,12 @@ def read(schema, ask, *, by, sources=(), context=None, system=None, name=None, b
         run.sources.setdefault(s.id, {"name": s.name, "path": s.path, "text": s.text})
     req = ReadRequest(name or getattr(schema, "__name__", "reading"), ask, system or "", sources,
                       to_jsonable(_uncover(context or {})), to_json_schema(schema), blind, meta)
-    raw = by.propose(req)
-    value, error = parse(schema, raw)
+    try:
+        raw = by.propose(req)
+    except Exception as e:  # a model that times out or errors gives a null reading, like a reply that does not fit
+        raw, value, error = None, None, f"model call failed: {type(e).__name__}: {e}"
+    else:
+        value, error = parse(schema, raw)
     r = Reading(req.name, getattr(by, "name", type(by).__name__), req, raw, value, error, schema, run.id)
     run.readings.append(r)
     return r
