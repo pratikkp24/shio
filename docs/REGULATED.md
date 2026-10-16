@@ -14,6 +14,7 @@ shio erase records/assess-…json --reason "erasure request #4411"   # delete it
 shio signoff records/pay-…json --as "Priya Nair" --role finance_controller --meaning "approved for payment"
 shio reasons records/assess-…json                   # the reason codes and the text the customer is given
 shio explain loan.shio -o loan-decision-map.html    # the decision map for the model-risk file
+shio monitor records/ --webhook https://hooks.example.com/shio --exit-code   # alerts while a period runs
 ```
 
 ## A regulated program
@@ -298,6 +299,51 @@ agent sanction(slip: str, asked: float, llm):
 
 See `examples/regulated/gold.shio`.
 
+### One program, several regulators: jurisdictions
+
+An Indian bank with a UAE branch runs one gold-loan program, but RBI's rules govern its Indian decisions and the
+UAE's govern the branch's. Scope a policy or table version to the jurisdictions it governs with `applies_to`:
+
+```
+policy "RBI data handling" version 4:
+    effective 2027-01-01
+    applies_to "IN"
+    source "RBI circular 2026-27/112, para 5"
+    Email:       clear
+    PhoneNumber: hashed
+
+table "Gold loan limits" version 3:
+    effective 2026-01-01
+    applies_to "AE"                        # or several: applies_to "AE", "AE-DIFC"
+    source "CBUAE notice 2025/31"
+    max_ltv: 0.85
+```
+
+A version without `applies_to` applies everywhere, so a group-wide standard sits beside each regulator's rules (and
+the most protective rule still wins where they overlap). Version numbers are shared by a name across
+jurisdictions: two versions can't both be `version 2`, and versions only have to go forward in time where their
+jurisdictions overlap.
+
+- **The jurisdiction comes from the run**, never from the model: `shio run --jurisdiction IN`,
+  `SHIO_JURISDICTION=IN` or `shio.configure(jurisdiction="IN")`. For each decision Shio resolves the data-handling
+  rules and the decision tables in force for that jurisdiction on that date.
+- **The record says which.** The jurisdiction is stamped at the top of the record (signed with the rest) and in
+  `data_policy`; each policy and table stamp lists its `applies_to`.
+- **No guessing.** When the policies hold any jurisdiction-scoped version, a run with no jurisdiction is refused,
+  and so is a jurisdiction no version is scoped to (a typo like `IND` would otherwise get only the group-wide rules).
+  A regulated program raises `RegulatedError` before deciding anything, and no record is written.
+- **The tools follow.**
+  - `audit` checks each record against the versions in force for *its* jurisdiction. It reports a record written
+    with no jurisdiction once scoped versions were in force, and splits the count by jurisdiction.
+    `--jurisdiction IN` audits only India's records.
+  - `policy show`, `check` and `impact` cover each jurisdiction in turn, or the one you name.
+  - `replay RECORD --policies DIR` uses the record's jurisdiction. `--jurisdiction AE` shows what the branch's
+    limits would have decided for the same case.
+  - `migrate` re-seals each jurisdiction's records under its own rules. `retention`, `evidence` and `monitor` take
+    `--jurisdiction` to cover one regulator's decisions; the evidence pack counts decisions by jurisdiction.
+
+See `tests/test_jurisdiction.py` for the two-regulator scenario end to end.
+
 The language doesn't read a circular. A person turns it into a new policy version (a model can draft it, and a
 person approves). Shio provides one place for the rule, proof that it's applied everywhere, and a signed record
 of which rule governed each decision.
@@ -331,6 +377,40 @@ check's pass rate is a measure of quality in its own right. The pack flags:
 - a model served with different weights during the period (its digest changed);
 - more than 5% of model calls giving no usable answer.
 
+## Alerts while a period runs: `shio monitor`
+
+The pack is assembled after the period ends. `shio monitor` computes the same flags over a rolling window, so they
+reach someone while the quarter is still running:
+
+```bash
+shio monitor records/                                       # the last 28 days, against the 8 weeks before them
+shio monitor records/ --since 2026-10-01 --pending-days 2 --jurisdiction IN
+shio monitor records/ --webhook https://hooks.example.com/shio --exit-code    # from cron or CI
+```
+
+It flags:
+- a week in the window where a check's pass rate falls more than ten points below its rate in the weeks before
+  (the `--baseline-weeks`, default 8, before the window count as "before");
+- a model served with different weights during the window, or with weights other than those in the baseline;
+- more than 5% of the window's model calls giving no usable answer;
+- a decision still waiting for sign-off after more than `--pending-days` days (default 3).
+
+It prints the flags (`--json` for the whole result). With `--webhook URL` it POSTs that result as JSON when
+anything is flagged (`--always-post` posts every run, as a heartbeat). `--exit-code` exits 1 when anything is
+flagged. A webhook that can't be reached exits 2, so a broken alert channel doesn't go unnoticed.
+
+```json
+{"source": "shio monitor", "window": ["2026-09-19", "2026-10-16"], "decisions": 214,
+ "flags": ["weigh.on_slip: pass rate 0% in 2026-W42, down from 100% before it"],
+ "alerts": [{"kind": "check_drop", "check": "weigh.on_slip", "week": "2026-W42", "pass_rate": 0.0, "before": 1.0,
+             "message": "..."}],
+ "pending": [...], "rates": {...}}
+```
+
+Alert kinds are `check_drop`, `model_weights`, `model_failures` and `pending_signoff`. The figures come from the
+records alone. Monitor doesn't verify the ledger (that's `shio verify` and the evidence pack), and it sends only
+check names, rates, model identities and record file names, never personal data.
+
 ## Where the guarantees stop
 
 - **Python is not a sandbox.** Regulated mode makes every route around the boundary a compile error *in Shio code*.
@@ -353,6 +433,9 @@ check's pass rate is a measure of quality in its own right. The pack flags:
   but not scrubbed from free text.
 - **A policy is only as good as its classes.** Shio checks that classified fields follow the policy; it relies on
   the program (and the regulated name check) to classify every personal field in the first place.
+- **A jurisdiction is the operator's claim.** Shio resolves and records the rules for the jurisdiction the run
+  names; it can't tell whether a customer really belongs to that branch. Set it from your own routing (one
+  deployment per jurisdiction, or a value your system of record supplies), not from anything a model read.
 - **The decision map is static.** It shows conditions as written in the `.shio` file. It doesn't follow into
   imported Python modules or work out values computed at run time.
 
@@ -372,10 +455,12 @@ counsel and regulator.
 | Technical documentation (EU AI Act Art. 11, Annex IV; SR 11-7 documentation) | `shio explain`: the decision map generated from the program, tied to its hash |
 | Erasure and data minimisation (GDPR Art. 17; DPDP Act) | Data classes handled per policy (`clear`, `vault`, `hashed`), `shio erase`, `shio retention` |
 | Rules that change over time (RBI, SEBI, DPDP directions) | Dated, sourced policy versions; the version in force stamped into each record; `shio audit`, `policy impact`, `migrate` |
+| Several regulators for one program (branches abroad, cross-border groups) | `applies_to` on policy and table versions; the jurisdiction stamped into each record; a run without one refused |
+| Ongoing monitoring (EU AI Act Art. 72 post-market monitoring; SR 11-7 ongoing monitoring) | `shio monitor` over a rolling window, with webhook alerts and a CI/cron exit code |
 | Change management | `replay --allow-changed` and `policy impact`; the program and policy hashes in every record |
 
 ## Next
 
 Planned next:
-- jurisdiction-scoped policies (one program serving several regulators);
-- monitoring alerts while a period runs (today they come with the evidence pack), and dashboards.
+- dashboards over the monitoring figures;
+- model input and output in a separate process, for stronger isolation than Python offers.
