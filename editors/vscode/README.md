@@ -7,6 +7,9 @@ Language support for Shio, the agent language in which the model reads and code 
   its `{expr}` interpolations as code. A field's trailing comment in a `type` block is shown as a description, since
   the model sees it. A check's detail string gets the same `{expr}` highlighting. ` ```shio ` blocks in Markdown are
   highlighted too.
+- **Policy files.** `.policy` files (`policy "NAME" version N:` and `table "NAME" version N:` blocks with `effective`,
+  `source`, `approved_by` and rules such as `Email: hashed` or `PAN: vault, retain 8 years`) get their own
+  highlighting. In `.shio` files, a field's data class (`email: str as Email`) is highlighted too.
 - **Errors on save.** Opening or saving a `.shio` file runs `shio check` on it and puts the error on the line it
   names, in the editor and the Problems panel. Using a reading in plain code, for example, shows up like this:
 

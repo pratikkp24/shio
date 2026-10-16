@@ -1,0 +1,117 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Shio policy",
+  "scopeName": "source.shio-policy",
+  "fileTypes": [
+    "policy"
+  ],
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#header"
+    },
+    {
+      "include": "#body"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "match": "(#).*$",
+      "name": "comment.line.number-sign.shio-policy",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.comment.shio-policy"
+        }
+      }
+    },
+    "header": {
+      "match": "^(policy|table)\\s+(\"[^\"]*\")\\s+(version)\\s+(\\d+)\\s*(:)",
+      "captures": {
+        "1": {
+          "name": "storage.type.$1.shio-policy"
+        },
+        "2": {
+          "name": "entity.name.type.policy.shio-policy string.quoted.double"
+        },
+        "3": {
+          "name": "keyword.other.version.shio-policy"
+        },
+        "4": {
+          "name": "constant.numeric.version.shio-policy"
+        },
+        "5": {
+          "name": "punctuation.separator.colon.shio-policy"
+        }
+      }
+    },
+    "body": {
+      "patterns": [
+        {
+          "match": "^\\s+(effective)\\s+(\\d{4}-\\d{2}-\\d{2})",
+          "captures": {
+            "1": {
+              "name": "keyword.other.effective.shio-policy"
+            },
+            "2": {
+              "name": "constant.numeric.date.shio-policy"
+            }
+          }
+        },
+        {
+          "match": "^\\s+(source|approved_by)\\s+(\"[^\"]*\")",
+          "captures": {
+            "1": {
+              "name": "keyword.other.$1.shio-policy"
+            },
+            "2": {
+              "name": "string.quoted.double.shio-policy"
+            }
+          }
+        },
+        {
+          "begin": "^\\s+([A-Za-z_][\\w.-]*|\"[^\"]*\")\\s*(:)",
+          "beginCaptures": {
+            "1": {
+              "name": "variable.other.key.shio-policy"
+            },
+            "2": {
+              "name": "punctuation.separator.colon.shio-policy"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "include": "#comment"
+            },
+            {
+              "match": "\\b(clear|hashed|vault|retain|redact|forbid|deny|allow)\\b",
+              "name": "keyword.other.handling.shio-policy"
+            },
+            {
+              "match": "\\b(years?|months?|days?)\\b",
+              "name": "keyword.other.unit.shio-policy"
+            },
+            {
+              "match": "\\b\\d+(\\.\\d+)?\\b",
+              "name": "constant.numeric.shio-policy"
+            },
+            {
+              "match": "\"[^\"]*\"|'[^']*'",
+              "name": "string.quoted.shio-policy"
+            },
+            {
+              "match": "\\b(true|false|none)\\b",
+              "name": "constant.language.shio-policy"
+            },
+            {
+              "match": ",",
+              "name": "punctuation.separator.comma.shio-policy"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -177,6 +177,32 @@ async function main() {
   expect(ed, L, 19, "read", "keyword.other.read.shio", { not: true });
   expect(ed, L, 9, "z", "entity.name.variable.reading.shio");
   {
+    const policy = fs.readFileSync(path.join(EXAMPLES, "regulated", "policies", "rbi.policy"), "utf8");
+    const Q = await tokenize(policy, "source.shio-policy");
+    const pq = "rbi.policy";
+    expect(pq, Q, 1, "#", "comment.line");
+    expect(pq, Q, 5, "policy", "storage.type.policy.shio-policy");
+    expect(pq, Q, 5, "version", "keyword.other.version.shio-policy");
+    expect(pq, Q, 5, "3", "constant.numeric.version.shio-policy");
+    expect(pq, Q, 6, "2026-01-01", "constant.numeric.date.shio-policy");
+    expect(pq, Q, 7, "source", "keyword.other.source.shio-policy");
+    expect(pq, Q, 8, "approved_by", "keyword.other.approved_by.shio-policy");
+    expect(pq, Q, 10, "Email", "variable.other.key.shio-policy");
+    expect(pq, Q, 10, "hashed", "keyword.other.handling.shio-policy");
+    expect(pq, Q, 12, "retain", "keyword.other.handling.shio-policy");
+    expect(pq, Q, 12, "years", "keyword.other.unit.shio-policy");
+    const T = await tokenize('table "Loan limits" version 2:\n    effective 2027-04-01\n    max_dti: 0.4\n', "source.shio-policy");
+    expect("policy table", T, 1, "table", "storage.type.table.shio-policy");
+    expect("policy table", T, 3, "max_dti", "variable.other.key.shio-policy");
+    expect("policy table", T, 3, "0.4", "constant.numeric.shio-policy");
+    const O = await tokenize(fs.readFileSync(path.join(EXAMPLES, "regulated", "onboard.shio"), "utf8"));
+    expect("onboard.shio", O, 9, "as", "keyword.other.as.shio");
+    expect("onboard.shio", O, 9, "FullName", "entity.name.type.data-class.shio");
+    expect("onboard.shio", O, 9, "as printed on the form", "string.quoted.docstring.description.shio");
+    const I = await tokenize("agent a(x):\n    t = in_force(\"Loan limits\")\n");
+    expect("in_force", I, 2, "in_force", "support.function.model.shio");
+  }
+  {
     const P = await tokenize([
       "codes:",
       '    INCOME_NOT_VERIFIED: "We could not verify your income from the documents you sent."',

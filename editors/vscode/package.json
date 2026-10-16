@@ -1,7 +1,7 @@
 {
   "name": "shio",
   "displayName": "Shio",
-  "description": "Shio language support: highlighting for .shio files, and the read/decide boundary checked on save.",
+  "description": "Shio language support: highlighting for .shio and .policy files, and the read/decide boundary checked on save.",
   "version": "0.1.0",
   "publisher": "aonami-labs",
   "license": "Apache-2.0",
@@ -37,6 +37,16 @@
           ".shio"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "shio-policy",
+        "aliases": [
+          "Shio policy"
+        ],
+        "extensions": [
+          ".policy"
+        ],
+        "configuration": "./policy-language-configuration.json"
       }
     ],
     "grammars": [
@@ -57,6 +67,11 @@
         "embeddedLanguages": {
           "meta.embedded.block.shio": "shio"
         }
+      },
+      {
+        "language": "shio-policy",
+        "scopeName": "source.shio-policy",
+        "path": "./syntaxes/shio-policy.tmLanguage.json"
       }
     ],
     "commands": [

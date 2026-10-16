@@ -73,7 +73,7 @@
           }
         },
         {
-          "match": "(?<![\\w.])(ollama|openai_compat|replay|pdf)(?=\\s*\\()",
+          "match": "(?<![\\w.])(ollama|openai_compat|replay|pdf|in_force)(?=\\s*\\()",
           "name": "support.function.model.shio"
         },
         {
@@ -141,6 +141,17 @@
       "patterns": [
         {
           "include": "#field-description"
+        },
+        {
+          "match": "\\b(as)\\s+([A-Z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.other.as.shio"
+            },
+            "2": {
+              "name": "entity.name.type.data-class.shio"
+            }
+          }
         },
         {
           "match": "\\b(pii)\\b(?=\\s*(#|=|$))",

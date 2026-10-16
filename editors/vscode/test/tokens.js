@@ -22,6 +22,7 @@ async function registry() {
   const files = {
     "source.shio": path.join(__dirname, "..", "syntaxes", "shio.tmLanguage.json"),
     "source.python": pyPath,
+    "source.shio-policy": path.join(__dirname, "..", "syntaxes", "shio-policy.tmLanguage.json"),
   };
   return new vsctm.Registry({
     onigLib: Promise.resolve({
@@ -32,8 +33,8 @@ async function registry() {
   });
 }
 
-async function tokenize(text) {
-  const grammar = await (await registry()).loadGrammar("source.shio");
+async function tokenize(text, scope = "source.shio") {
+  const grammar = await (await registry()).loadGrammar(scope);
   let stack = vsctm.INITIAL;
   return text.split("\n").map((line) => {
     const r = grammar.tokenizeLine(line, stack);
