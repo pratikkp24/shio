@@ -199,12 +199,14 @@ approved, and reconciliation ties every ERP journal back to it. Sample data, rea
 
 <table>
 <tr>
-<td width="50%"><img src="docs/readme/close-verify.png" alt="Verify the close: signatures, chain, record, personal data and approval all checked live"><br><sub><b>Verify now.</b> Anyone, auditors included, re-checks the close live: every signature, the chain, the record, the encrypted vault.</sub></td>
-<td width="50%"><img src="docs/readme/close-sealed.png" alt="Sealed by Shio panel, the controller's approval and the close desk"><br><sub><b>Sealed by Shio.</b> Signed, chained, personal data encrypted, the rule versions it was decided under. Then the controller's approval, recorded in the ledger.</sub></td>
+<td width="50%" valign="top"><img src="docs/readme/close-verify.png" alt="Verify the close: signatures, chain, record, personal data and approval all checked live"><br><sub><b>Verify now.</b> Anyone, auditors included, re-checks the close live: every signature, the chain, the record, the encrypted vault.</sub></td>
+<td width="50%" valign="top"><img src="docs/readme/close-resolve.png" alt="Resolving a review ticket in a Slack form"><br><sub><b>People resolve what the checks refused.</b> A workaround needs a follow-up date; an L2 must approve it, and not the person who resolved it.</sub></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/readme/close-charts.png" alt="Budget vs actual and accruals as emoji charts in Slack"><br><sub><b>The numbers, in the channel.</b> Budget vs actual and accruals, computed by code, not written by the model.</sub></td>
-<td width="50%"><img src="docs/readme/close-resolve.png" alt="Resolving a review ticket in a Slack form"><br><sub><b>People resolve what the checks refused.</b> A workaround needs a follow-up date; an L2 must approve it, and not the person who resolved it.</sub></td>
+<td colspan="2"><img src="docs/readme/close-sealed.png" alt="Sealed by Shio panel, the controller's approval and the close desk"><br><sub><b>Sealed by Shio.</b> Signed, chained, personal data encrypted, the rule versions it was decided under. Then the controller's approval, recorded in the ledger, and the close desk.</sub></td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/readme/close-charts.png" alt="Budget vs actual and accruals as emoji charts in Slack"><br><sub><b>The numbers, in the channel.</b> Budget vs actual and accruals, computed by code, not written by the model.</sub></td>
 </tr>
 <tr>
 <td colspan="2" align="center"><img src="docs/readme/close-report.png" alt="The close report PDF and 5 of 5 ERP journals matching the signed ledger" width="60%"><br><sub><b>Posted and reconciled.</b> The report lands in the channel, and every ERP journal matches the signed ledger.</sub></td>
