@@ -456,5 +456,126 @@ class Drop(unittest.TestCase):
                          {"t": "CVV [dropped CardCVV], ref 17375, id a737b", "n": "[dropped CardCVV]"})
 
 
+PAYOUT = """
+regulated
+
+type Payee:
+    name: str as FullName
+    account_number: str as BankAccount
+    branch: str as BranchCode
+    amount: float
+
+model clerk = replay(lambda req: {"name": "Asha Rao", "account_number": "50100234567891", "branch": "12",
+                                  "amount": 1200.0})
+
+agent payout(form: str, llm):
+    read k: Payee by llm:
+        Read the payee from this payment order.
+
+        {form}
+    rule decision:
+        if k is None:
+            return {"status": "REVIEW"}
+        return {"status": "PAY", "to_account": k.account_number, "memo": "credit a/c " + k.account_number,
+                "branch": k.branch, "batch": "12", "amount": k.amount}
+    return decision
+"""
+PAYOUT_POLICY = """
+policy "Bank data" version 1:
+    effective 2026-01-01
+    source "Hypothetical circular, para 2"
+    FullName:    vault
+    BankAccount: vault
+    BranchCode:  vault
+"""
+ACCOUNT = "50100234567891"
+
+
+class VaultCopies(unittest.TestCase):
+    """A rule that copies a vault-class value into its outcome (shio-finance lending: loan_ops paid out to the
+    vaulted account number) must not leak it: the record keeps a hash, the vault the value, and audit flags a
+    record written before this was done."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        (self.dir / "policies").mkdir()
+        (self.dir / "policies" / "bank.policy").write_text(textwrap.dedent(PAYOUT_POLICY))
+        (self.dir / "payout.shio").write_text(textwrap.dedent(PAYOUT))
+        self.signer = ledger.load_signer("hmac:k")
+        self.records = self.dir / "records"
+        self.store = Store.load(self.dir / "policies")
+
+    def tearDown(self):
+        shio.configure("shio-traces", vault=False, signer=False, policies=False)
+        self.tmp.cleanup()
+
+    def pay(self):
+        shio.configure(str(self.records), signer=self.signer, policies=str(self.dir / "policies"))
+        mod = shio.load(self.dir / "payout.shio")
+        with at("2026-10-16"):
+            out = mod.payout(f"Pay Asha Rao, a/c {ACCOUNT}, branch 12, 1200", mod.clerk)
+        return out, Path(mod.payout.last_trace)
+
+    def test_a_copied_vault_value_is_hashed_in_the_record_and_whole_in_the_vault(self):
+        out, path = self.pay()
+        self.assertEqual(out["to_account"], ACCOUNT)                 # the run itself has the value
+        text = path.read_text()
+        self.assertNotIn(ACCOUNT, text)
+        rec = json.loads(text)
+        for o in (rec["outcome"], rec["rules"][0]["outcome"]):
+            self.assertEqual(o["to_account"], {"$pii": ledger.sha256(ACCOUNT), "class": "BankAccount",
+                                               "handling": "vault"})
+            self.assertEqual(o["memo"]["class"], "BankAccount")     # contained in a longer string: the whole string
+            self.assertEqual((o["branch"], o["batch"], o["status"]), ("12", "12", "PAY"))   # too short to tell
+        vault = ledger.load_vault(path)
+        self.assertEqual(vault["/outcome/to_account"], ACCOUNT)
+        full = ledger.merge(rec, vault)
+        self.assertEqual(full["outcome"]["memo"], f"credit a/c {ACCOUNT}")
+        self.assertEqual(full["rules"][0]["outcome"]["to_account"], ACCOUNT)
+        self.assertTrue(ledger.verify(self.records, secret=b"k")[0])
+        ok, report, _ = audit(self.records, self.store, dt.date(2026, 10, 17))
+        self.assertTrue(ok, report)
+        ok, lines = replay(path)
+        self.assertTrue(ok, lines)
+
+    def test_audit_flags_and_migrate_reseals_a_record_written_the_old_way(self):
+        with mock.patch.object(ledger, "_vault_copies", lambda node, *a: node):
+            _, path = self.pay()
+        self.assertIn(ACCOUNT, json.dumps(json.loads(path.read_text())["outcome"]))
+        ok, report, _ = audit(self.records, self.store, dt.date(2026, 10, 17))
+        self.assertFalse(ok)
+        text = "\n".join(report)
+        self.assertIn("/outcome/to_account holds k.account_number (BankAccount) in clear outside the vault", text)
+        self.assertIn("/rules/0/outcome/memo holds k.account_number", text)
+        self.assertIn("required vault", text)
+        self.assertNotIn("/outcome/batch", text)
+        done = ledger.migrate(self.records, self.store.handling(dt.date(2026, 10, 17)), "copies", self.signer)
+        self.assertIn(("/outcome/to_account", "clear", "vault"), [c[1:] for c in done[0][1]])
+        self.assertNotIn(ACCOUNT, path.read_text())
+        self.assertEqual(ledger.merge(json.loads(path.read_text()), ledger.load_vault(path))["outcome"]["to_account"],
+                         ACCOUNT)
+        self.assertTrue(ledger.verify(self.records, secret=b"k")[0])
+        self.assertTrue(audit(self.records, self.store, dt.date(2026, 10, 17))[0])
+
+    def test_audit_finds_a_copy_by_its_hash_after_the_vault_is_erased(self):
+        with mock.patch.object(ledger, "_vault_copies", lambda node, *a: node):
+            _, path = self.pay()
+        ledger.erase(path, "test", self.signer)
+        ok, report, _ = audit(self.records, self.store, dt.date(2026, 10, 17))
+        self.assertFalse(ok)
+        self.assertIn("/outcome/to_account holds k.account_number", "\n".join(report))
+
+    def test_short_values_and_unpathable_keys(self):
+        vault, kept = {}, {ACCOUNT: "BankAccount", "12": "BranchCode", "Rao": "FullName"}
+        out = ledger._vault_copies({"n": "12", "who": "Mr Rao", "ok": True, "x": [ACCOUNT], "m": {"a/b": ACCOUNT}},
+                                   kept, vault, "/outcome")
+        self.assertEqual((out["n"], out["who"], out["ok"]), ("12", "Mr Rao", True))
+        self.assertEqual(out["x"][0]["class"], "BankAccount")
+        self.assertEqual(vault["/outcome/x/0"], ACCOUNT)
+        self.assertEqual(vault["/outcome/m"], {"a/b": ACCOUNT})     # a key with "/" has no path: vaulted whole
+        self.assertEqual(ledger.merge({"outcome": out}, vault)["outcome"]["x"], [ACCOUNT])
+
+
 if __name__ == "__main__":
     unittest.main()

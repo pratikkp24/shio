@@ -101,7 +101,8 @@ results and outcome. The personal data and the model's answers are gone, so that
 replayed.
 
 **Outcomes are recorded in clear**, because the decision itself must stay auditable. Don't put personal data into
-an outcome unless the decision needs it.
+an outcome unless the decision needs it. If a rule does copy a classified value into its outcome (a payout to a
+vaulted account number), the policy still applies there; see Data-handling policies below.
 
 ## Human sign-off
 
@@ -231,7 +232,7 @@ policy "RBI data handling" version 4:
 | Handling | In the record | In the vault |
 |---|---|---|
 | `clear` | as it is | — |
-| `vault` | its sha256 | kept whole, until erased or its retention ends |
+| `vault` | its sha256, also where a rule copied it into an outcome, a check key or an error | kept whole, until erased or its retention ends |
 | `hashed` | its sha256 | nowhere; it is also scrubbed from prompts, raw answers, explanations and the outcome |
 | `drop` | a marker (`{"$dropped": true, "class": ...}`), no hash | nowhere; scrubbed as a whole word, at any length, from everything written |
 
@@ -242,6 +243,14 @@ field can't be replayed (`shio replay` says so). A dropped class takes no retent
 record that holds a dropped class in clear or as a hash, and `shio migrate` removes it, including a short value that
 an earlier `hashed` rule left in free text (found by its hash). See `examples/regulated/card.shio` with
 `examples/regulated/pci`.
+
+A `vault` value copied out of its reading is treated like the reading: `return {"to_account": k.account_number}`
+records `to_account` as a hash and keeps the value in the vault at `/outcome/to_account` (and
+`/rules/0/outcome/to_account`), where merge and replay find it. A string that contains the value (`"credit a/c " +
+k.account_number`) goes to the vault whole. Values shorter than four characters are left alone, and only values of
+six or more are looked for inside longer strings, so a branch code `"12"` does not mark every `12` in an outcome.
+`shio audit` flags any record that holds a `vault`, `hashed` or `drop` class in clear outside its reading (found by
+value, or by its hash once the vault is erased), and `shio migrate` re-seals it.
 
 Where several policies cover a class, the most protective rule applies. A class that no policy in force covers is
 kept in the vault.

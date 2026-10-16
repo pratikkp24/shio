@@ -448,6 +448,8 @@ def audit(folder, store, today=None, jurisdiction=None):
                 for k, (was, now) in changed.items():
                     findings.append(f"{name}: used {t['name']}.{k} = {was!r}, but v{t['version']} says {now!r}")
         vault = load_vault(path, rec)
+        findings += [f"{name}: {where} holds {what} ({cls}) in clear outside the vault; {_by(expected, cls)} "
+                     f"required {expected.of(cls)}" for where, what, cls in _copies(rec, vault, expected)]
         for vpath, r in _readings_at(rec):
             states = _field_states(r.get("value"))
             for fpath, cls in (r.get("classes") or {}).items():
@@ -488,6 +490,80 @@ def audit(folder, store, today=None, jurisdiction=None):
               f"{len(findings)} finding{'s' if len(findings) != 1 else ''}"]
     report += [f"  FINDING: {f}" for f in findings]
     return not findings, report, {"findings": findings, "retention_due": due, "by_jurisdiction": dict(by_j)}
+
+
+_NOT_COPIES = ("integrity", "data_policy", "classes", "handled", "pii", "program", "vault", "migrations")
+
+
+def _copies(rec, vault, expected):
+    """[(JSON path, reading.field, class)] for every classified value the policy keeps out of the record (vault,
+    hashed, drop) that the record holds in clear somewhere other than the reading itself: a rule that copied it
+    into its outcome, a check key, an error. Values are known from the reading (if in clear), its vault copy, or
+    the hash the record keeps of it."""
+    from .ledger import SCRUB_MIN, _copy_of, _leaves, sha256
+    values, hashes = {}, {}
+    for vpath, r in _readings_at(rec):
+        classes = {f: c for f, c in (r.get("classes") or {}).items() if expected.of(c) != "clear"}
+        if not classes:
+            continue
+        held = [r.get("value")] + ([vault[f"{vpath}/value"]] if vault and f"{vpath}/value" in vault else [])
+        for v in held:
+            for f, cls, x in _leaves(v, classes):
+                values.setdefault(str(x), (f"{r.get('name')}.{f}", cls))
+        for f, h in _hashes(r.get("value"), classes):
+            hashes.setdefault(h, (f"{r.get('name')}.{f}", classes[f]))
+    if not values and not hashes:
+        return []
+    found, texts = [], {k: k for k in values}
+
+    def walk(node, where):
+        if isinstance(node, dict):
+            if not _protected_node(node):
+                for k, v in node.items():
+                    walk(v, f"{where}/{k}")
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, f"{where}/{i}")
+        elif isinstance(node, (str, int, float)) and not isinstance(node, bool):
+            text = _copy_of(node, texts)
+            if text is not None:
+                found.append((where, *values[text]))
+            elif len(str(node)) >= SCRUB_MIN and sha256(node) in hashes:
+                found.append((where, *hashes[sha256(node)]))
+
+    def run(r, base):                   # the run's and its readings' own bookkeeping is not a copy
+        for k, v in r.items():
+            if k == "children":
+                for i, c in enumerate(v):
+                    run(c, f"{base}/children/{i}")
+            elif k == "readings":
+                for i, rd in enumerate(v):
+                    for k2, v2 in rd.items():
+                        if k2 not in _NOT_COPIES and k2 != "value":
+                            walk(v2, f"{base}/readings/{i}/{k2}")
+            elif k not in _NOT_COPIES:
+                walk(v, f"{base}/{k}")
+    run(rec, "")
+    return found
+
+
+def _protected_node(node):
+    return "$pii" in node or "$dropped" in node or "$vault" in node
+
+
+def _hashes(value, classes, prefix=""):
+    """(path, sha256) of every classified field a reading's value keeps as a hash."""
+    if isinstance(value, list):
+        for v in value:
+            yield from _hashes(v, classes, prefix)
+    elif isinstance(value, dict) and "$pii" not in value:
+        for k, v in value.items():
+            path = f"{prefix}{k}"
+            if isinstance(v, dict) and "$pii" in v:
+                if path in classes:
+                    yield path, v["$pii"]
+            elif isinstance(v, (dict, list)):
+                yield from _hashes(v, classes, f"{path}[]." if isinstance(v, list) else f"{path}.")
 
 
 def _readings_at(run, base=""):

@@ -189,6 +189,73 @@ def _apply(value, classes, decide, scrub, for_vault=False, prefix=""):
     return out
 
 
+COPY_MIN = 6       # a vault value found inside a longer string: shorter ones ("1", "Yes") are too common to count
+
+
+def _leaves(value, classes, prefix=""):
+    """(path, class, value) for every classified scalar a reading's value holds in clear."""
+    if isinstance(value, list):
+        for v in value:
+            yield from _leaves(v, classes, prefix)
+        return
+    if not isinstance(value, dict) or _protected(value):
+        return
+    for k, v in value.items():
+        path = f"{prefix}{k}"
+        if classes.get(path) is not None:
+            if isinstance(v, (str, int, float)) and not isinstance(v, bool):
+                yield path, classes[path], v
+        elif isinstance(v, list):
+            for x in v:
+                yield from _leaves(x, classes, f"{path}[].")
+        elif isinstance(v, dict):
+            yield from _leaves(v, classes, f"{path}.")
+
+
+def _copy_of(leaf, values):
+    """The class of the classified value this leaf equals or (for a string) contains, else None. values:
+    {value as text: class}. Equal: from SCRUB_MIN characters; contained: from COPY_MIN."""
+    if isinstance(leaf, bool) or not isinstance(leaf, (str, int, float)):
+        return None
+    text = str(leaf)
+    if len(text) >= SCRUB_MIN and text in values:
+        return values[text]
+    if isinstance(leaf, str):
+        for v in sorted(values, key=len, reverse=True):
+            if len(v) >= COPY_MIN and v in leaf:
+                return values[v]
+    return None
+
+
+def _holds_copy(node, values):
+    if isinstance(node, dict):
+        return not _protected(node) and any(_holds_copy(v, values) for v in node.values())
+    if isinstance(node, list):
+        return any(_holds_copy(v, values) for v in node)
+    return _copy_of(node, values) is not None
+
+
+def _vault_copies(node, values, vault, path):
+    """A rule's output, check key or error with every copy of a vault-class value given the vault treatment: the
+    record keeps a hash, the vault the whole leaf at its JSON path (merge puts it back)."""
+    if not values or node is None:
+        return node
+    if isinstance(node, dict):
+        if _protected(node) or "$vault" in node:
+            return node
+        if any("/" in str(k) for k in node) and _holds_copy(node, values):   # no path to the leaf: vault it all
+            vault[path] = node
+            return {"$pii": sha256(node), "class": "copy", "handling": "vault"}
+        return {k: _vault_copies(v, values, vault, f"{path}/{k}") for k, v in node.items()}
+    if isinstance(node, list):
+        return [_vault_copies(v, values, vault, f"{path}/{i}") for i, v in enumerate(node)]
+    cls = _copy_of(node, values)
+    if cls is None:
+        return node
+    vault[path] = node
+    return {"$pii": sha256(node), "class": cls, "handling": "vault"}
+
+
 def _strings(node):
     if isinstance(node, str):
         yield node
@@ -252,7 +319,7 @@ def split(record, handling=None):
     (shio.policy.Handling) if one is given."""
     vault = {}
     decide = _decide(handling)
-    scrub = {}
+    scrub, kept = {}, {}
     for r in _readings(record):           # first: which values a policy says must not survive anywhere
         classes = dict(r.get("classes") or {})
         for f in r.get("pii") or ():
@@ -260,6 +327,9 @@ def split(record, handling=None):
         r["classes"] = classes
         if classes and r.get("value") is not None:
             _apply(r["value"], classes, decide, scrub)
+            for _, cls, v in _leaves(r["value"], classes):    # and which may live only in the vault: a rule that
+                if decide(cls) == "vault":                     # copies one into its outcome must not leak it
+                    kept.setdefault(str(v), cls)
     if handling is not None:
         record["data_policy"] = handling.as_dict()
 
@@ -289,6 +359,21 @@ def split(record, handling=None):
             c["args"] = [_put(vault, f"{p}/args/{j}", a) if "const" in a else a for j, a in enumerate(c.get("args", []))]
             c["kwargs"] = {k: (_put(vault, f"{p}/kwargs/{k}", a) if "const" in a else a)
                            for k, a in c.get("kwargs", {}).items()}
+            if "key" in c:
+                c["key"] = _vault_copies(c["key"], kept, vault, f"{p}/key")
+        for i, r in enumerate(run.get("rules", [])):
+            for f in ("outcome", "key"):
+                if f in r:
+                    r[f] = _vault_copies(r[f], kept, vault, f"{base}/rules/{i}/{f}")
+        for i, r in enumerate(run.get("reasons", [])):
+            if "key" in r:
+                r["key"] = _vault_copies(r["key"], kept, vault, f"{base}/reasons/{i}/key")
+        for f in ("outcome", "error"):
+            if f in run:
+                run[f] = _vault_copies(run[f], kept, vault, f"{base}/{f}")
+        if run.get("signoff") and "decided" in run["signoff"]:
+            run["signoff"]["decided"] = _vault_copies(run["signoff"]["decided"], kept, vault,
+                                                      f"{base}/signoff/decided")
         for i, ch in enumerate(run.get("children", [])):
             walk(ch, f"{base}/children/{i}")
     walk(record, "")
@@ -415,6 +500,7 @@ def migrate(folder, handling, reason, signer=None, dry_run=False):
     becomes a signed migration entry chaining the record's old hash to its new one; verify follows the chain.
     A handling resolved for a jurisdiction (Store.handling(on, "IN")) re-seals only that jurisdiction's records."""
     import copy
+    from .policy import _copies
     folder = Path(folder)
     done = []
     with _locked(folder):
@@ -428,14 +514,19 @@ def migrate(folder, handling, reason, signer=None, dry_run=False):
             scope = getattr(handling, "jurisdiction", None)
             if scope is not None and rec.get("jurisdiction") != scope:    # another regulator's records
                 continue
+            vault = load_vault(path, rec)
             changes = _tighter(rec, handling)
+            tightened = {cls for r in _readings(rec) for f, cls in (r.get("classes") or {}).items()
+                         if (r.get("name"), f) in {(c[0], c[1]) for c in changes}}
+            changes += [(what.split(".")[0], where, "clear", handling.of(cls))   # a value a rule copied out of the
+                        for where, what, cls in _copies(rec, vault, handling)    # vault (re-sealing the field's
+                        if cls not in tightened]                                 # tighter rule covers its copies)
             if not changes:
                 continue
             done.append((e["file"], changes))
             if dry_run:
                 continue
             old = rec["integrity"]["sha256"]
-            vault = load_vault(path, rec)
             full = merge(copy.deepcopy(rec), vault) if vault is not None else copy.deepcopy(rec)
             for r in _readings(full):           # re-apply from the value as it was handled at write time
                 r["handled"] = r.get("handled") or {}
