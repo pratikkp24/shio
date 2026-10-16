@@ -123,6 +123,7 @@ class Run:
         self.signoff = None      # set on the top-level run when an outcome needs a person
         if parent is None:
             self._seq = itertools.count()
+            self.tables = {}       # decision tables read in this decision: name -> {stamp, used values}
 
     def next_seq(self):
         return next(self.root._seq)
@@ -149,6 +150,8 @@ class Run:
             d["signoff"] = self.signoff
         if self.parent is None or (self.program or {}).get("sha256") != (self.parent.program or {}).get("sha256"):
             d["program"] = self.program
+        if self.parent is None and self.tables:
+            d["tables"] = [{**t["stamp"], "used": dict(sorted(t["used"].items()))} for t in self.tables.values()]
         return d
 
 
@@ -410,7 +413,8 @@ def rule(fn=None, *, name=None):
     return wrapper
 
 
-_config = {"trace_dir": "shio-traces", "vault": False, "signer": None, "actor": None, "policies": None}
+_config = {"trace_dir": "shio-traces", "vault": False, "signer": None, "actor": None, "policies": None,
+           "table_override": None, "as_of": None}
 last_run = {"run": None}        # the most recent top-level run (shio replay reads it)
 
 
@@ -438,6 +442,54 @@ def _policies():
         from .policy import Store
         _config["policies"] = Store.load(path) if path else False
     return _config["policies"] or None
+
+
+class InForce:
+    """The values of a decision table in force for this decision. Each value read is recorded with the table's
+    version, so the record shows exactly which limit applied. A name the table does not have is an error."""
+
+    def __init__(self, name, stamp, rows, used):
+        self._name, self._stamp, self._rows, self._used = name, stamp, rows, used
+
+    def __getitem__(self, key):
+        if key not in self._rows:
+            from .policy import PolicyError
+            raise PolicyError(f"table {self._name!r} v{self._stamp.get('version')} has no {key!r}")
+        self._used[key] = self._rows[key]
+        return self._rows[key]
+
+    def __getattr__(self, key):
+        if key.startswith("_"):
+            raise AttributeError(key)
+        return self[key]
+
+    def __contains__(self, key):
+        return key in self._rows
+
+    def __repr__(self):
+        return f"<{self._name} v{self._stamp.get('version')}>"
+
+
+def in_force(name):
+    """A decision table's values as in force on the date of this decision (see shio.policy.Table)."""
+    from .policy import PolicyError
+    run = _current("in_force()")
+    root = run.root
+    if name not in root.tables:
+        override = (_config.get("table_override") or {}).get(name)
+        if override is not None:               # shio replay: the values the record says were used
+            stamp, rows = override["stamp"], override["rows"]
+        else:
+            on = _config.get("as_of") or datetime.date.fromtimestamp(root.started)
+            store = _policies()
+            t = store.table(name, on) if store else None
+            if t is None:
+                raise PolicyError(f"no version of table {name!r} is in force on {on}"
+                                  + ("" if store else " (no policies configured: --policies or SHIO_POLICIES)"))
+            stamp, rows = t.stamp(), t.rows
+        root.tables[name] = {"stamp": stamp, "rows": rows, "used": {}}
+    t = root.tables[name]
+    return InForce(name, t["stamp"], t["rows"], t["used"])
 
 
 def _signer():

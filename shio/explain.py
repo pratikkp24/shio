@@ -150,6 +150,21 @@ def build(path):
         b.append(("p", "Codes are recorded in clear in each decision record, with this text, so a decision's "
                        "reasons survive the erasure of its personal data (`shio reasons RECORD`)."))
 
+    from .policy import program_tables
+    tables = program_tables(path)
+    if tables:
+        b.append(("h2", "Decision tables"))
+        b.append(("p", "Limits and thresholds come from dated, sourced table versions in the policy files, not from "
+                       "this program: " + ", ".join(f"`{t}`" for t in tables) + ". Each decision records the "
+                       "version and the values it used; `shio policy check` lists the version in force on a date, "
+                       "and `shio replay RECORD --policies DIR --at DATE` shows what a new version would decide."))
+    classes = sorted({f["class"] for t in m["types"] for f in t["fields"] if f.get("class") and f["class"] != "PII"})
+    if classes:
+        b.append(("h2", "Data classes"))
+        b.append(("p", "How each class is stored is set by the data-handling policy in force on the date of each "
+                       "decision (`clear`, `vault` or `hashed`), not by this program: " +
+                       ", ".join(f"`{c}`" for c in classes) + ". See `shio policy check` and `shio audit`."))
+
     if m["types"]:
         b.append(("h2", "Types the model fills"))
         for t in m["types"]:

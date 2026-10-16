@@ -262,6 +262,42 @@ shio retention records/ --policies policies/ [--apply]            # vaults past 
   decided under, and the migration lists exactly what was tightened. Sign-offs given on the original remain valid.
 - **`retention --apply`** erases expired vaults, each erasure citing the policy that set the period.
 
+### Limits and thresholds: decision tables
+
+Regulators change numbers too: loan-to-value caps, approval limits, KYC refresh periods. Put them in the same
+`.policy` files as dated, sourced tables instead of constants in the program:
+
+```
+table "Gold loan limits" version 2:
+    effective 2027-04-01
+    source "RBI circular 2026-27/150, para 2"
+    approved_by "Head of Credit Risk"
+    max_ltv: 0.75
+    max_amount: 500000
+```
+
+```shio
+agent sanction(slip: str, asked: float, llm):
+    limits = in_force("Gold loan limits")         # the version in force on the date of this decision
+    ...
+    rule decision:
+        cap = min(value * limits.max_ltv, limits.max_amount)
+```
+
+- Each record lists the table version (name, version, sha256, source, approver) and **the values the decision
+  actually read**.
+- A name the table doesn't have is an error. In a regulated program the table's name must be a literal, so
+  `policy check` and `shio explain` can see every table a program depends on.
+- **Replay** uses the recorded values by default, so the decision reproduces exactly.
+- `shio replay RECORD --policies DIR --at 2027-04-01` re-runs a past decision under the limits in force on that
+  date. Run it over last quarter's records before a new cap takes effect, and you see which customers' outcomes
+  change ("SANCTION 2,10,000" becomes "COUNTER-OFFER 1,92,360").
+- **`policy impact`** lists every table value that changes on a date, and the programs that read it.
+- **`audit`** flags a decision made with a table version other than the one in force on its date, and a table
+  version edited after use.
+
+See `examples/regulated/gold.shio`.
+
 The language doesn't read a circular. A person turns it into a new policy version (a model can draft it, and a
 person approves). Shio provides one place for the rule, proof that it's applied everywhere, and a signed record
 of which rule governed each decision.
@@ -312,8 +348,6 @@ counsel and regulator.
 ## Next
 
 Planned next:
-- versioned decision tables (thresholds, limits, approval authorities) on the same dated-version model as data
-  handling;
 - jurisdiction-scoped policies (one program serving several regulators);
 - monitoring of check pass rates;
 - an evidence pack per audit period.

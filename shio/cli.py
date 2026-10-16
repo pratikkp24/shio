@@ -158,7 +158,8 @@ def _verify(a):
 
 def _replay(a):
     from .replay import replay
-    ok, lines = replay(a.record, a.program, a.allow_changed)
+    store = _store(a) if a.policies else None
+    ok, lines = replay(a.record, a.program, a.allow_changed, store, _date(a.at) if a.at else None)
     print("\n".join(lines))
     sys.exit(0 if ok else 1)
 
@@ -342,6 +343,8 @@ def main(argv=None):
     rp.add_argument("record")
     rp.add_argument("--program", help="the .shio file, if not where the record says")
     rp.add_argument("--allow-changed", action="store_true", help="replay with a changed program (impact analysis)")
+    rp.add_argument("--policies", help="use the decision tables in this folder instead of the recorded values")
+    rp.add_argument("--at", help="with --policies: the tables in force on this date (default: the decision's date)")
     rp.set_defaults(fn=_replay)
     e = sub.add_parser("erase", help="delete a record's vault (personal data) and enter the erasure in the ledger")
     e.add_argument("record")

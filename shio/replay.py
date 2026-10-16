@@ -79,8 +79,10 @@ def _summary(run):
     return checks, rules, json.dumps(run.get("outcome"), sort_keys=True, default=str)
 
 
-def replay(record_path, program=None, allow_changed=False):
-    """-> (reproduced: bool, report lines)."""
+def replay(record_path, program=None, allow_changed=False, policies=None, at=None):
+    """-> (reproduced: bool, report lines). Decision tables come from the record (the values it used), unless
+    `policies` (a policy.Store) is given: then the tables in force on `at` (default: the decision's date) are used,
+    which shows what a proposed or new limit would have decided."""
     from . import load
     record_path = Path(record_path)
     record = json.loads(record_path.read_text())
@@ -109,17 +111,36 @@ def replay(record_path, program=None, allow_changed=False):
         kwargs = _decode(record["inputs"].get("kwargs", {}), model)
     except Divergence as e:
         return False, [str(e)]
+    import datetime as dt
+    from .policy import PolicyError
+    saved = {k: core._config.get(k) for k in ("table_override", "as_of", "policies")}
+    if policies is None:
+        core._config["table_override"] = {t["name"]: {"stamp": {k: v for k, v in t.items() if k != "used"},
+                                                      "rows": t.get("used") or {}}
+                                          for t in record.get("tables") or []}
+    else:
+        core._config["table_override"] = None
+        core._config["policies"] = policies
+        core._config["as_of"] = at or dt.date.fromtimestamp(record.get("started") or 0)
+    as_of = core._config["as_of"]
     fn.replaying = True
     try:
         fn(*args, **kwargs)
     except Divergence as e:
         return False, [f"diverged: {e}"]
+    except PolicyError as e:
+        return False, [f"diverged: {e} (the program now reads a table value the decision did not)"]
     finally:
         fn.replaying = False
+        core._config.update(saved)
     now = json.loads(json.dumps(core.last_run["run"].to_dict(), default=str))
     (c0, r0, o0), (c1, r1, o1) = _summary(record), _summary(now)
-    lines = [f"replayed {record_path.name} with {path.name}" + (" (CHANGED since the decision)" if changed else ""),
-             f"  {model.used} recorded model answers used, {len(c1)} checks, {len(r1)} rules"]
+    used = {t["name"]: t for t in now.get("tables") or []}
+    table_note = [f"  table {t['name']!r}: recorded v{t['version']}, now v{used[t['name']]['version']}"
+                  for t in record.get("tables") or [] if t["name"] in used and used[t["name"]]["version"] != t["version"]]
+    lines = [f"replayed {record_path.name} with {path.name}" + (" (CHANGED since the decision)" if changed else "")
+             + (f" under the policies in force on {as_of}" if policies is not None else ""),
+             f"  {model.used} recorded model answers used, {len(c1)} checks, {len(r1)} rules"] + table_note
     diffs = []
     if c0 != c1:
         for a, b in zip(c0, c1):

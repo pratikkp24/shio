@@ -1,0 +1,15 @@
+# Hypothetical limits, for illustration only. A new limit is a new version with its effective date.
+
+table "Gold loan limits" version 1:
+    effective 2026-01-01
+    source "Hypothetical RBI circular 2025-26/9"
+    approved_by "Head of Credit Risk"
+    max_ltv: 0.85
+    max_amount: 500000
+
+table "Gold loan limits" version 2:
+    effective 2027-04-01
+    source "Hypothetical RBI circular 2026-27/150, para 2"
+    approved_by "Head of Credit Risk"
+    max_ltv: 0.75
+    max_amount: 500000

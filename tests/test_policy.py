@@ -14,6 +14,7 @@ import shio
 from shio import ledger
 from shio.compiler import ShioError, compile_source
 from shio.policy import PolicyError, Store, audit, check_programs, impact, parse, retention
+from shio.replay import replay
 
 POLICIES = """
 policy "RBI data handling" version 3:
@@ -217,6 +218,115 @@ class OverTime(unittest.TestCase):
         self.assertIn("email (Email) hashed -> clear", lines)
         self.assertIn("phone (PhoneNumber) clear -> hashed", lines)
         self.assertIn("shio migrate", lines)
+
+
+TABLES = """
+table "Gold loan limits" version 1:
+    effective 2026-01-01
+    source "RBI circular 2025-26/9"
+    approved_by "Head of Credit Risk"
+    max_ltv: 0.85
+    max_amount: 500000
+
+table "Gold loan limits" version 2:
+    effective 2027-04-01
+    source "RBI circular 2026-27/150"
+    approved_by "Head of Credit Risk"
+    max_ltv: 0.75
+    max_amount: 500000
+"""
+
+GOLD = """
+regulated
+
+type Appraisal:
+    gold_grams: float
+    purity: float
+    rate_per_gram: float
+
+model valuer = replay(lambda req: {"gold_grams": 40.0, "purity": 0.916, "rate_per_gram": 7000.0})
+
+agent sanction(slip: str, asked: float, llm):
+    limits = in_force("Gold loan limits")
+    read a: Appraisal by llm:
+        Read the appraisal slip.
+
+        {slip}
+    check weight_on_slip: str(int(a.gold_grams)) in slip
+    rule decision:
+        if a is None:
+            return {"status": "REVIEW"}
+        cap = min(a.gold_grams * a.purity * a.rate_per_gram * limits.max_ltv, limits["max_amount"])
+        if asked <= cap:
+            return {"status": "SANCTION", "amount": asked}
+        return {"status": "COUNTER-OFFER", "amount": round(cap)}
+    return decision
+"""
+
+
+class Tables(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        (self.dir / "policies").mkdir()
+        (self.dir / "policies" / "gold.policy").write_text(textwrap.dedent(TABLES))
+        (self.dir / "gold.shio").write_text(textwrap.dedent(GOLD))
+        shio.configure(str(self.dir / "records"), signer=ledger.load_signer("hmac:k"),
+                       policies=str(self.dir / "policies"))
+        self.mod = shio.load(self.dir / "gold.shio")
+        self.store = Store.load(self.dir / "policies")
+
+    def tearDown(self):
+        shio.configure("shio-traces", vault=False, signer=False, policies=False)
+        self.tmp.cleanup()
+
+    def decide(self, day, asked=210000):
+        with at(day):
+            out = self.mod.sanction("Net 40 g, 22K, rate 7,000/g", asked, self.mod.valuer)
+        return out, Path(self.mod.sanction.last_trace)
+
+    def test_the_version_of_the_decision_date_is_used_and_recorded(self):
+        out, path = self.decide("2026-11-01")
+        self.assertEqual(out["status"], "SANCTION")
+        t = json.loads(path.read_text())["tables"][0]
+        self.assertEqual((t["version"], t["used"]), (1, {"max_amount": 500000, "max_ltv": 0.85}))
+        out, _ = self.decide("2027-05-01")
+        self.assertEqual(out, {"status": "COUNTER-OFFER", "amount": 192360})
+
+    def test_replay_with_recorded_and_with_proposed_limits(self):
+        _, path = self.decide("2026-11-01")
+        ok, lines = replay(path)
+        self.assertTrue(ok, lines)
+        ok, lines = replay(path, policies=self.store, at=dt.date(2027, 4, 1))
+        self.assertFalse(ok)
+        text = "\n".join(lines)
+        self.assertIn("recorded v1, now v2", text)
+        self.assertIn("COUNTER-OFFER", text)
+
+    def test_audit_catches_an_edited_table(self):
+        self.decide("2026-11-01")
+        self.assertTrue(audit(self.dir / "records", self.store, dt.date(2026, 12, 1))[0])
+        edited = Store(parse(textwrap.dedent(TABLES).replace("max_ltv: 0.85", "max_ltv: 0.80")))
+        ok, report, _ = audit(self.dir / "records", edited, dt.date(2026, 12, 1))
+        self.assertFalse(ok)
+        self.assertIn("has been edited since this decision used it", "\n".join(report))
+
+    def test_check_impact_and_unknown_names(self):
+        ok, lines = check_programs([self.dir / "gold.shio"], self.store, dt.date(2027, 5, 1))
+        self.assertTrue(ok, lines)
+        self.assertFalse(check_programs([self.dir / "gold.shio"], self.store, dt.date(2025, 5, 1))[0])
+        self.assertIn("max_ltv 0.85 -> 0.75", "\n".join(impact([self.dir / "gold.shio"], self.store,
+                                                                dt.date(2027, 4, 1))))
+        (self.dir / "gold.shio").write_text(textwrap.dedent(GOLD).replace("limits.max_ltv", "limits.max_lvt"))
+        mod = shio.load(self.dir / "gold.shio")
+        with at("2026-11-01"), self.assertRaises(PolicyError):
+            mod.sanction("Net 40 g", 1000, mod.valuer)
+
+    def test_regulated_table_names_are_literal(self):
+        bad = textwrap.dedent(GOLD).replace('in_force("Gold loan limits")', 'in_force("Gold " + "loan limits")')
+        with self.assertRaises(ShioError) as e:
+            compile_source(bad, "t.shio")
+        self.assertIn("literal string", str(e.exception))
 
 
 class Compile(unittest.TestCase):

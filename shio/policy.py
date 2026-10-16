@@ -32,7 +32,8 @@ HANDLING = ("clear", "vault", "hashed")
 STRICTNESS = {h: i for i, h in enumerate(HANDLING)}
 DEFAULT = "vault"           # a class no policy in force mentions: protected, but kept for audit and erasure
 
-HEADER = re.compile(r'^policy\s+"(?P<name>[^"]+)"\s+version\s+(?P<version>\d+)\s*:\s*$')
+HEADER = re.compile(r'^(?P<kind>policy|table)\s+"(?P<name>[^"]+)"\s+version\s+(?P<version>\d+)\s*:\s*$')
+ROW = re.compile(r"^(?P<key>[a-z_][a-z0-9_]*)\s*:\s*(?P<value>.+)$")
 SETTING = re.compile(r'^(?P<key>effective|source|approved_by)\s+(?P<value>.+)$')
 RULE = re.compile(r"^(?P<cls>\*|[A-Z][A-Za-z0-9_]*)\s*:\s*(?P<handling>clear|vault|hashed)"
                   r"(?:\s*,\s*retain\s+(?P<years>\d+)\s+years?)?\s*$")
@@ -65,6 +66,42 @@ class Policy:
         return f"<{self.name} v{self.version} from {self.effective}>"
 
 
+class Table(Policy):
+    """A decision table: the numbers a regulation sets (limits, caps, periods), as a dated version.
+
+        table "Gold loan limits" version 2:
+            effective 2027-04-01
+            source "RBI circular 2026-27/150, para 2"
+            approved_by "Head of Credit Risk"
+            max_ltv: 0.75
+            max_tenure_months: 12
+            needs_hallmark: true
+    """
+
+    def __init__(self, name, version, effective, source, approved_by, rows, file, line):
+        super().__init__(name, version, effective, source, approved_by, {}, file, line)
+        self.rows = rows
+
+    def as_dict(self):
+        return {"kind": "table", "name": self.name, "version": self.version, "effective": self.effective.isoformat(),
+                "source": self.source, "approved_by": self.approved_by, "rows": dict(sorted(self.rows.items()))}
+
+
+def _literal(text, file, n):
+    t = text.strip()
+    low = t.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if low in ("none", "null"):
+        return None
+    if t[:1] in "\"'":
+        return _unquote(t) if t[0] == '"' else t.strip("'")
+    try:
+        return int(t.replace("_", "")) if re.fullmatch(r"-?[\d_]+", t) else float(t.replace("_", ""))
+    except ValueError:
+        raise PolicyError(f"{file}:{n}: a table value is a number, true/false or a \"quoted string\" (got {t!r})") from None
+
+
 def _unquote(v):
     v = v.strip()
     return v[1:-1] if len(v) >= 2 and v[0] == v[-1] == '"' else v
@@ -76,12 +113,17 @@ def parse(text, file="<policy>"):
     def done():
         if cur is None:
             return
+        kind = cur.pop("kind")
         if cur["effective"] is None:
-            raise PolicyError(f"{file}:{cur['line']}: policy {cur['name']!r} v{cur['version']} has no effective date")
+            raise PolicyError(f"{file}:{cur['line']}: {kind} {cur['name']!r} v{cur['version']} has no effective date")
         if not cur["source"]:
-            raise PolicyError(f"{file}:{cur['line']}: policy {cur['name']!r} v{cur['version']} has no source "
+            raise PolicyError(f"{file}:{cur['line']}: {kind} {cur['name']!r} v{cur['version']} has no source "
                               "(the regulation or circular the rule comes from)")
-        policies.append(Policy(**cur, file=file))
+        if kind == "table":
+            rows = cur.pop("rules")
+            policies.append(Table(**cur, rows=rows, file=file))
+        else:
+            policies.append(Policy(**cur, file=file))
 
     for n, raw in enumerate(text.splitlines(), 1):
         s = raw.split("#", 1)[0].rstrip() if '"' not in raw.split("#", 1)[0] else raw.rstrip()
@@ -91,11 +133,11 @@ def parse(text, file="<policy>"):
         m = HEADER.match(s.strip())
         if m and not raw.startswith((" ", "\t")):
             done()
-            cur = {"name": m["name"], "version": int(m["version"]), "effective": None, "source": "",
-                   "approved_by": "", "rules": {}, "line": n}
+            cur = {"kind": m["kind"], "name": m["name"], "version": int(m["version"]), "effective": None,
+                   "source": "", "approved_by": "", "rules": {}, "line": n}
             continue
         if cur is None or not raw.startswith((" ", "\t")):
-            raise PolicyError(f"{file}:{n}: expected `policy \"NAME\" version N:`")
+            raise PolicyError(f"{file}:{n}: expected `policy \"NAME\" version N:` or `table \"NAME\" version N:`")
         body = s.strip()
         m = SETTING.match(body)
         if m:
@@ -107,6 +149,14 @@ def parse(text, file="<policy>"):
             else:
                 cur[m["key"]] = _unquote(m["value"])
             continue
+        if cur["kind"] == "table":
+            m = ROW.match(body)
+            if not m:
+                raise PolicyError(f"{file}:{n}: expected `name: value` (lower-case name)")
+            if m["key"] in cur["rules"]:
+                raise PolicyError(f"{file}:{n}: {m['key']} is listed twice")
+            cur["rules"][m["key"]] = _literal(m["value"], file, n)
+            continue
         m = RULE.match(body)
         if not m:
             raise PolicyError(f"{file}:{n}: expected `Class: clear|vault|hashed[, retain N years]`")
@@ -116,9 +166,9 @@ def parse(text, file="<policy>"):
     done()
     seen = set()
     for p in policies:
-        if (p.name, p.version) in seen:
+        if (type(p), p.name, p.version) in seen:
             raise PolicyError(f"{file}:{p.line}: {p.name!r} version {p.version} is defined twice")
-        seen.add((p.name, p.version))
+        seen.add((type(p), p.name, p.version))
     return policies
 
 
@@ -126,16 +176,27 @@ class Store:
     """Every policy version in a folder of *.policy files (or one file)."""
 
     def __init__(self, policies, where=""):
-        self.policies, self.where = policies, where
+        self.where = where
+        self.policies = [p for p in policies if not isinstance(p, Table)]
+        self.tables = [p for p in policies if isinstance(p, Table)]
+        self.by_name, self.tables_by_name = self._group(self.policies), self._group(self.tables)
+
+    @staticmethod
+    def _group(items):
         names = {}
-        for p in policies:
+        for p in items:
             names.setdefault(p.name, []).append(p)
         for name, ps in names.items():
             ps.sort(key=lambda p: p.version)
             for a, b in zip(ps, ps[1:]):
                 if b.effective < a.effective:
                     raise PolicyError(f"{name!r} v{b.version} takes effect before v{a.version}")
-        self.by_name = names
+        return names
+
+    def table(self, name, on):
+        """The version of a decision table in force on a date, or None."""
+        live = [t for t in self.tables_by_name.get(name, []) if t.effective <= on]
+        return max(live, key=lambda t: (t.effective, t.version)) if live else None
 
     @classmethod
     def load(cls, path):
@@ -146,7 +207,7 @@ class Store:
         return cls([p for f in files for p in parse(f.read_text(), str(f))], str(path))
 
     def in_force(self, on):
-        """The version of each policy in force on a date (none if the policy had not started)."""
+        """The version of each data-handling policy in force on a date (none if the policy had not started)."""
         out = []
         for ps in self.by_name.values():
             live = [p for p in ps if p.effective <= on]
@@ -281,6 +342,21 @@ def audit(folder, store, today=None):
                 elif got[key]["sha256"] != s["sha256"]:
                     findings.append(f"{name}: {key[0]} v{key[1]} has been edited since this record used it "
                                     "(a policy version must not change once in force; add a new version)")
+        for t in rec.get("tables") or []:
+            current = store.table(t["name"], on)
+            if current is None:
+                findings.append(f"{name}: used {t['name']!r} v{t['version']}, but no version of it was in force on {on}")
+            elif current.version != t["version"]:
+                findings.append(f"{name}: decided {on} with {t['name']!r} v{t['version']}, but v{current.version} "
+                                f"was in force from {current.effective}")
+            elif current.sha256 != t["sha256"]:
+                findings.append(f"{name}: table {t['name']!r} v{t['version']} has been edited since this decision "
+                                "used it (add a new version instead)")
+            else:
+                changed = {k: (v, current.rows.get(k)) for k, v in (t.get("used") or {}).items()
+                           if current.rows.get(k) != v}
+                for k, (was, now) in changed.items():
+                    findings.append(f"{name}: used {t['name']}.{k} = {was!r}, but v{t['version']} says {now!r}")
         vault = load_vault(path, rec)
         for vpath, r in _readings_at(rec):
             states = _field_states(r.get("value"))
@@ -349,8 +425,14 @@ def program_classes(path):
     return [(t["name"], f["name"], f.get("class")) for t in c.meta["types"] for f in t["fields"] if f.get("class")]
 
 
+def program_tables(path):
+    """Decision-table names a program reads with in_force("...")."""
+    return sorted(set(re.findall(r'in_force\(\s*"([^"]+)"\s*\)', Path(path).read_text())))
+
+
 def check_programs(programs, store, on):
-    """Every classified field of every program has an explicit rule in the policies in force on a date."""
+    """Every classified field has an explicit rule, and every decision table a program reads has a version, in the
+    policies in force on a date."""
     h = store.handling(on)
     lines, ok = [f"policies in force on {on}: " + (", ".join(f"{s['name']} v{s['version']}" for s in h.stamps) or
                                                      "none")], True
@@ -364,14 +446,32 @@ def check_programs(programs, store, on):
             else:
                 lines.append(f"  {rule[0]:<7}  {Path(prog).name}: {tname}.{field} ({cls}) by {rule[2]}"
                              + (f", retain {rule[1]} years" if rule[1] else ""))
+        for name in program_tables(prog):
+            t = store.table(name, on)
+            if t is None:
+                ok = False
+                lines.append(f"  NO TABLE {Path(prog).name}: reads table {name!r}, which has no version in force")
+            else:
+                lines.append(f"  table    {Path(prog).name}: {name!r} v{t.version} (from {t.effective}): "
+                             + ", ".join(f"{k}={v!r}" for k, v in sorted(t.rows.items())))
     return ok, lines
 
 
 def impact(programs, store, on):
     """What changes for each program when the policies in force on `on` replace those of the day before."""
     before, after = store.handling(on - dt.timedelta(days=1)), store.handling(on)
-    lines = [f"on {on}: " + (", ".join(f"{s['name']} v{s['version']}" for s in after.stamps) or "no policy") +
-             " replaces " + (", ".join(f"{s['name']} v{s['version']}" for s in before.stamps) or "no policy")]
+    lines = [f"what changes on {on}:"]
+    for name, ps in store.by_name.items():
+        new = [p for p in ps if p.effective == on]
+        if new:
+            old = store.in_force(on - dt.timedelta(days=1))
+            was = next((p for p in old if p.name == name), None)
+            lines.append(f"  data policy {name!r} v{new[-1].version} replaces " + (f"v{was.version}" if was else "none"))
+    for name, ts in store.tables_by_name.items():
+        new = [t for t in ts if t.effective == on]
+        if new:
+            was = store.table(name, on - dt.timedelta(days=1))
+            lines.append(f"  table {name!r} v{new[-1].version} replaces " + (f"v{was.version}" if was else "none"))
     changed = 0
     for prog in programs:
         for tname, field, cls in program_classes(prog):
@@ -382,5 +482,16 @@ def impact(programs, store, on):
                 lines.append(f"  {Path(prog).name}: {tname}.{field} ({cls}) {a} -> {b}"
                              + ("  (existing records can be re-sealed: shio migrate)" if tighter else
                                 "  (applies to new records only; existing ones stay as they are)"))
+        for name in program_tables(prog):
+            a, b = store.table(name, on - dt.timedelta(days=1)), store.table(name, on)
+            if (a and a.version) != (b and b.version):
+                diff = {k: ((a.rows if a else {}).get(k), (b.rows if b else {}).get(k))
+                        for k in set((a.rows if a else {})) | set((b.rows if b else {}))}
+                diff = {k: v for k, v in diff.items() if v[0] != v[1]}
+                changed += len(diff)
+                for k, (was, now) in sorted(diff.items()):
+                    lines.append(f"  {Path(prog).name}: table {name!r}.{k} {was!r} -> {now!r}"
+                                 f"  (see what past decisions would become: shio replay RECORD --policies DIR "
+                                 f"--at {on})")
     lines.append(f"{changed} field{'s' if changed != 1 else ''} change")
     return lines

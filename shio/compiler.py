@@ -57,7 +57,7 @@ PRELUDE = """import shio as __shio
 from typing import Optional, Literal, List, ClassVar
 from pydantic import BaseModel as _ShioType, Field as _ShioField
 from shio.models import ollama, openai_compat, replay
-from shio.core import Source
+from shio.core import Source, in_force
 pdf = Source.from_pdf
 __shio_train__ = []
 """
@@ -856,6 +856,9 @@ def _regulated_scan(c, py, lines):
                 why = f"'{n}' (a dunder name) is not allowed"
         elif isinstance(node, ast.Attribute) and node.attr.startswith("_"):
             why = f"'.{node.attr}': private and dunder attributes are not allowed"
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "in_force" and not (
+                len(node.args) == 1 and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+            why = "in_force() takes the table's name as a literal string, so checks and documentation can see it"
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
             bad = [m for m in mods if m.split(".")[0] in REGULATED_MODULES]

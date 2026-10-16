@@ -1,0 +1,35 @@
+# Gold loan sanction under a regulator's limits. The loan-to-value cap is not a constant in this program: it comes
+# from the dated table in force on the day of the decision (policies/gold.policy), and each record says which
+# version and values it used. To see what a new cap would decide for past customers:
+#   shio replay records/RECORD.json --policies policies --at 2027-04-01
+
+regulated
+
+type Appraisal:
+    gold_grams: float        # net weight of the gold, from the appraisal slip
+    purity: float            # karat purity as a fraction, e.g. 0.916 for 22K
+    rate_per_gram: float     # the day's rate printed on the slip
+
+model valuer = replay(lambda req: {"gold_grams": 40.0, "purity": 0.916, "rate_per_gram": 7000.0})
+
+agent sanction(slip: str, asked: float, llm):
+    limits = in_force("Gold loan limits")
+    read a: Appraisal by llm:
+        Read the appraisal slip.
+
+        {slip}
+    check weight_on_slip: str(int(a.gold_grams)) in slip, "{a.gold_grams} g is not on the slip"
+    rule decision:
+        if a is None:
+            return {"status": "REVIEW", "why": ["the model gave no usable answer"]}
+        value = a.gold_grams * a.purity * a.rate_per_gram
+        cap = min(value * limits.max_ltv, limits.max_amount)
+        if checks.failures():
+            return {"status": "REVIEW", "why": [c["detail"] for c in checks.failures()]}
+        if asked <= cap:
+            return {"status": "SANCTION", "amount": asked, "cap": round(cap)}
+        return {"status": "COUNTER-OFFER", "amount": round(cap), "cap": round(cap)}
+    return decision
+
+main:
+    return sanction("Net 40 g, 22K, rate 7,000/g", 210000, valuer)
