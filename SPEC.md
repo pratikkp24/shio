@@ -49,6 +49,14 @@ of the language rather than a convention:
 - A model call that times out or errors gives a null reading, like a reply that does not fit its type.
 - JSON schemas sent to models inline nested types (no `$ref`), which local models' structured output handles better.
 - `shio new NAME` starts a project that runs with no model.
+- Regulated mode (docs/REGULATED.md): signed, hash-chained decision records, `pii` fields and an erasable vault,
+  pinned models, `replay`.
+- `signoff OUTCOME [when COND] by role "R" [and "S"] [maker FIELD]`: an outcome that needs a person. The condition is
+  over the decided outcome (its fields by name) and module constants, never a reading; one that can't be evaluated
+  needs sign-off. The agent returns `{"status": "PENDING", "signoff": ..., "decided": outcome}`, the request goes
+  into the top-level run's record (a wrapping agent can't skip it), and `shio signoff` answers it in the ledger.
+- `check NAME as CODE:` and a `codes:` table of customer-facing text. Failed checks' codes are recorded in clear.
+- `shio explain` generates a decision map from the program.
 - `regulated` programs: signed, hash-chained decision records, `shio verify | replay | erase`, pinned models, `pii`
   fields with an erasable vault, and the boundary's Python escape hatches as compile errors (docs/REGULATED.md).
 

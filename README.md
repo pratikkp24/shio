@@ -184,6 +184,8 @@ outcome. That gives you three things:
 | `read x[key]: T from sources by model [blind] [seeing a, b]:` | Asks a model for a `T`, with the prompt indented below and `{expr}` interpolating plain values. `blind` is an independent read that sees no other reading. A reply that does not fit `T` is a null reading, not a crash. |
 | `check name[key]: expr, "detail"` | A claim about readings. A check that raises counts as failed. |
 | `check b after a, c: expr` | Runs only if the checks it names passed; otherwise it is skipped, not failed. |
+| `check name as CODE: expr` | Gives the check a stable reason code, recorded in clear with the decision. `codes:` declares each code's customer-facing text. |
+| `signoff OUTCOME when cond by role "r"` | That outcome needs a person: it is returned as PENDING until someone in that role, who isn't its maker, signs it. |
 | `when name[key]: expr` | A condition over readings that only routes control flow. |
 | `for item in reading.field:` | Loops over a list the model read. Each `item` is itself a reading, so the checks and rules inside the loop decide item by item. |
 | `rule name[key]:` | Code that settles an outcome from readings and checks, and returns it. `checks.failed(...)` and `checks.failures()` are available inside. |
@@ -198,6 +200,7 @@ shio build program.shio -o out.py # the Python it compiles to
 shio show shio-traces/*.json      # readings, checks passed and failed, per run
 shio train program.shio [--go]    # traces -> sft.jsonl, grpo.jsonl and a TRL script
 shio keygen | verify | replay | erase   # signed decision records (see docs/REGULATED.md)
+shio signoff | reasons | explain        # human sign-off, reason codes, the decision map
 ```
 
 ## Editor
@@ -211,7 +214,9 @@ For banks, insurers, pharma and the public sector, a `regulated` line at the top
 evidence: signed, hash-chained decision records that name the program, the pinned model and every source and prompt;
 `shio verify` to detect edited, missing or reordered records; `shio replay` to re-run a decision from its recorded
 model answers; `pii` fields hashed in the record and kept in an erasable vault (`shio erase`). The boundary's Python
-escape hatches become compile errors. See [docs/REGULATED.md](https://github.com/Aonami-Labs/shio/blob/main/docs/REGULATED.md).
+escape hatches become compile errors. Outcomes can require a person's sign-off with maker-checker enforced
+(`signoff`, `shio signoff`), checks carry stable reason codes that survive erasure (`shio reasons`), and
+`shio explain` writes the decision map a model-risk team asks for. See [docs/REGULATED.md](https://github.com/Aonami-Labs/shio/blob/main/docs/REGULATED.md).
 
 ## Status
 

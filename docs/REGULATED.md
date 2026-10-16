@@ -11,6 +11,9 @@ shio run loan.shio --traces records/                # every decision becomes a s
 shio verify records/ --pubkey keys/shio-signing.pub # chain, signatures, vaults: VERIFIED or every problem found
 shio replay records/assess-…json                    # re-run one decision from its recorded model answers
 shio erase records/assess-…json --reason "erasure request #4411"   # delete its personal data; the erasure is recorded
+shio signoff records/pay-…json --as "Priya Nair" --role finance_controller --meaning "approved for payment"
+shio reasons records/assess-…json                   # the reason codes and the text the customer is given
+shio explain loan.shio -o loan-decision-map.html    # the decision map for the model-risk file
 ```
 
 ## A regulated program
@@ -65,6 +68,8 @@ item. Regulated programs always use a vault; others can opt in with `shio.config
 - A signature made by a different key, or forged (BAD SIGNATURE).
 - A vault edited, or deleted without an erasure entry.
 - With `--head`: any entry added or replaced after the head hash was anchored.
+- A sign-off that breaks maker-checker, asks for the wrong role, was edited, or is for another version of
+  its record; and every decision still PENDING sign-off (a note, not a failure).
 
 **Anchor the head.** `verify` prints the chain's head hash. Someone holding the signing key could rebuild a whole
 chain, so record the head somewhere they can't rewrite: a WORM bucket (S3 Object Lock), a change ticket, an email
@@ -97,6 +102,98 @@ replayed.
 **Outcomes are recorded in clear**, because the decision itself must stay auditable. Don't put personal data into
 an outcome unless the decision needs it.
 
+## Human sign-off
+
+An agent declares which outcomes need a person:
+
+```shio
+LIMIT = 10000
+
+agent pay(invoice: Source, submitted_by: str, llm):
+    read inv: Invoice from invoice by llm:
+        Read the invoice.
+    check known as UNKNOWN_SUPPLIER: inv.supplier in SUPPLIERS, "unknown supplier {inv.supplier}"
+    signoff PAY when amount > LIMIT by role "finance_controller" maker submitted_by
+    rule decide:
+        if checks.failures():
+            return {"action": "HOLD"}
+        return {"action": "PAY", "amount": inv.amount, "submitted_by": submitted_by}
+    return decide
+```
+
+- **What it matches.** `PAY` matches an outcome that is the string `"PAY"`, or a dict whose `status`, `action`,
+  `decision` or `outcome` is `"PAY"`. `signoff * ...` matches any outcome. Without `when`, every such outcome
+  needs sign-off.
+- **The condition is over the decided outcome**, its fields by name, and the program's constants. It can't name a
+  reading, so a model can't talk its way past a sign-off. A condition that can't be evaluated (a field the outcome
+  doesn't have, an error) needs sign-off: it fails closed.
+- **What the agent returns.** The agent returns
+  `{"status": "PENDING", "signoff": {"roles": [...], "because": [...]}, "decided": <the outcome>}`. The record gets a
+  sign-off request with the roles, why it's needed (with the values, e.g. `amount > LIMIT (amount=25000.0,
+  LIMIT=10000)`), who requested it, and the makers. A sign-off in a nested agent puts the request on the top-level
+  record, and the top-level outcome is PENDING whatever the outer agent returns, so wrapping can't skip it.
+- **Two-person rules.** `by role "finance_controller" and "treasury"` needs one sign-off per role, from different
+  people.
+
+`shio signoff RECORD` shows what a decision is waiting for. With `--as NAME --role ROLE --meaning "..."` it appends
+a sign-off entry to the ledger, signed by the ledger key like every entry. The entry holds who signed, in which role,
+when, the stated meaning of the signature, approval or rejection (`--reject`), and the sha256 of the record they
+saw. `--key` adds the person's own Ed25519 signature (from `shio keygen`), so the sign-off is tied to them and not
+only to the system.
+
+**Maker-checker is enforced.** A sign-off is refused, and `shio verify` reports it as a PROBLEM if one gets into the
+ledger another way, when the signer is:
+- the requester (`shio run --as`, `SHIO_ACTOR`, or the login);
+- a maker the record names (the outcome's `maker` field and the fields after `maker`, compared ignoring case);
+- someone who already signed the decision.
+
+A sign-off is also refused or reported when the role isn't one the request asks for, the role was already signed,
+the decision was already approved or rejected, or the record has changed since it was entered in the ledger.
+`shio verify` lists every decision still PENDING, checks each person's own signature against `--signer-pubkey`, and
+reports a sign-off entry that was edited or that refers to a different version of its record.
+
+## Reason codes
+
+```shio
+codes:
+    INCOME_NOT_VERIFIED: "We could not verify your income from the documents you sent."
+    DTI_TOO_HIGH: "Your existing repayments are too high for this loan."
+
+agent assess(statement: str, llm):
+    ...
+    check income_ok as INCOME_NOT_VERIFIED: a.quote in statement, "quote {a.quote} not in the statement"
+```
+
+A check's code is recorded in clear in every result for that check. A failed check's code also goes into the
+record's `reasons`, with the text from the `codes:` table. The check's explanation interpolates values, so it stays in
+the vault; the code and the table's text are the same for everyone, so they hold no personal data and stay in the
+record. After `shio erase`, `shio reasons RECORD` still prints:
+
+```
+  reasons:
+    INCOME_NOT_VERIFIED: We could not verify your income from the documents you sent.
+```
+
+The text is taken when the decision is made, so a later change to the table doesn't rewrite what a customer was
+told. In a regulated program every code must be in the `codes:` table, codes are in capitals, the text must be a
+plain string (never an f-string), and a `when` can't have a code, because it only routes control flow.
+
+## The decision map: `shio explain`
+
+`shio explain program.shio` writes the program's technical documentation in Markdown (`--html` or `-o map.html` for
+a page). It is generated from the source, so it can't drift from what runs, and it names the source's sha256, which
+every decision record also names. For each agent it lists:
+
+- every read: its type, sources, model, what the model sees (blind, `seeing`), the prompt, and which fields are
+  personal data;
+- every check and when, with its reason code, condition, explanation and `after` dependencies;
+- every outcome each rule can return, with the `if`/`elif`/`else` conditions on the way to it, the checks it depends
+  on, and whether it needs sign-off;
+- the sign-offs: outcome, condition, roles, and who can't sign;
+- the models and how each is pinned;
+- what the model is trusted with (proposing values) and what it isn't (deciding anything), with the reviewer's
+  warnings: fields a rule uses that no check verifies, and readings nothing checks.
+
 ## Where the guarantees stop
 
 - **Python is not a sandbox.** Regulated mode makes every route around the boundary a compile error *in Shio code*.
@@ -109,6 +206,13 @@ an outcome unless the decision needs it.
 - **A pin other than an Ollama digest is a promise, not a check.** For other providers the pinned id is recorded
   but can't be verified against the served model.
 - **One writer per folder on Windows.** File locking is POSIX only.
+- **A role is a claim.** Shio checks that the signer is not a maker and that the role is the one asked for. It
+  can't check that the person holds the role. Run `shio signoff` behind your identity provider, or give each
+  approver their own key (`--key`) and check it with `--signer-pubkey`.
+- **Maker-checker compares names.** Use the same identifiers for `--as`, `SHIO_ACTOR` and the outcome's maker
+  fields (an employee id is better than a display name).
+- **The decision map is static.** It shows conditions as written in the `.shio` file. It doesn't follow into
+  imported Python modules or work out values computed at run time.
 
 ## How this maps to common requirements
 
@@ -118,19 +222,18 @@ counsel and regulator.
 | Requirement | Shio |
 |---|---|
 | Automatic logging of each decision (EU AI Act Art. 12) | A record per run, chained and signed |
-| Human oversight (EU AI Act Art. 14; GDPR Art. 22) | Outcomes route to people (HUMAN, REVIEW); a language-level sign-off primitive is next on the roadmap |
+| Human oversight (EU AI Act Art. 14; GDPR Art. 22) | `signoff`: outcomes held as PENDING until a person in the named role signs; maker-checker enforced and verified |
+| Electronic signatures (21 CFR Part 11 §11.50, §11.70) | Sign-off entries hold the signer, time and stated meaning, signed and chained to the exact record hash; optional personal keys |
 | Accuracy and robustness evidence (EU AI Act Art. 15; SR 11-7 validation) | Checks per decision, the fail-closed test, replay, and live-model results |
 | Audit trails that can't be altered (21 CFR Part 11; SOX) | Hash chain, signatures, `verify`, anchored heads |
-| Reasons for a decision (GDPR transparency; adverse-action notices) | Failed checks' explanations (vault) and check names (record); stable reason codes are on the roadmap |
+| Reasons for a decision (GDPR transparency; adverse-action notices) | Reason codes in clear with customer-facing text (`shio reasons`), surviving erasure; explanations in the vault |
+| Technical documentation (EU AI Act Art. 11, Annex IV; SR 11-7 documentation) | `shio explain`: the decision map generated from the program, tied to its hash |
 | Erasure and data minimisation (GDPR Art. 17; DPDP Act) | `pii` fields hashed, vault, `shio erase` |
 | Change management | `replay --allow-changed` impact analysis; the program hash in every record |
 
 ## Next
 
 Planned next:
-- sign-off as a language form, with maker-checker enforced by the compiler;
-- stable reason codes on checks;
-- `shio explain` to generate a decision map, the model documentation regulators ask for;
 - versioned policy tables;
 - monitoring of check pass rates;
 - an evidence pack per audit period.
