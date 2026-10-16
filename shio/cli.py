@@ -299,6 +299,32 @@ def _retention(a):
     print(f"{len(done)} vault{'s' if len(done) != 1 else ''} " + ("erased" if a.apply else "due; add --apply to erase"))
 
 
+def _evidence(a):
+    from .ledger import load_public_key
+    pub = load_public_key(a.pubkey) if a.pubkey else None
+    secret = a.secret.encode() if a.secret else None
+    if a.check:
+        from .evidence import check_manifest
+        ok, problems, state = check_manifest(a.check, pub, secret)
+        print("\n".join(problems) or "every file matches the manifest")
+        print(f"manifest signature: {state}")
+        print("PACK INTACT" if ok else "PACK CHANGED")
+        sys.exit(0 if ok else 1)
+    if not (a.folder and a.out and a.start and a.end):
+        sys.exit("shio evidence FOLDER --from DATE --to DATE -o OUT  (or --check PACK)")
+    from .core import _signer
+    from .evidence import build
+    data, out = build(a.folder, a.out, _date(a.start), _date(a.end), _store(a) if a.policies else None, pub, secret,
+                      _signer())
+    mon = data["monitoring"]["flags"]
+    print(f"evidence pack for {a.start} to {a.end}: {out}/evidence.md")
+    print(f"  {data['decisions']} decisions; ledger {'VERIFIED' if data['integrity']['verified'] else 'NOT VERIFIED'}"
+          + (f"; audit {'COMPLIANT' if data['audit']['compliant'] else 'FINDINGS'}" if "audit" in data else "")
+          + f"; {len(mon)} monitoring flag{'s' if len(mon) != 1 else ''}")
+    for f in mon:
+        print(f"  flag: {f}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="shio", description="Shio: the model reads, code decides.")
     p.add_argument("--version", action="version", version=f"shio {__version__}")
@@ -390,6 +416,17 @@ def main(argv=None):
     rt.add_argument("--apply", action="store_true")
     rt.add_argument("--today", help="as of this date (default today)")
     rt.set_defaults(fn=_retention)
+    evp = sub.add_parser("evidence", help="an evidence pack for an audit period: integrity, decisions, oversight, "
+                                           "monitoring, policies and decision maps, with a signed manifest")
+    evp.add_argument("folder", nargs="?")
+    evp.add_argument("--from", dest="start")
+    evp.add_argument("--to", dest="end")
+    evp.add_argument("-o", "--out")
+    evp.add_argument("--policies", help="audit each decision against the policies in this folder")
+    evp.add_argument("--pubkey")
+    evp.add_argument("--secret")
+    evp.add_argument("--check", metavar="PACK", help="check an existing pack against its manifest")
+    evp.set_defaults(fn=_evidence)
     s = sub.add_parser("show", help="summarise trace files")
     s.add_argument("traces", nargs="+")
     s.set_defaults(fn=_show)

@@ -302,6 +302,35 @@ The language doesn't read a circular. A person turns it into a new policy versio
 person approves). Shio provides one place for the rule, proof that it's applied everywhere, and a signed record
 of which rule governed each decision.
 
+## Evidence for an audit period
+
+```bash
+shio evidence records/ --from 2026-07-01 --to 2026-09-30 --policies policies/ --pubkey keys/shio-signing.pub -o pack/
+shio evidence --check pack/ --pubkey keys/shio-signing.pub     # has anything in the pack changed since?
+```
+
+One folder an auditor can take away:
+
+- **`evidence.md`** covers, in one readable report:
+  - integrity: `verify` over the whole ledger, the chain's head hash, signature states;
+  - decisions in the period, by program version and by outcome;
+  - human oversight: sign-offs by role, rejections, decisions still pending;
+  - the reason codes given most often;
+  - the data-policy and table versions in force, and the `audit` result;
+  - monitoring.
+- **`programs/`** holds the decision map (`shio explain`) of every program version that decided in the period.
+  A version whose source has since changed is listed without one.
+- **`data.json`** holds the figures behind the report.
+- **`manifest.json`** holds the sha256 of every file, signed with the signing key, so `--check` shows whether
+  anything in the pack was edited after it was built.
+
+**Monitoring needs no labels.** Every check tests the model's work against something it can't argue with, so a
+check's pass rate is a measure of quality in its own right. The pack flags:
+- a week in which a check's pass rate falls more than ten points below its rate in the weeks before
+  ("on_slip: 29% in W33, down from 100% before it");
+- a model served with different weights during the period (its digest changed);
+- more than 5% of model calls giving no usable answer.
+
 ## Where the guarantees stop
 
 - **Python is not a sandbox.** Regulated mode makes every route around the boundary a compile error *in Shio code*.
@@ -349,5 +378,4 @@ counsel and regulator.
 
 Planned next:
 - jurisdiction-scoped policies (one program serving several regulators);
-- monitoring of check pass rates;
-- an evidence pack per audit period.
+- monitoring alerts while a period runs (today they come with the evidence pack), and dashboards.
