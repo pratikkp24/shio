@@ -4,6 +4,7 @@ A model call returns a Reading. A Reading's value can only be looked at inside a
 model can never settle an outcome on its own: an @agent that returns a Reading is an error.
 """
 import contextvars
+import datetime
 import dataclasses
 import builtins
 import functools
@@ -135,6 +136,7 @@ class Run:
              "sources": self.sources,
              "readings": [{"id": r.id, "seq": r.seq, "name": r.name, "model": r.model, "model_id": r.model_id,
                            "schema": schema_ref(r.schema), "pii": sorted(_pii_fields(r.schema)),
+                           "classes": _classes(r.schema),
                            "prompt_sha256": _prompt_hash(r.request),
                            "request": {**dataclasses.asdict(r.request), "sources": [s.id for s in r.request.sources]},
                            "raw": r.raw, "value": to_jsonable(r._value), "error": r.error} for r in self.readings],
@@ -158,6 +160,14 @@ class Run:
                 out.append({"code": c["code"], "text": self.codes.get(c["code"], ""), "check": c["name"],
                             "key": to_jsonable(c["key"])})
         return out
+
+
+def _classes(schema):
+    from .policy import classes_of
+    try:
+        return classes_of(schema)
+    except Exception:
+        return {}
 
 
 def _pii_fields(schema):
@@ -400,22 +410,34 @@ def rule(fn=None, *, name=None):
     return wrapper
 
 
-_config = {"trace_dir": "shio-traces", "vault": False, "signer": None, "actor": None}
+_config = {"trace_dir": "shio-traces", "vault": False, "signer": None, "actor": None, "policies": None}
 last_run = {"run": None}        # the most recent top-level run (shio replay reads it)
 
 
-def configure(trace_dir=None, vault=None, signer=None, actor=None):
+def configure(trace_dir=None, vault=None, signer=None, actor=None, policies=None):
     """trace_dir=None turns trace files off (not allowed for a regulated program). vault=True keeps free text and
     personal data in a separate, erasable vault file. signer: a ledger.Signer (default: SHIO_SIGNING_KEY).
     actor: who is running the program, recorded as the requester of any sign-off (default: SHIO_ACTOR, or the
     operating-system user)."""
     _config["trace_dir"] = trace_dir
+    if policies is not None:      # a folder of .policy files, a policy.Store, or False for none
+        from .policy import Store
+        _config["policies"] = policies if policies is False or isinstance(policies, Store) else Store.load(policies)
     if actor is not None:
         _config["actor"] = actor or None
     if vault is not None:
         _config["vault"] = vault
     if signer is not None:
         _config["signer"] = signer
+
+
+def _policies():
+    """The data-handling policy store: configure(policies=...) or SHIO_POLICIES (a folder of .policy files)."""
+    if _config["policies"] is None:
+        path = os.getenv("SHIO_POLICIES")
+        from .policy import Store
+        _config["policies"] = Store.load(path) if path else False
+    return _config["policies"] or None
 
 
 def _signer():
@@ -550,8 +572,11 @@ def agent(fn=None, *, record=True, name=None, signoffs=()):
                     last_run["run"] = run
                     if record and _config["trace_dir"] and not wrapper.replaying:
                         from .trace import write
-                        wrapper.last_trace = write(run, _config["trace_dir"], vault=_config["vault"] or run.regulated,
-                                                   signer=_signer())
+                        store = _policies()
+                        handling = store.handling(datetime.date.fromtimestamp(run.started)) if store else None
+                        wrapper.last_trace = write(run, _config["trace_dir"],
+                                                   vault=_config["vault"] or run.regulated or handling is not None,
+                                                   signer=_signer(), handling=handling)
         wrapper.last_trace = None
         wrapper.replaying = False
         return wrapper

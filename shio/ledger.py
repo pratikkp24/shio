@@ -134,9 +134,82 @@ def _redact_value(value, pii):
     return {k: ({"$pii": sha256(v)} if k in pii and v is not None else v) for k, v in value.items()}
 
 
-def split(record):
-    """(record without free text or personal data, vault holding them by JSON path)."""
+SCRUB_MIN = 4      # shorter values (a "5", a "No") would scrub ordinary text; such fields are hashed in place only
+
+
+def _decide(handling):
+    """class -> clear | vault | hashed. Without a policy store, every classified field is kept in the vault."""
+    return (lambda cls: handling.of(cls)) if handling is not None else (lambda cls: "vault")
+
+
+def _protected(v):
+    return isinstance(v, dict) and "$pii" in v
+
+
+def _apply(value, classes, decide, scrub, for_vault=False, prefix=""):
+    """A reading's value with each classified field handled: clear stays, vault and hashed become a hash. For the
+    vault copy (for_vault), only hashed fields are replaced. Values of hashed fields are collected to be scrubbed."""
+    if isinstance(value, list):
+        return [_apply(v, classes, decide, scrub, for_vault, prefix) for v in value]
+    if not isinstance(value, dict) or _protected(value):
+        return value
+    out = {}
+    for k, v in value.items():
+        path = f"{prefix}{k}"
+        cls = classes.get(path)
+        if cls is not None and v is not None and not _protected(v):
+            h = decide(cls)
+            if h == "hashed" and isinstance(v, (str, int, float)) and len(str(v)) >= SCRUB_MIN:
+                scrub[str(v)] = sha256(v)
+            if h == "hashed" or (h == "vault" and not for_vault):
+                out[k] = {"$pii": sha256(v), "class": cls, "handling": h}
+                continue
+        if isinstance(v, list):
+            out[k] = [_apply(x, classes, decide, scrub, for_vault, f"{path}[].") for x in v]
+        elif isinstance(v, dict):
+            out[k] = _apply(v, classes, decide, scrub, for_vault, f"{path}.")
+        else:
+            out[k] = v
+    return out
+
+
+def _scrub(node, scrub, skip=("integrity",)):
+    """Replace every occurrence of a hashed value in the strings of a JSON structure."""
+    if not scrub:
+        return node
+    if isinstance(node, str):
+        for plain, digest in scrub.items():
+            if plain in node:
+                node = node.replace(plain, f"[hashed {digest[:12]}]")
+        return node
+    if isinstance(node, list):
+        return [_scrub(v, scrub, ()) for v in node]
+    if isinstance(node, dict):
+        return {k: (v if k in skip else _scrub(v, scrub, ())) for k, v in node.items()}
+    return node
+
+
+def _readings(run):
+    yield from run.get("readings", [])
+    for c in run.get("children", []):
+        yield from _readings(c)
+
+
+def split(record, handling=None):
+    """(record without free text or personal data, vault holding them by JSON path), under a data-handling policy
+    (shio.policy.Handling) if one is given."""
     vault = {}
+    decide = _decide(handling)
+    scrub = {}
+    for r in _readings(record):           # first: which values a policy says must not survive anywhere
+        classes = dict(r.get("classes") or {})
+        for f in r.get("pii") or ():
+            classes.setdefault(f, "PII")
+        r["classes"] = classes
+        if classes and r.get("value") is not None:
+            _apply(r["value"], classes, decide, scrub)
+    if handling is not None:
+        record["data_policy"] = handling.as_dict()
 
     def walk(run, base):
         for f in VAULT_FIELDS_RUN:
@@ -150,10 +223,14 @@ def split(record):
                 r[f] = _put(vault, f"{p}/{f}", r.get(f))
             for f in VAULT_FIELDS_REQUEST:
                 r["request"][f] = _put(vault, f"{p}/request/{f}", r["request"].get(f))
-            pii = set(r.get("pii") or ())
-            if pii and isinstance(r.get("value"), dict):
-                vault[f"{p}/value"] = r["value"]
-                r["value"] = _redact_value(r["value"], pii)
+            classes = r.get("classes") or {}
+            if classes and r.get("value") is not None:
+                full = _apply(r["value"], classes, decide, {}, for_vault=True)
+                handled = _apply(r["value"], classes, decide, {})
+                if handled != full:
+                    vault[f"{p}/value"] = full
+                r["value"] = handled
+                r["handled"] = {path: decide(cls) for path, cls in sorted(classes.items())}
         for i, c in enumerate(run.get("checks", [])):
             p = f"{base}/checks/{i}"
             c["detail"] = _put(vault, f"{p}/detail", c.get("detail"))
@@ -163,6 +240,9 @@ def split(record):
         for i, ch in enumerate(run.get("children", [])):
             walk(ch, f"{base}/children/{i}")
     walk(record, "")
+    if scrub:                              # hashed values: gone from the vault's free text and the record's
+        vault = {k: _scrub(v, scrub, ()) for k, v in vault.items()}
+        record = _scrub(record, scrub)
     return record, vault
 
 
@@ -219,13 +299,13 @@ def record_hash(record):
     return sha256(body)
 
 
-def write(record, folder, stem, use_vault=False, signer=None):
+def write(record, folder, stem, use_vault=False, signer=None, handling=None):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     record["format"] = FORMAT
     vault = None
-    if use_vault:
-        record, vault = split(record)
+    if use_vault or handling is not None:
+        record, vault = split(record, handling)
     with _locked(folder):
         entries = _entries(folder)
         if vault:
@@ -258,6 +338,74 @@ def erase(record_path, reason, signer=None):
         event = {"kind": "erasure", "file": record_path.name, "vault": v["file"], "reason": reason, "time": time.time()}
         event["sha256"] = sha256({k: event[k] for k in ("kind", "file", "vault", "reason", "time")})
         return _append(folder, event, signer)
+
+
+MIGRATION_FIELDS = ("kind", "file", "from_sha256", "to_sha256", "reason", "policies", "time")
+
+
+def _tighter(record, handling):
+    """Fields this record keeps less protected than the handling now requires: [(reading, path, was, now)]."""
+    from .policy import STRICTNESS
+    out = []
+    for r in _readings(record):
+        handled = r.get("handled") or {}
+        for path, cls in (r.get("classes") or {}).items():
+            was = handled.get(path, "clear" if not r.get("pii") else "vault")
+            now = handling.of(cls)
+            if STRICTNESS[now] > STRICTNESS[was]:
+                out.append((r.get("name"), path, was, now))
+    return out
+
+
+def migrate(folder, handling, reason, signer=None, dry_run=False):
+    """Re-seal records written under a less protective rule than `handling` (never a more permissive one). Each
+    becomes a signed migration entry chaining the record's old hash to its new one; verify follows the chain."""
+    import copy
+    folder = Path(folder)
+    done = []
+    with _locked(folder):
+        for e in _entries(folder):
+            if e.get("kind") != "record":
+                continue
+            path = folder / e["file"]
+            if not path.exists():
+                continue
+            rec = json.loads(path.read_text())
+            changes = _tighter(rec, handling)
+            if not changes:
+                continue
+            done.append((e["file"], changes))
+            if dry_run:
+                continue
+            old = rec["integrity"]["sha256"]
+            vault = load_vault(path, rec)
+            full = merge(copy.deepcopy(rec), vault) if vault is not None else copy.deepcopy(rec)
+            for r in _readings(full):           # re-apply from the value as it was handled at write time
+                r["handled"] = r.get("handled") or {}
+            new, new_vault = split(full, handling)
+            if vault is None:                    # erased vault: only what the record itself holds can be tightened
+                new_vault = None
+                new["vault"] = rec.get("vault")
+            elif new_vault:
+                (folder / rec["vault"]["file"]).write_text(json.dumps(new_vault, indent=1, ensure_ascii=False,
+                                                                      default=str))
+                new["vault"] = {"file": rec["vault"]["file"], "sha256": sha256(new_vault)}
+            # the policy the decision was written under stays its policy; the migration says what was applied later
+            new["data_policy"] = rec.get("data_policy")
+            new["migrations"] = rec.get("migrations", []) + [
+                {"from_sha256": old, "reason": reason, "time": time.time(), "policies": handling.stamps,
+                 "tightened": [{"reading": r, "field": f, "was": w, "now": n} for r, f, w, n in changes]}]
+            new["integrity"] = {"seq": rec["integrity"]["seq"], "prev": rec["integrity"]["prev"]}
+            digest = record_hash(new)
+            new["integrity"]["sha256"] = digest
+            if signer:
+                new["integrity"].update(key_id=signer.key_id, signature=signer.sign(digest))
+            path.write_text(json.dumps(new, indent=1, ensure_ascii=False, default=str))
+            event = {"kind": "migration", "file": e["file"], "from_sha256": old, "to_sha256": digest,
+                     "reason": reason, "policies": handling.stamps, "time": time.time()}
+            event["sha256"] = sha256({k: event[k] for k in MIGRATION_FIELDS})
+            _append(folder, event, signer)
+    return done
 
 
 def load_vault(record_path, record=None):
@@ -381,6 +529,10 @@ def verify(folder, public_key=None, secret=None, head=None, signer_keys=()):
     if not entries:
         return False, [f"{folder}: no ledger"], None
     erased = {e["file"]: e for e in entries if e.get("kind") == "erasure"}
+    migrations = {}
+    for e in entries:
+        if e.get("kind") == "migration":
+            migrations.setdefault(e["file"], []).append(e)
     people = {key_id(k): k for k in signer_keys}
     signoffs, requests, record_hashes = {}, {}, {}
     seen = set()
@@ -401,6 +553,10 @@ def verify(folder, public_key=None, secret=None, head=None, signer_keys=()):
             body = {k: e[k] for k in ("kind", "file", "vault", "reason", "time")}
             if sha256(body) != e["sha256"]:
                 problems.append(f"{where}: erasure entry edited")
+            continue
+        if e.get("kind") == "migration":
+            if sha256({k: e.get(k) for k in MIGRATION_FIELDS}) != e.get("sha256"):
+                problems.append(f"{where}: migration entry edited")
             continue
         if e.get("kind") == "signoff":
             if sha256({k: e.get(k) for k in SIGNOFF_FIELDS}) != e.get("sha256"):
@@ -434,7 +590,14 @@ def verify(folder, public_key=None, secret=None, head=None, signer_keys=()):
         if integ.get("seq") != i or integ.get("prev") != e.get("prev"):
             problems.append(f"{e['file']}: record's own chain position does not match the ledger")
         actual = record_hash(rec) if "integrity" in rec else None
-        if actual != e["sha256"] or integ.get("sha256") != e["sha256"]:
+        expected = e["sha256"]
+        for m in migrations.get(e["file"], []):      # re-sealed under a stricter policy: follow the signed chain
+            if m.get("from_sha256") == expected:
+                expected = m["to_sha256"]
+        if expected != e["sha256"] and actual == expected:
+            n = len(migrations[e["file"]])
+            notes.append(f"{e['file']}: re-sealed {n} time{'s' if n > 1 else ''} under a stricter data policy")
+        if actual != expected or integ.get("sha256") != expected:
             problems.append(f"{e['file']}: TAMPERED (its content no longer matches the hash in the ledger)")
             continue
         if rec.get("signoff"):

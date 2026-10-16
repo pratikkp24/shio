@@ -9,6 +9,7 @@ from . import __version__, load, trace
 from . import train as training
 from .compiler import ShioError, compile_source, to_code
 from .core import BoundaryError, RegulatedError, configure
+from .policy import PolicyError
 
 
 def _run(a):
@@ -16,6 +17,8 @@ def _run(a):
         configure(a.traces)
     if a.actor:
         configure(_config_dir(), actor=a.actor)
+    if a.policies:
+        configure(_config_dir(), policies=a.policies)
     mod = load(a.file, argv=a.args)
     main = getattr(mod, "__shio_main__", None)
     if main is None:
@@ -231,6 +234,70 @@ def _explain(a):
         print(text, end="")
 
 
+def _date(text):
+    import datetime as dt
+    return dt.date.fromisoformat(text) if text else dt.date.today()
+
+
+def _store(a):
+    from .policy import Store
+    return Store.load(a.policies)
+
+
+def _policy(a):
+    from .policy import check_programs, impact
+    store = _store(a)
+    if a.action == "show":
+        h = store.handling(_date(a.at))
+        print(f"in force on {_date(a.at)}:")
+        for p in store.in_force(_date(a.at)):
+            print(f"  {p.name} v{p.version}, effective {p.effective}, source: {p.source}"
+                  + (f", approved by {p.approved_by}" if p.approved_by else "") + f"  (sha256 {p.sha256[:12]})")
+        for cls, (handling, years, by) in sorted(h.rules.items()):
+            print(f"    {cls:<16} {handling:<7}" + (f" retain {years} years" if years else "") + f"   ({by})")
+        if h.default:
+            print(f"    {'(any other)':<16} {h.default[0]:<7}   ({h.default[2]})")
+        return
+    if not a.programs:
+        sys.exit("name the .shio programs to check")
+    if a.action == "check":
+        ok, lines = check_programs(a.programs, store, _date(a.at))
+        print("\n".join(lines))
+        sys.exit(0 if ok else 1)
+    print("\n".join(impact(a.programs, store, _date(a.at))))
+
+
+def _audit(a):
+    from .policy import audit
+    ok, report, _ = audit(a.folder, _store(a), _date(a.today))
+    print("\n".join(report))
+    print("COMPLIANT" if ok else "FINDINGS")
+    sys.exit(0 if ok else 1)
+
+
+def _migrate(a):
+    from .core import _signer
+    from .ledger import migrate
+    import datetime as dt
+    at = _date(a.at)
+    if at > dt.date.today():
+        sys.exit("migrate applies a policy already in force; --at cannot be in the future")
+    done = migrate(a.folder, _store(a).handling(at), a.reason, _signer(), dry_run=a.dry_run)
+    for name, changes in done:
+        print(f"{'would re-seal' if a.dry_run else 're-sealed'} {name}: " +
+              "; ".join(f"{r}.{p} {was} -> {now}" for r, p, was, now in changes))
+    print(f"{len(done)} record{'s' if len(done) != 1 else ''}" + (" (dry run)" if a.dry_run else ""))
+
+
+def _retention(a):
+    from .core import _signer
+    from .policy import retention
+    done = retention(a.folder, _store(a), _signer(), apply=a.apply, today=_date(a.today))
+    for name, by, ends in done:
+        print(f"{'erased' if a.apply else 'due'}: {name} (retention under {by} ended {ends})")
+    print(f"{len(done)} vault{'s' if len(done) != 1 else ''} " + ("erased" if a.apply else "due; add --apply to erase"))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="shio", description="Shio: the model reads, code decides.")
     p.add_argument("--version", action="version", version=f"shio {__version__}")
@@ -239,6 +306,7 @@ def main(argv=None):
     r.add_argument("file")
     r.add_argument("args", nargs="*")
     r.add_argument("--traces", help="where run traces are written (default ./shio-traces)")
+    r.add_argument("--policies", help="a folder of .policy files: data handling for each decision (or SHIO_POLICIES)")
     r.add_argument("--as", dest="actor", help="who is running it: the requester of any sign-off (default: SHIO_ACTOR "
                                               "or your login)")
     r.set_defaults(fn=_run)
@@ -295,6 +363,30 @@ def main(argv=None):
     ex.add_argument("-o", "--out", help="write it to a file (.md or .html)")
     ex.add_argument("--html", action="store_true", help="HTML instead of Markdown")
     ex.set_defaults(fn=_explain)
+    po = sub.add_parser("policy", help="data-handling policies: show what is in force, check programs, see a change's impact")
+    po.add_argument("action", choices=["show", "check", "impact"])
+    po.add_argument("programs", nargs="*")
+    po.add_argument("--policies", required=True, help="a folder of .policy files")
+    po.add_argument("--at", help="the date (YYYY-MM-DD; default today); for impact, the day a new version takes effect")
+    po.set_defaults(fn=_policy)
+    au = sub.add_parser("audit", help="check every record against the data-handling policy in force on its date")
+    au.add_argument("folder")
+    au.add_argument("--policies", required=True)
+    au.add_argument("--today", help="audit as of this date (default today)")
+    au.set_defaults(fn=_audit)
+    mg = sub.add_parser("migrate", help="re-seal records under today's stricter data-handling rules (never looser)")
+    mg.add_argument("folder")
+    mg.add_argument("--policies", required=True)
+    mg.add_argument("--reason", required=True)
+    mg.add_argument("--dry-run", action="store_true")
+    mg.add_argument("--at", help="apply the policies in force on this date (default today; never a future date)")
+    mg.set_defaults(fn=_migrate)
+    rt = sub.add_parser("retention", help="vaults whose retention period has ended; --apply erases them")
+    rt.add_argument("folder")
+    rt.add_argument("--policies", required=True)
+    rt.add_argument("--apply", action="store_true")
+    rt.add_argument("--today", help="as of this date (default today)")
+    rt.set_defaults(fn=_retention)
     s = sub.add_parser("show", help="summarise trace files")
     s.add_argument("traces", nargs="+")
     s.set_defaults(fn=_show)
@@ -305,6 +397,8 @@ def main(argv=None):
         sys.exit(e.format())
     except BoundaryError as e:
         sys.exit(f"boundary error: {e}")
+    except PolicyError as e:
+        sys.exit(f"policy: {e}")
     except RegulatedError as e:
         sys.exit(f"regulated: {e}")
 

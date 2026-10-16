@@ -6,11 +6,13 @@ import time
 from pathlib import Path
 
 
-def write(run, trace_dir, vault=False, signer=None):
-    """Write a top-level run as a record entered in the folder's ledger (see shio.ledger)."""
+def write(run, trace_dir, vault=False, signer=None, handling=None):
+    """Write a top-level run as a record entered in the folder's ledger (see shio.ledger), under the data-handling
+    policies in force on its date (see shio.policy)."""
     from .ledger import write as ledger_write
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(run.started))
-    return ledger_write(run.to_dict(), trace_dir, f"{run.agent}-{stamp}-{run.id}", use_vault=vault, signer=signer)
+    return ledger_write(run.to_dict(), trace_dir, f"{run.agent}-{stamp}-{run.id}", use_vault=vault, signer=signer,
+                        handling=handling)
 
 
 def load(patterns):

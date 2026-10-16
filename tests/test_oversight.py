@@ -28,7 +28,7 @@ type Invoice:
     supplier: str          # the supplier's name
     amount: float          # the total due
     contact: str pii       # the person who sent it
-    iban: str              # where to pay
+    iban: str as BankAccount   # where to pay
 
 model llm = replay(lambda req: {"supplier": "Acme", "amount": 25000, "contact": "Ravi Iyer", "iban": "X1"})
 model small = replay(lambda req: {"supplier": "Acme", "amount": 2500, "contact": "Ravi Iyer", "iban": "X1"})

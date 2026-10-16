@@ -194,6 +194,78 @@ every decision record also names. For each agent it lists:
 - what the model is trusted with (proposing values) and what it isn't (deciding anything), with the reviewer's
   warnings: fields a rule uses that no check verifies, and readings nothing checks.
 
+## When the rules change: data-handling policies
+
+Regulations about personal data change. Today a circular may require email addresses to be hashed; next year
+another may allow them in clear but require phone numbers to be hashed. Shio keeps three things apart so that a
+change like this is a policy update, not a code change, and every past decision can still be shown to have
+followed the rule in force on its date.
+
+**1. Programs say what the data is,** never how to store it:
+
+```shio
+type Customer:
+    email: str as Email
+    phone: str as PhoneNumber
+    pan: str as PAN
+```
+
+In a regulated program, a field whose name looks like personal data (email, phone, PAN, Aadhaar, account number,
+date of birth, address…) and has no class is a compile error. Use `as Public` for a field that isn't personal.
+
+**2. Dated policy versions say how each class is stored,** and where the rule comes from. They're written by
+compliance, in `.policy` files:
+
+```
+policy "RBI data handling" version 4:
+    effective 2027-01-01
+    source "RBI circular 2026-27/112, para 5"
+    approved_by "Chief Compliance Officer"
+    Email:       clear
+    PhoneNumber: hashed
+    PAN:         vault, retain 8 years
+    *:           vault                       # any class not listed
+```
+
+| Handling | In the record | In the vault |
+|---|---|---|
+| `clear` | as it is | — |
+| `vault` | its sha256 | kept whole, until erased or its retention ends |
+| `hashed` | its sha256 | nowhere; it is also scrubbed from prompts, raw answers, explanations and the outcome |
+
+Where several policies cover a class, the most protective rule applies. A class that no policy in force covers is
+kept in the vault.
+
+**3. Each decision follows the versions in force on its date, and says which.** Run with
+`--policies policies/` (or `SHIO_POLICIES`). The record carries `data_policy`: each version's name, number,
+effective date, source, approver and sha256, plus the handling applied to every field.
+
+```bash
+shio policy show   --policies policies/ --at 2027-02-01          # what is in force on a date
+shio policy check  app.shio --policies policies/                  # every class has an explicit rule (fails if not)
+shio policy impact app.shio --policies policies/ --at 2027-01-01  # what changes when a new version takes effect
+shio audit     records/ --policies policies/                      # every record against the rule of its date
+shio migrate   records/ --policies policies/ --reason "circular 112"   # re-seal older records under a stricter rule
+shio retention records/ --policies policies/ [--apply]            # vaults past their retention period
+```
+
+- **`impact`** lists every program field whose handling changes, and says which changes can be applied to
+  existing records (tightening) and which apply to new records only (loosening).
+- **`audit`** reports any record:
+  - written with no policy, or under an older version than the one in force on its date;
+  - whose policy version was **edited after the record used it** (versions are immutable once in force; add a
+    new one);
+  - that keeps a field less protected than its rule required;
+  - whose vault has outlived its retention period.
+- **`migrate`** never loosens. It re-seals a record under today's stricter rule and enters a signed migration
+  entry chaining the old hash to the new one. `verify` follows that chain, the record keeps the policy it was
+  decided under, and the migration lists exactly what was tightened. Sign-offs given on the original remain valid.
+- **`retention --apply`** erases expired vaults, each erasure citing the policy that set the period.
+
+The language doesn't read a circular. A person turns it into a new policy version (a model can draft it, and a
+person approves). Shio provides one place for the rule, proof that it's applied everywhere, and a signed record
+of which rule governed each decision.
+
 ## Where the guarantees stop
 
 - **Python is not a sandbox.** Regulated mode makes every route around the boundary a compile error *in Shio code*.
@@ -211,6 +283,11 @@ every decision record also names. For each agent it lists:
   approver their own key (`--key`) and check it with `--signer-pubkey`.
 - **Maker-checker compares names.** Use the same identifiers for `--as`, `SHIO_ACTOR` and the outcome's maker
   fields (an employee id is better than a display name).
+- **Scrubbing a hashed value is exact-match.** Its literal text is removed wherever it appears. A reformatted
+  copy (`+91 98200 12345` written as `9820012345`) is not; values shorter than four characters are hashed in place
+  but not scrubbed from free text.
+- **A policy is only as good as its classes.** Shio checks that classified fields follow the policy; it relies on
+  the program (and the regulated name check) to classify every personal field in the first place.
 - **The decision map is static.** It shows conditions as written in the `.shio` file. It doesn't follow into
   imported Python modules or work out values computed at run time.
 
@@ -228,12 +305,15 @@ counsel and regulator.
 | Audit trails that can't be altered (21 CFR Part 11; SOX) | Hash chain, signatures, `verify`, anchored heads |
 | Reasons for a decision (GDPR transparency; adverse-action notices) | Reason codes in clear with customer-facing text (`shio reasons`), surviving erasure; explanations in the vault |
 | Technical documentation (EU AI Act Art. 11, Annex IV; SR 11-7 documentation) | `shio explain`: the decision map generated from the program, tied to its hash |
-| Erasure and data minimisation (GDPR Art. 17; DPDP Act) | `pii` fields hashed, vault, `shio erase` |
-| Change management | `replay --allow-changed` impact analysis; the program hash in every record |
+| Erasure and data minimisation (GDPR Art. 17; DPDP Act) | Data classes handled per policy (`clear`, `vault`, `hashed`), `shio erase`, `shio retention` |
+| Rules that change over time (RBI, SEBI, DPDP directions) | Dated, sourced policy versions; the version in force stamped into each record; `shio audit`, `policy impact`, `migrate` |
+| Change management | `replay --allow-changed` and `policy impact`; the program and policy hashes in every record |
 
 ## Next
 
 Planned next:
-- versioned policy tables;
+- versioned decision tables (thresholds, limits, approval authorities) on the same dated-version model as data
+  handling;
+- jurisdiction-scoped policies (one program serving several regulators);
 - monitoring of check pass rates;
 - an evidence pack per audit period.

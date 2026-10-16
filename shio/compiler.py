@@ -225,7 +225,9 @@ class Compiler:
         self.tail = []         # module-level helpers emitted after everything else (checks, rules)
         self.agents = set()
         self.trains = []
-        self.regulated = False
+        # known before anything is compiled, so rules that depend on it hold wherever the pragma sits in the file
+        self.regulated = any(line.split("#", 1)[0].strip() == "regulated" and not line[:1].isspace()
+                             for line in self.src)
         self.uses = []         # (names, line, where) used in prompts and checks, verified once the module is known
         self.codes = None      # the program's reason-code table, {CODE: text}, if it declares one
         self.code_uses = []    # (code, line) from `check NAME as CODE`
@@ -426,6 +428,7 @@ class Compiler:
         body, k = self.block(i + 1, 0, raw=True)
         fields = 0
         pii = []
+        classes = {}
         tmeta = {"name": m["name"], "line": line, "fields": []}
         self.meta["types"].append(tmeta)
         for n, raw in enumerate(body, i + 2):
@@ -436,13 +439,23 @@ class Compiler:
                 self.emit(1, s, n)       # docstring: the type's description
                 continue
             code, desc = _strip_comment(s)
-            f = FIELD.match(code) or self.error(n, "expected a field: name: type [pii] [= default]  # description")
+            f = FIELD.match(code) or self.error(n, "expected a field: name: type [as Class | pii] [= default]  # description")
             ftype = f["type"].strip()
-            if re.search(r"\spii$", ftype):       # personal data: hashed in records, kept whole only in the vault
+            cm = re.search(r"\s+as\s+([A-Z][A-Za-z0-9_]*)$", ftype)
+            if cm:                               # what the data is; a policy in force says how it is stored
+                classes[f["name"]] = cm.group(1)
+                ftype = ftype[:cm.start()].strip()
+            elif re.search(r"\spii$", ftype):     # personal data of no particular class: hashed, kept in the vault
                 ftype = ftype[:-3].strip()
                 pii.append(f["name"])
+            elif self.regulated and PERSONAL.search(f["name"]):
+                self.error(n, f"regulated: '{f['name']}' looks like personal data; say what it is with `as Class` "
+                              "(e.g. `as Email`, `as PhoneNumber`) so a data-handling policy can govern it, or "
+                              "`as Public` if it is not personal")
             t = self.type_expr(ftype, n)
-            tmeta["fields"].append({"name": f["name"], "type": ftype, "pii": f["name"] in pii, "description": desc})
+            tmeta["fields"].append({"name": f["name"], "type": ftype, "pii": f["name"] in pii or f["name"] in classes,
+                                    "class": classes.get(f["name"], "PII" if f["name"] in pii else None),
+                                    "description": desc})
             args = ([f["default"]] if f["default"] else []) + ([f"description={desc!r}"] if desc else [])
             self.emit(1, f"{f['name']}: {t}" + (f" = _ShioField({', '.join(args)})" if args else ""), n)
             fields += 1
@@ -450,6 +463,8 @@ class Compiler:
             self.error(line, f"type {m['name']} has no fields")
         if pii:
             self.emit(1, f"__shio_pii__: ClassVar[frozenset] = frozenset({sorted(pii)!r})", line)
+        if classes:
+            self.emit(1, f"__shio_classes__: ClassVar[dict] = {dict(sorted(classes.items()))!r}", line)
         return k
 
     def type_expr(self, t, line):
@@ -820,6 +835,9 @@ REGULATED_NAMES = {"locals", "vars", "globals", "eval", "exec", "compile", "geta
                    "__import__", "breakpoint", "memoryview"}
 REGULATED_MODULES = {"shio", "importlib", "inspect", "ctypes", "gc", "sys", "operator", "pickle", "marshal",
                      "copyreg", "dill", "cloudpickle", "types", "builtins"}
+# field names that hold personal data in most systems: a regulated program must classify them
+PERSONAL = re.compile(r"(?i)(^|_)(e_?mail|phone|mobile|msisdn|pan|aadhaar|aadhar|ssn|passport|dob|birth|address|"
+                      r"iban|account_?(no|number|holder)|holder|full_?name|customer_?name|applicant_?name)($|_)")
 COMPILER_NAMES = {"_ShioType", "_ShioField", "__name__", "__file__"}
 
 

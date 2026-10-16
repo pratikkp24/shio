@@ -1,0 +1,34 @@
+# Customer onboarding under a data-handling policy. The program says what each field is (as Email, as PhoneNumber);
+# the policy in force on the day of the decision says how it is stored (policies/rbi.policy). Run:
+#   shio keygen keys && export SHIO_SIGNING_KEY=keys/shio-signing.key
+#   shio run onboard.shio --traces records --policies policies && shio audit records --policies policies
+
+regulated
+
+type Customer:
+    name: str as FullName      # as printed on the form
+    email: str as Email
+    phone: str as PhoneNumber
+    pan: str as PAN
+    income: float              # monthly income
+
+model clerk = replay(lambda req: {"name": "Asha Rao", "email": "asha.rao@example.in", "phone": "+91 98200 12345",
+                                  "pan": "ABCPS1234K", "income": 58000})
+
+agent onboard(form: str, llm):
+    read c: Customer by llm:
+        Read the customer's details from this form.
+
+        {form}
+    check email_on_form: c.email in form, "email {c.email} is not on the form"
+    check phone_on_form: c.phone in form, "phone {c.phone} is not on the form"
+    rule decision:
+        if c is None:
+            return {"status": "REVIEW", "why": ["the model gave no usable answer"]}
+        if checks.failures():
+            return {"status": "REVIEW", "why": [x["detail"] for x in checks.failures()]}
+        return {"status": "OPEN ACCOUNT", "contact": c.email, "sms": c.phone}
+    return decision
+
+main:
+    return onboard("Asha Rao, asha.rao@example.in, +91 98200 12345, PAN ABCPS1234K, salary 58,000", clerk)

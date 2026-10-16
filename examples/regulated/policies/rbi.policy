@@ -1,0 +1,21 @@
+# Hypothetical circulars, for illustration only: version 3 requires email addresses hashed; version 4 allows them in
+# clear but requires phone numbers hashed. A new regulation is a new version with its effective date; programs do not
+# change. Never edit a version once it is in force.
+
+policy "RBI data handling" version 3:
+    effective 2026-01-01
+    source "Hypothetical RBI circular 2025-26/41, para 3"
+    approved_by "Chief Compliance Officer"
+    FullName:    vault
+    Email:       hashed
+    PhoneNumber: clear
+    PAN:         vault, retain 8 years
+
+policy "RBI data handling" version 4:
+    effective 2027-01-01
+    source "Hypothetical RBI circular 2026-27/112, para 5"
+    approved_by "Chief Compliance Officer"
+    FullName:    vault
+    Email:       clear
+    PhoneNumber: hashed
+    PAN:         vault, retain 8 years

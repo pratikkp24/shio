@@ -155,8 +155,7 @@ def build(path):
         for t in m["types"]:
             b.append(("h3", f"{t['name']} (line {t['line']})"))
             b.append(("table", ["Field", "Type", "Personal data", "Description"],
-                      [[f["name"], f"`{f['type']}`", "**pii**: hashed in records, whole only in the erasable vault"
-                        if f["pii"] else "", f["description"]] for f in t["fields"]]))
+                      [[f["name"], f"`{f['type']}`", _data_class(f), f["description"]] for f in t["fields"]]))
     return b
 
 
@@ -371,3 +370,13 @@ def to_html(blocks):
 def explain(path, fmt="md"):
     blocks = build(path)
     return to_html(blocks) if fmt == "html" else markdown(blocks)
+
+
+def _data_class(f):
+    """How a field's data is governed: by its data class and the data-handling policy in force (shio policy)."""
+    cls = f.get("class")
+    if cls and cls != "PII":
+        return f"**{cls}**: stored as the data-handling policy in force says (`shio policy check`)"
+    if f.get("pii"):
+        return "**pii**: hashed in records, whole only in the erasable vault"
+    return ""
