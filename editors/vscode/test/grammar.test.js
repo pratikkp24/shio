@@ -195,6 +195,14 @@ async function main() {
     expect("policy table", T, 1, "table", "storage.type.table.shio-policy");
     expect("policy table", T, 3, "max_dti", "variable.other.key.shio-policy");
     expect("policy table", T, 3, "0.4", "constant.numeric.shio-policy");
+    const G = await tokenize(fs.readFileSync(path.join(EXAMPLES, "regulated", "policies", "gold.policy"), "utf8"), "source.shio-policy");
+    expect("gold.policy", G, 3, "table", "storage.type.table.shio-policy");
+    expect("gold.policy", G, 7, "max_ltv", "variable.other.key.shio-policy");
+    expect("gold.policy", G, 7, "0.85", "constant.numeric.shio-policy");
+    const GS = fs.readFileSync(path.join(EXAMPLES, "regulated", "gold.shio"), "utf8");
+    const GL = await tokenize(GS);
+    const at = GS.split("\n").findIndex((l) => l.includes("in_force(")) + 1;
+    expect("gold.shio", GL, at, "in_force", "support.function.model.shio");
     const O = await tokenize(fs.readFileSync(path.join(EXAMPLES, "regulated", "onboard.shio"), "utf8"));
     expect("onboard.shio", O, 9, "as", "keyword.other.as.shio");
     expect("onboard.shio", O, 9, "FullName", "entity.name.type.data-class.shio");
