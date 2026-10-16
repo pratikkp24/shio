@@ -177,6 +177,33 @@ async function main() {
   expect(ed, L, 19, "read", "keyword.other.read.shio", { not: true });
   expect(ed, L, 9, "z", "entity.name.variable.reading.shio");
   {
+    const P = await tokenize([
+      "codes:",
+      '    INCOME_NOT_VERIFIED: "We could not verify your income from the documents you sent."',
+      "",
+      "agent assess(statement, llm):",
+      '    signoff PAY when amount > LIMIT by role "finance_controller" and "treasury" maker submitted_by',
+      "    read a: Income from statement by llm:",
+      "        Read the income.",
+      '    check income_ok as INCOME_NOT_VERIFIED: a.quote in statement, "quote {a.quote} not in the statement"',
+      "    check b[row] as DTI_TOO_HIGH after income_ok: a.dti < 0.4",
+    ].join("\n"));
+    const ph = "phase 2 forms";
+    expect(ph, P, 1, "codes", "storage.type.codes.shio");
+    expect(ph, P, 2, "INCOME_NOT_VERIFIED", "constant.other.reason-code.shio");
+    expect(ph, P, 2, "We could not verify your income from the documents you sent.", "string.quoted");
+    expect(ph, P, 5, "signoff", "keyword.other.signoff.shio");
+    expect(ph, P, 5, "PAY", "entity.name.function.signoff.shio");
+    expect(ph, P, 5, "role", "keyword.other.signoff.shio");
+    expect(ph, P, 5, "maker", "keyword.other.signoff.shio");
+    expect(ph, P, 5, "finance_controller", "string.quoted");
+    expect(ph, P, 8, "as", "keyword.other.as.shio");
+    expect(ph, P, 8, "INCOME_NOT_VERIFIED", "constant.other.reason-code.shio");
+    expect(ph, P, 8, "income_ok", "entity.name.function.check.shio");
+    expect(ph, P, 9, "DTI_TOO_HIGH", "constant.other.reason-code.shio");
+    expect(ph, P, 9, "after", "keyword.other.after.shio");
+  }
+  {
     const R = await tokenize("regulated\n\ntype Applicant:\n    name: str pii          # personal data\n    income: float\n");
     expect("regulated", R, 1, "regulated", "keyword.other.regulated.shio");
     expect("regulated", R, 4, "pii", "storage.modifier.pii.shio");

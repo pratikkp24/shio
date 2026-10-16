@@ -7,6 +7,9 @@
   ],
   "patterns": [
     {
+      "include": "#codes-block"
+    },
+    {
       "include": "#regulated-pragma"
     },
     {
@@ -23,6 +26,9 @@
     },
     {
       "include": "#read-incomplete"
+    },
+    {
+      "include": "#signoff-stmt"
     },
     {
       "include": "#check-stmt"
@@ -449,9 +455,9 @@
       ]
     },
     "check-stmt": {
-      "comment": "check NAME[KEY] [after A, B]: EXPR, \"detail with {expr}\"  and  when NAME[KEY]: EXPR",
+      "comment": "check NAME[KEY] [as CODE] [after A, B]: EXPR, \"detail with {expr}\"  and  when NAME[KEY]: EXPR",
       "name": "meta.check.shio",
-      "begin": "^\\s*(check|when)\\s+([A-Za-z_]\\w*)(?:(\\[)(.+?)(\\]))?(?:\\s+(after)\\s+([\\w\\s,]+?))?\\s*(:)",
+      "begin": "^\\s*(check|when)\\s+([A-Za-z_]\\w*)(?:(\\[)(.+?)(\\]))?(?:\\s+(as)\\s+([A-Z][A-Z0-9_]*))?(?:\\s+(after)\\s+([\\w\\s,]+?))?\\s*(:)",
       "beginCaptures": {
         "1": {
           "name": "keyword.other.$1.shio"
@@ -473,9 +479,15 @@
           "name": "punctuation.definition.key.end.shio"
         },
         "6": {
-          "name": "keyword.other.after.shio"
+          "name": "keyword.other.as.shio"
         },
         "7": {
+          "name": "constant.other.reason-code.shio"
+        },
+        "8": {
+          "name": "keyword.other.after.shio"
+        },
+        "9": {
           "patterns": [
             {
               "match": "[A-Za-z_]\\w*",
@@ -487,7 +499,7 @@
             }
           ]
         },
-        "8": {
+        "10": {
           "name": "punctuation.separator.colon.shio"
         }
       },
@@ -657,6 +669,70 @@
           "name": "comment.line.number-sign.shio"
         }
       }
+    },
+    "codes-block": {
+      "comment": "codes: a table of reason codes, CODE: \"the plain-language reason\"",
+      "name": "meta.codes.shio",
+      "begin": "^(codes)\\s*(:)\\s*(#.*)?$",
+      "beginCaptures": {
+        "1": {
+          "name": "storage.type.codes.shio"
+        },
+        "2": {
+          "name": "punctuation.separator.colon.shio"
+        },
+        "3": {
+          "name": "comment.line.number-sign.shio"
+        }
+      },
+      "end": "^(?=\\S)",
+      "patterns": [
+        {
+          "match": "^\\s*(#.*)$",
+          "captures": {
+            "1": {
+              "name": "comment.line.number-sign.shio"
+            }
+          }
+        },
+        {
+          "match": "^\\s+([A-Z][A-Z0-9_]*)\\s*(:)",
+          "captures": {
+            "1": {
+              "name": "constant.other.reason-code.shio"
+            },
+            "2": {
+              "name": "punctuation.separator.colon.shio"
+            }
+          }
+        },
+        {
+          "include": "source.python#expression"
+        }
+      ]
+    },
+    "signoff-stmt": {
+      "comment": "signoff LABEL [when EXPR] by role(s) \"a\" and \"b\" [maker NAME]",
+      "name": "meta.signoff.shio",
+      "begin": "^\\s*(signoff)\\s+(\\*|[A-Za-z_]\\w*)",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.other.signoff.shio"
+        },
+        "2": {
+          "name": "entity.name.function.signoff.shio"
+        }
+      },
+      "end": "$",
+      "patterns": [
+        {
+          "match": "\\b(when|by|roles?|maker)\\b",
+          "name": "keyword.other.signoff.shio"
+        },
+        {
+          "include": "source.python#expression"
+        }
+      ]
     }
   }
 }
