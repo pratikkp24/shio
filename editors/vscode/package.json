@@ -7,7 +7,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Aonami-Labs/shio",
+    "url": "https://github.com/pratikkp24/shio",
     "directory": "editors/vscode"
   },
   "engines": {

@@ -59,7 +59,7 @@ main:
     ids = model({"applied": dict(p, name="Priya R. Sharma"), "card": p, "card_again": p})
     stmt = statement()
     good = covenant_check.statement(31.0, 12.0, 43.0, 168.0, 22.0, 146.0, 8.2)
-    header = "HDFC Bank savings account 50100231187  Account holder: PRIYA R SHARMA"
+    header = "Kestrel Bank savings account 50100231187  Account holder: PRIYA R SHARMA"
     me = model({"app": {"company": "Tidemark Logistics plc"}, "acct": {"name": "PRIYA R SHARMA"}})
     show("Director verified, income and covenants fine", sme_loan(form, card, header, stmt, "Tidemark Logistics", good, "FAC-2209",
          ids, salaries(stmt), model(covenant_check.reads(good)), me))

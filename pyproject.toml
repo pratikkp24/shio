@@ -21,10 +21,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Aonami-Labs/shio"
-Source = "https://github.com/Aonami-Labs/shio"
-Issues = "https://github.com/Aonami-Labs/shio/issues"
-Security = "https://github.com/Aonami-Labs/shio/blob/main/SECURITY.md"
+Homepage = "https://github.com/pratikkp24/shio"
+Source = "https://github.com/pratikkp24/shio"
+Issues = "https://github.com/pratikkp24/shio/issues"
+Security = "https://github.com/pratikkp24/shio/blob/main/SECURITY.md"
 
 [project.optional-dependencies]
 regulated = ["cryptography>=42"]
