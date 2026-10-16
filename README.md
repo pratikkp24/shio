@@ -13,7 +13,7 @@ The compiler enforces it. Compiles to Python.
 
 <br>
 
-[![GitHub Stars](https://img.shields.io/github/stars/pratikkp24/shio?style=flat-square&color=6487D7)](https://github.com/pratikkp24/shio/stargazers)
+[![GitHub Stars](https://img.shields.io/github/stars/pratikkp24/shio?style=flat-square&color=6487D7)](https://github.com/pratikkp24/shio)
 [![License](https://img.shields.io/badge/license-Apache--2.0-111?style=flat-square)](https://github.com/pratikkp24/shio/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://github.com/pratikkp24/shio/blob/main/pyproject.toml)
 [![Tests](https://img.shields.io/badge/tests-252%20passing-2ea44f?style=flat-square)](https://github.com/pratikkp24/shio/tree/main/tests)
