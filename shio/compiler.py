@@ -14,6 +14,12 @@ Shio is Python's expression and statement language plus six forms:
   train  fine-tune an open model on an agent's traces, with its checks as the reward
   main   the entry point for `shio run`
 
+Regulated programs add three more (docs/REGULATED.md):
+
+  check NAME as CODE:   a stable reason code, recorded in clear so the reason survives erasure
+  codes                 the program's table of reason codes and their customer-facing text
+  signoff               an outcome that needs a person: `signoff PAY when amount > 10000 by role "controller"`
+
 The boundary is checked here, before anything runs: inside an agent, a reading's name may appear only in a check,
 a when, a rule, or a later read's `seeing` clause. Any other use (an `if`, an assignment, a call, an f-string, a return)
 is a compile error, because that would let the model's proposal decide.
@@ -29,7 +35,7 @@ PY_COMPOUND = re.compile(r"^(for|async\s+for|if|elif|else|while|with|async\s+wit
 READ = re.compile(r"^read\s+(?P<name>[A-Za-z_]\w*)(?:\[(?P<key>.+?)\])?\s*:\s*(?P<type>.+?)"
                   r"(?:\s+from\s+(?P<src>.+?))?\s+by\s+(?P<model>.+?)(?P<blind>\s+blind)?"
                   r"(?:\s+seeing\s+(?P<seeing>[\w\s,]+?))?\s*:$")
-CHECK = re.compile(r"^(?:check|when)\s+(?P<name>[A-Za-z_]\w*)(?:\[(?P<key>.+?)\])?"
+CHECK = re.compile(r"^(?:check|when)\s+(?P<name>[A-Za-z_]\w*)(?:\[(?P<key>.+?)\])?(?:\s+as\s+(?P<code>[A-Za-z_]\w*))?"
                    r"(?:\s+after\s+(?P<after>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*))?\s*:\s*(?P<body>.+)$", re.S)
 # for item in reading.path:   /   for i, item in enumerate(reading.path):
 EACH = re.compile(r"^for\s+(?:(?P<idx>[A-Za-z_]\w*)\s*,\s*)?(?P<var>[A-Za-z_]\w*)\s+in\s+(?P<enum>enumerate\(\s*)?"
@@ -40,6 +46,11 @@ TYPE = re.compile(r"^type\s+(?P<name>[A-Za-z_]\w*)\s*:$")
 MODEL = re.compile(r"^model\s+(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<expr>.+)$", re.S)
 TRAIN = re.compile(r"^train\s+(?P<agent>[A-Za-z_]\w*)\s+on\s+(?P<traces>.+?)\s+with\s+model\s+(?P<model>.+?)"
                    r"(?:\s+using\s+(?P<method>grpo|sft))?(?:\s+into\s+(?P<out>.+?))?\s*$")
+# signoff PAY [when CONDITION] by role "a" [and "b"] [maker FIELD, FIELD]
+SIGNOFF = re.compile(r"^signoff\s+(?P<label>[A-Za-z_]\w*|\*)(?:\s+when\s+(?P<cond>.+?))?\s+by\s+roles?\s+"
+                     r"(?P<roles>(?:\"[^\"]+\"|'[^']+')(?:\s*(?:,|and)\s*(?:\"[^\"]+\"|'[^']+'))*)"
+                     r"(?:\s+maker\s+(?P<makers>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*))?\s*$", re.S)
+CODE_ROW = re.compile(r"^(?P<code>[A-Za-z_]\w*)\s*:\s*(?P<text>.+)$")
 FIELD = re.compile(r"^(?P<name>[A-Za-z_]\w*)\s*:\s*(?P<type>.+?)(?:\s*=\s*(?P<default>.+))?$")
 
 PRELUDE = """import shio as __shio
@@ -216,6 +227,10 @@ class Compiler:
         self.trains = []
         self.regulated = False
         self.uses = []         # (names, line, where) used in prompts and checks, verified once the module is known
+        self.codes = None      # the program's reason-code table, {CODE: text}, if it declares one
+        self.code_uses = []    # (code, line) from `check NAME as CODE`
+        # what `shio explain` documents: every declaration, read, check, rule and sign-off, with its .shio line
+        self.meta = {"types": [], "models": [], "agents": [], "regulated": False, "codes": {}}
 
     # ---------------- helpers ----------------
     def error(self, line, msg):
@@ -322,6 +337,7 @@ class Compiler:
                 m = MODEL.match(text) or self.error(line, "expected: model NAME = EXPRESSION")
                 self.py(m["expr"], line, "eval")
                 self.emit(0, f"{m['name']} = {m['expr']}", line)
+                self.meta["models"].append({"name": m["name"], "expr": " ".join(m["expr"].split()), "line": line})
                 i = j
             elif word == "agent":
                 i = self.agent_decl(i, j, text)
@@ -334,7 +350,7 @@ class Compiler:
             elif text == "regulated":
                 # the program declares itself regulated: the escape hatches are compile errors, and at run time it
                 # needs a signing key and pinned models (see shio.ledger and docs/REGULATED.md)
-                self.regulated = True
+                self.regulated = self.meta["regulated"] = True
                 self.emit(0, "pass  # regulated", line)
                 i = j
             elif word == "train":
@@ -344,7 +360,9 @@ class Compiler:
                 self.emit(0, f"__shio_train__.append(dict(agent={m['agent']!r}, traces={m['traces']}, model={m['model']}, "
                              f"method={(m['method'] or 'grpo')!r}, out={m['out'] or 'None'}, line={line}))", line)
                 i = j
-            elif word in ("read", "check", "rule", "when"):
+            elif text == "codes:":
+                i = self.codes_decl(i, j)
+            elif word in ("read", "check", "rule", "when", "signoff"):
                 self.error(line, f"'{word}' can only be used inside an agent")
             else:
                 # plain Python (import, def, class, constants): passed through as written
@@ -356,8 +374,43 @@ class Compiler:
         for name, line in self.trains:
             if name not in self.agents:
                 self.error(line, f"train names agent '{name}', which is not defined in this file")
+        if self.codes is not None:
+            for code, line in self.code_uses:
+                if code not in self.codes:
+                    self.error(line, f"reason code {code} is not in the program's codes: table")
+        elif self.regulated and self.code_uses:
+            self.error(self.code_uses[0][1], "a regulated program that uses reason codes must declare them in a "
+                                             "codes: table, with the text a customer is given for each")
         self.out.extend(self.tail)
         return self.out
+
+    def codes_decl(self, i, j):
+        """codes:  /  INCOME_NOT_VERIFIED: "We could not verify your income."  -> __shio_codes__ = {...}"""
+        line = i + 1
+        if self.codes is not None:
+            self.error(line, "a program has one codes: table")
+        body, k = self.block(j, 0)
+        codes = {}
+        for n, raw in enumerate(body, j + 1):
+            s = _strip_comment(raw.strip())[0]
+            if not s:
+                continue
+            m = CODE_ROW.match(s) or self.error(n, 'expected a reason code: CODE: "the text a customer is given"')
+            try:
+                text = ast.literal_eval(m["text"])
+            except (ValueError, SyntaxError):
+                text = None
+            if not isinstance(text, str):
+                # a plain string, never an f-string: the text is the same for everyone, so it holds no personal data
+                self.error(n, f"the text for {m['code']} must be a plain string")
+            if m["code"] in codes:
+                self.error(n, f"reason code {m['code']} is declared twice")
+            codes[m["code"]] = text
+        if not codes:
+            self.error(line, "codes: needs at least one CODE: \"text\" line")
+        self.codes = self.meta["codes"] = codes
+        self.emit(0, f"__shio_codes__ = {codes!r}", line)
+        return k
 
     def scan_block_for_shio(self, i, j):
         _, k = self.block(j, 0)
@@ -373,6 +426,8 @@ class Compiler:
         body, k = self.block(i + 1, 0, raw=True)
         fields = 0
         pii = []
+        tmeta = {"name": m["name"], "line": line, "fields": []}
+        self.meta["types"].append(tmeta)
         for n, raw in enumerate(body, i + 2):
             s = raw.strip()
             if not s or s.startswith("#"):
@@ -387,6 +442,7 @@ class Compiler:
                 ftype = ftype[:-3].strip()
                 pii.append(f["name"])
             t = self.type_expr(ftype, n)
+            tmeta["fields"].append({"name": f["name"], "type": ftype, "pii": f["name"] in pii, "description": desc})
             args = ([f["default"]] if f["default"] else []) + ([f"description={desc!r}"] if desc else [])
             self.emit(1, f"{f['name']}: {t}" + (f" = _ShioField({', '.join(args)})" if args else ""), n)
             fields += 1
@@ -413,12 +469,17 @@ class Compiler:
         self.agents.add(name)
         body, k = self.block(j, 0)
         readings = self.reads_in(body, start=j)
-        self.emit(0, f"@__shio.agent(name={name!r})", line)
+        deco = self.emit(0, f"@__shio.agent(name={name!r})", line)
         start = self.emit(0, f"def {name}({m['params']}):", line)
         if readings:
             self.emit(1, " = ".join(sorted(readings)) + " = None", line)
-        ctx = {"kind": "agent", "readings": readings, "agent": name, "pending": []}
+        ameta = {"name": name, "line": line, "params": " ".join(m["params"].split()), "reads": [], "checks": [],
+                 "rules": [], "signoffs": [], "returns": []}
+        self.meta["agents"].append(ameta)
+        ctx = {"kind": "agent", "readings": readings, "agent": name, "pending": [], "signoffs": [], "meta": ameta}
         k = self.body(j, 0, 1, ctx)
+        if ctx["signoffs"]:
+            self.out[deco][0] = f"@__shio.agent(name={name!r}, signoffs={ctx['signoffs']!r})"
         # now that the whole body is known, give each check and rule the agent locals it uses
         fn_src = "\n".join(t for t, _ in self.out[start:])
         try:
@@ -492,6 +553,14 @@ class Compiler:
                     self.emit(level + 1, " = ".join(inner) + " = None", line)
                 i = self.body(j, ind, level + 1, ctx)
                 continue
+            if word == "signoff":
+                if kind != "agent":
+                    self.error(line, "'signoff' can only be used inside an agent")
+                if level != 1:
+                    self.error(line, "'signoff' belongs at the top of an agent's body, not inside a block")
+                self.stmt_signoff(line, text, level, ctx)
+                i = j
+                continue
             if word in ("read", "check", "rule", "when") and READ.match(text) or CHECK.match(text) and \
                     word in ("check", "when") or RULE.match(text) and word == "rule":
                 if kind != "agent":
@@ -506,6 +575,8 @@ class Compiler:
             if word in ("type", "agent", "model", "train") and re.match(rf"^{word}\s+\w", text):
                 self.error(line, f"'{word}' is only allowed at the top level")
             where = "a return value" if word == "return" else "plain code"
+            if word == "return" and kind == "agent":
+                ctx["meta"]["returns"].append({"expr": text[6:].strip(), "line": line})
             if PY_COMPOUND.match(text) and text.endswith(":"):
                 self.scan(text.rstrip(":") if word in ("if", "elif", "while", "for") else text, line, readings, where)
                 self.emit(level, text, line)
@@ -597,15 +668,19 @@ class Compiler:
         if seeing:
             args.append("context={" + ", ".join(f"{s!r}: {s}" for s in seeing) + "}")
         self.emit(level, f"{m['name']} = __shio.read({', '.join(args)})", line)
+        ctx["meta"]["reads"].append({"name": m["name"], "type": m["type"].strip(), "sources": m["src"],
+                                     "model": m["model"].strip(), "blind": bool(m["blind"]), "seeing": seeing,
+                                     "key": m["key"], "line": line,
+                                     "prompt": textwrap.dedent("\n".join(lines)).strip()})
         return k
 
-    def _pending(self, ctx, kind, name, key, line, free, body, level, reward=True, after=()):
+    def _pending(self, ctx, kind, name, key, line, free, body, level, reward=True, after=(), code=None):
         n = len(ctx["pending"]) + 1
         fn = f"__shio_{kind}_{ctx['agent']}_{name}_{n}"
         ph = f"__SHIO_PENDING_{n}__"
         slot = self.emit(level, f"{name} = {ph}", line)
         deco = f"@__shio.{kind}(name={name!r}" + ("" if reward else ", reward=False") + \
-            (f", after={after!r}" if after else "") + ")"
+            (f", after={after!r}" if after else "") + (f", code={code!r}" if code else "") + ")"
         ctx["pending"].append({"kind": kind, "fn": fn, "placeholder": ph, "slot": slot, "key": key, "line": line,
                                "free": free, "body": body, "decorator": deco})
 
@@ -630,10 +705,47 @@ class Compiler:
             if a not in ctx.setdefault("checks", set()):
                 self.error(line, f"'after {a}': there is no check or when named {a} before this line")
         ctx.setdefault("checks", set()).add(m["name"])
+        is_check = text.startswith("check")
+        if m["code"]:
+            if not is_check:
+                self.error(line, f"a when only steers control flow, so it has no reason code; "
+                                 f"make it a check to give it the code {m['code']}")
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", m["code"]):
+                self.error(line, f"reason code {m['code']} must be in capitals, like INCOME_NOT_VERIFIED")
+            self.code_uses.append((m["code"], line))
+        ctx["meta"]["checks"].append({"name": m["name"], "kind": "check" if is_check else "when", "code": m["code"],
+                                      "key": m["key"], "after": list(after), "expr": " ".join(body.split()),
+                                      "detail": detail, "line": line, "nested": level > 1})
         ret = f"return bool({body})" + (f", (lambda: {detail})" if detail else "")
         self._pending(ctx, "check", m["name"], m["key"], line, list(dict.fromkeys(free)), [(ret, line)], level,
-                      reward=text.startswith("check"), after=after)
+                      reward=is_check, after=after, code=m["code"])
         return j
+
+    def stmt_signoff(self, line, text, level, ctx):
+        """An outcome that needs a person. The condition is over the outcome the rules decided (its fields by name)
+        and the program's constants, never over a reading: the model cannot talk its way past a sign-off."""
+        m = SIGNOFF.match(text) or self.error(
+            line, 'expected: signoff OUTCOME [when CONDITION] by role "ROLE" [and "ROLE"] [maker FIELD, FIELD]')
+        roles = re.findall(r"(['\"])([^'\"]+)\1", m["roles"])
+        roles = list(dict.fromkeys(r for _, r in roles))
+        makers = [x.strip() for x in (m["makers"] or "").split(",") if x.strip()]
+        cond = " ".join(m["cond"].split()) if m["cond"] else None
+        fn = None
+        if cond:
+            self.py(cond, line, "eval")
+            free = [x for x in _free_names(cond, "eval") if x not in dir(builtins)]
+            bad = [x for x in free if x in ctx["readings"]]
+            if bad:
+                self.error(line, f"'{bad[0]}' is a model reading; a sign-off condition is over the decided outcome "
+                                 "(its fields by name) and the program's constants")
+            fn = f"__shio_signoff_{ctx['agent']}_{len(ctx['signoffs']) + 1}"
+            self.emit(0, "", line, self.tail)
+            self.emit(0, f"def {fn}({', '.join(free)}):", line, self.tail)
+            self.emit(1, f"return bool({cond})", line, self.tail)
+        ctx["signoffs"].append({"label": m["label"], "when": cond, "fn": fn, "roles": roles, "makers": makers,
+                                "line": line})
+        ctx["meta"]["signoffs"].append(dict(ctx["signoffs"][-1]))
+        self.emit(level, "pass  # signoff", line)
 
     def stmt_rule(self, i, j, text, ind, level, ctx):
         line = i + 1
@@ -662,11 +774,25 @@ class Compiler:
         body = [(own[k] if not raw else lines[k], n, raw) if lines[k].strip() else ("", n, False)
                 for k, (_, n, raw) in enumerate(body)]
         self._pending(ctx, "rule", m["name"], m["key"], line, free, body, level)
+        ctx["meta"]["rules"].append({"name": m["name"], "key": m["key"], "body": code, "line": line, "body_line": j + 1,
+                                     "nested": level > 1})
         return k
 
 
 def compile_source(source, path="<shio>"):
     """-> (python source text, list mapping each python line to its .shio line)."""
+    py, lines, _ = _compile(source, path)
+    return py, lines
+
+
+def program_map(source, path="<shio>"):
+    """What `shio explain` documents: the program's types, models, agents, reads, checks, rules and sign-offs.
+    The program must compile, so the map never describes a program that cannot run."""
+    _, _, c = _compile(source, path)
+    return c.meta
+
+
+def _compile(source, path):
     c = Compiler(source, path)
     rows = c.compile()
     py = PRELUDE + "\n".join(t for t, _ in rows) + "\n"
@@ -684,7 +810,7 @@ def compile_source(source, path="<shio>"):
                     c.error(line, f"'{n}' is not defined, in {where}{hint}")
     if c.regulated:
         _regulated_scan(c, py, lines)
-    return py, lines
+    return py, lines, c
 
 
 # What a regulated program may not do: every way to reach a reading's value, or the runtime's own state, without

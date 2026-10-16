@@ -5,10 +5,13 @@ model can never settle an outcome on its own: an @agent that returns a Reading i
 """
 import contextvars
 import dataclasses
+import builtins
 import functools
+import getpass
 import hashlib
 import itertools
 import json
+import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -115,6 +118,8 @@ class Run:
         self.started, self.ended = time.time(), None
         self.inputs, self.readings, self.checks, self.rules, self.children = {}, [], [], [], []
         self.sources, self.outcome, self.error = {}, None, None
+        self.codes = {}          # the program's reason-code table
+        self.signoff = None      # set on the top-level run when an outcome needs a person
         if parent is None:
             self._seq = itertools.count()
 
@@ -135,9 +140,24 @@ class Run:
                            "raw": r.raw, "value": to_jsonable(r._value), "error": r.error} for r in self.readings],
              "checks": self.checks, "rules": self.rules, "outcome": to_jsonable(self.outcome), "error": self.error,
              "children": [c.to_dict() for c in self.children]}
+        reasons = self.reasons()
+        if reasons:              # in clear, not in the vault: the reasons for a decision survive erasure
+            d["reasons"] = reasons
+        if self.signoff:
+            d["signoff"] = self.signoff
         if self.parent is None or (self.program or {}).get("sha256") != (self.parent.program or {}).get("sha256"):
             d["program"] = self.program
         return d
+
+
+    def reasons(self):
+        """The reason codes of this run's failed checks, with the customer-facing text the program gives each."""
+        out = []
+        for c in self.checks:
+            if c.get("code") and not c["passed"] and not c.get("skipped"):
+                out.append({"code": c["code"], "text": self.codes.get(c["code"], ""), "check": c["name"],
+                            "key": to_jsonable(c["key"])})
+        return out
 
 
 def _pii_fields(schema):
@@ -281,10 +301,10 @@ def _arg_spec(a):
     return {"opaque": repr(a)[:200]}           # would not come back the same from JSON, so it cannot be replayed
 
 
-def check(fn=None, *, name=None, reward=True, after=()):
+def check(fn=None, *, name=None, reward=True, after=(), code=None):
     """A deterministic test over readings. Returns True/False to the agent, and is recorded in the trace, where it
     doubles as a training reward (reward=False: a `when`, which only steers control flow). The function may return a
-    bool or (bool, detail)."""
+    bool or (bool, detail). code: a stable reason code (`check NAME as CODE`), recorded with the result."""
     def deco(fn):
         ref = f"{fn.__module__}:{fn.__qualname__}"
         cname = name or fn.__name__
@@ -296,7 +316,7 @@ def check(fn=None, *, name=None, reward=True, after=()):
             blocked = [c["name"] for c in run.checks if c["name"] in after and not c["passed"]
                        and (c["key"] is None or key is None or c["key"] == key)]
             if blocked:      # `check b after a`: when a failed, b says nothing either way
-                run.checks.append({"name": cname, "fn": ref, "key": key, "passed": False, "skipped": True,
+                run.checks.append({"name": cname, "fn": ref, "key": key, "code": code, "passed": False, "skipped": True,
                                    "detail": f"not checked: {', '.join(dict.fromkeys(blocked))} failed",
                                    "reward": False, "args": [], "kwargs": {}, "readings": []})
                 return False
@@ -317,7 +337,8 @@ def check(fn=None, *, name=None, reward=True, after=()):
                     detail = f"{cname} failed (its explanation could not be written: {type(e).__name__}: {e})"
                 finally:
                     _open.reset(tok)
-            run.checks.append({"name": cname, "fn": ref, "key": key, "passed": passed, "detail": detail, "reward": reward,
+            run.checks.append({"name": cname, "fn": ref, "key": key, "code": code, "passed": passed, "detail": detail,
+                               "reward": reward,
                                "args": [_arg_spec(a) for a in args],
                                "kwargs": {k: _arg_spec(v) for k, v in kwargs.items()},
                                "readings": [a.id for a in [*args, *kwargs.values()] if isinstance(a, Reading)]})
@@ -379,14 +400,18 @@ def rule(fn=None, *, name=None):
     return wrapper
 
 
-_config = {"trace_dir": "shio-traces", "vault": False, "signer": None}
+_config = {"trace_dir": "shio-traces", "vault": False, "signer": None, "actor": None}
 last_run = {"run": None}        # the most recent top-level run (shio replay reads it)
 
 
-def configure(trace_dir=None, vault=None, signer=None):
+def configure(trace_dir=None, vault=None, signer=None, actor=None):
     """trace_dir=None turns trace files off (not allowed for a regulated program). vault=True keeps free text and
-    personal data in a separate, erasable vault file. signer: a ledger.Signer (default: SHIO_SIGNING_KEY)."""
+    personal data in a separate, erasable vault file. signer: a ledger.Signer (default: SHIO_SIGNING_KEY).
+    actor: who is running the program, recorded as the requester of any sign-off (default: SHIO_ACTOR, or the
+    operating-system user)."""
     _config["trace_dir"] = trace_dir
+    if actor is not None:
+        _config["actor"] = actor or None
     if vault is not None:
         _config["vault"] = vault
     if signer is not None:
@@ -400,13 +425,95 @@ def _signer():
     return _config["signer"] or None
 
 
-def agent(fn=None, *, record=True, name=None):
-    """A unit of work whose readings, checks and rules form one trace. Agents nest; the outermost writes the file."""
+def actor():
+    return _config["actor"] or os.getenv("SHIO_ACTOR") or getpass.getuser()
+
+
+def _labels(outcome):
+    """What an outcome is called, for `signoff LABEL`: the outcome itself if it is a string, else its status,
+    action, decision or outcome field."""
+    if isinstance(outcome, str):
+        return {outcome}
+    if isinstance(outcome, dict):
+        return {v for k, v in outcome.items() if k in ("status", "action", "decision", "outcome") and isinstance(v, str)}
+    return set()
+
+
+def _needs_signoff(decl, outcome, env):
+    """-> None, or why this outcome needs a person. A condition that cannot be evaluated needs one (fail closed)."""
+    if decl["label"] != "*" and decl["label"] not in _labels(outcome):
+        return None
+    if not decl.get("fn"):
+        return f"every {decl['label']} needs sign-off"
+    fn = env.get(decl["fn"])
+    names = fn.__code__.co_varnames[:fn.__code__.co_argcount]
+    fields = outcome if isinstance(outcome, dict) else {}
+    args, missing = [], []
+    for n in names:
+        if n in fields:
+            args.append(fields[n])
+        elif n in env:
+            args.append(env[n])
+        elif hasattr(builtins, n):
+            args.append(getattr(builtins, n))
+        else:
+            missing.append(n)
+    if missing:
+        return f"{decl['when']}: could not be evaluated (the outcome has no {', '.join(missing)}), so a person decides"
+    try:
+        hit = fn(*args)
+    except Exception as e:
+        return f"{decl['when']}: could not be evaluated ({type(e).__name__}: {e}), so a person decides"
+    if not hit:
+        return None
+    shown = [f"{n}={v!r}" for n, v in zip(names, args) if not callable(v)]
+    return decl["when"] + (f" ({', '.join(shown)})" if shown else "")
+
+
+def _makers(decls, outcome):
+    names = [actor()]
+    fields = outcome if isinstance(outcome, dict) else {}
+    for f in ["maker"] + [m for d in decls for m in d.get("makers", [])]:
+        v = fields.get(f)
+        for x in (v if isinstance(v, (list, tuple)) else [v]):
+            if x not in (None, ""):
+                names.append(str(x))
+    return list(dict.fromkeys(names))
+
+
+def _apply_signoffs(run, signoffs, outcome, env):
+    """An outcome a `signoff` names comes back as PENDING; the request goes to the top-level run's record, where
+    `shio signoff` answers it. From a nested agent the parent sees PENDING too, so wrapping cannot skip a sign-off."""
+    hits = [(d, why) for d in signoffs for why in [_needs_signoff(d, outcome, env)] if why]
+    if not hits:
+        return outcome
+    roles = list(dict.fromkeys(r for d, _ in hits for r in d["roles"]))
+    request = {"agent": run.agent, "labels": list(dict.fromkeys(d["label"] for d, _ in hits)), "roles": roles,
+               "because": [why for _, why in hits], "lines": [d["line"] for d, _ in hits],
+               "requested_by": actor(), "makers": _makers([d for d, _ in hits], outcome),
+               "decided": to_jsonable(outcome)}
+    root = run.root
+    if root.signoff:             # several agents in one run need sign-off: one request, every role
+        prev = root.signoff
+        request = {**prev, "roles": list(dict.fromkeys(prev["roles"] + roles)),
+                   "labels": list(dict.fromkeys(prev["labels"] + request["labels"])),
+                   "because": prev["because"] + request["because"], "lines": prev["lines"] + request["lines"],
+                   "makers": list(dict.fromkeys(prev["makers"] + request["makers"])),
+                   "decided": request["decided"] if run is root else prev["decided"]}
+    root.signoff = request
+    return {"status": "PENDING", "signoff": {"roles": roles, "because": [why for _, why in hits]},
+            "decided": to_jsonable(outcome)}
+
+
+def agent(fn=None, *, record=True, name=None, signoffs=()):
+    """A unit of work whose readings, checks and rules form one trace. Agents nest; the outermost writes the file.
+    signoffs: the outcomes that need a person (`signoff` in Shio); such an outcome is returned as PENDING."""
     def deco(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             parent = _run.get()
             run = Run(name or fn.__qualname__, parent, fn.__globals__.get("__shio_program__"))
+            run.codes = fn.__globals__.get("__shio_codes__") or {}
             if parent is None and run.regulated and not wrapper.replaying:
                 if not (record and _config["trace_dir"]):
                     raise RegulatedError(f"{run.program['path']} is regulated: every run must be recorded "
@@ -421,6 +528,14 @@ def agent(fn=None, *, record=True, name=None):
                 out = fn(*args, **kwargs)
                 if _has_reading(out):
                     raise BoundaryError(f"agent {fn.__name__} returned a model proposal; settle it with a @rule first.")
+                if signoffs:
+                    out = _apply_signoffs(run, signoffs, out, fn.__globals__)
+                if parent is None and run.signoff and not (isinstance(out, dict) and out.get("status") == "PENDING"):
+                    # a nested agent needed sign-off and this one decided anyway: it still waits for the person
+                    out = {"status": "PENDING", "signoff": {"roles": run.signoff["roles"],
+                                                            "because": run.signoff["because"]},
+                           "decided": to_jsonable(out)}
+                    run.signoff["decided"] = out["decided"]
                 run.outcome = out
                 return out
             except Exception as e:

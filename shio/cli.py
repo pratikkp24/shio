@@ -1,4 +1,4 @@
-"""shio run | check | build | train | show | new | keygen | verify | replay | erase"""
+"""shio run | check | build | train | show | new | keygen | verify | replay | erase | signoff | reasons | explain"""
 import argparse
 import json
 import subprocess
@@ -14,6 +14,8 @@ from .core import BoundaryError, RegulatedError, configure
 def _run(a):
     if a.traces:
         configure(a.traces)
+    if a.actor:
+        configure(_config_dir(), actor=a.actor)
     mod = load(a.file, argv=a.args)
     main = getattr(mod, "__shio_main__", None)
     if main is None:
@@ -21,6 +23,11 @@ def _run(a):
     out = main()
     if out is not None:
         print(json.dumps(out, indent=1, default=str) if not isinstance(out, str) else out)
+
+
+def _config_dir():
+    from .core import _config
+    return _config["trace_dir"]
 
 
 def _check(a):
@@ -139,7 +146,8 @@ def _verify(a):
     from .ledger import load_public_key, verify
     pub = load_public_key(a.pubkey) if a.pubkey else None
     secret = a.secret.encode() if a.secret else None
-    ok, report, _ = verify(a.folder, pub, secret, a.head)
+    people = [load_public_key(k) for k in a.signer_pubkey or []]
+    ok, report, _ = verify(a.folder, pub, secret, a.head, people)
     print("\n".join(report))
     print("VERIFIED" if ok else "NOT VERIFIED")
     sys.exit(0 if ok else 1)
@@ -159,6 +167,70 @@ def _erase(a):
     print(f"erased the vault of {Path(a.record).name}; ledger entry {e['seq']} records it ({a.reason})")
 
 
+def _when(t):
+    import time
+    return time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(t))
+
+
+def _signoff(a):
+    from .core import _signer
+    from .ledger import SignoffRefused, load_private_key, signoff, status
+    req, state, entries = status(a.record)
+    if not a.signer:
+        if req is None:
+            print(f"{Path(a.record).name}: decided without sign-off")
+            return
+        print(f"{Path(a.record).name}: {state}")
+        print(f"  needs: {' and '.join(req['roles'])}   because: {'; '.join(req['because'])}")
+        print(f"  requested by {req['requested_by']}; can't be signed by: {', '.join(req['makers'])}")
+        print(f"  decided outcome: {json.dumps(req['decided'], default=str)}")
+        for e in entries:
+            print(f"  {e['decision']} by {e['signer']} ({e['role']}) {_when(e['time'])}: {e['meaning']}")
+        return
+    if not a.role or not a.meaning:
+        sys.exit("shio signoff RECORD --as NAME needs --role and --meaning")
+    key = load_private_key(a.key) if a.key else None
+    try:
+        e, state = signoff(a.record, a.signer, a.role, a.meaning, _signer(), a.reject, key)
+    except SignoffRefused as err:
+        sys.exit(f"sign-off refused: {err}")
+    print(f"{e['decision']} by {e['signer']} ({e['role']}), ledger entry {e['seq']}: \"{e['meaning']}\"")
+    print(f"  signed record {e['file']} sha256 {e['record_sha256'][:16]}…")
+    print(f"  decision is now {state}")
+
+
+def _reasons(a):
+    from .ledger import status
+    rec = json.loads(Path(a.record).read_text())
+    req, state, entries = status(a.record)
+    out = rec.get("outcome")
+    print(f"{Path(a.record).name}: {rec.get('agent')}")
+    print(f"  outcome: {json.dumps(out, default=str)}")
+    if req:
+        print(f"  sign-off: {state}" + "".join(f"; {e['decision']} by {e['signer']} ({e['role']})" for e in entries))
+    reasons = rec.get("reasons") or []
+    if not reasons:
+        failed = [c["name"] for c in rec.get("checks", []) if not c["passed"] and not c.get("skipped")
+                  and c.get("reward", True)]
+        print("  reasons: none coded" + (f" (failed checks: {', '.join(failed)})" if failed else ""))
+        return
+    print("  reasons:")
+    for r in reasons:
+        key = f"[{r['key']}]" if r.get("key") is not None else ""
+        print(f"    {r['code']}{key}: {r['text'] or '(no text in the codes table)'}")
+
+
+def _explain(a):
+    from .explain import explain
+    fmt = "html" if a.html or (a.out or "").endswith(".html") else "md"
+    text = explain(a.file, fmt)
+    if a.out:
+        Path(a.out).write_text(text)
+        print(f"wrote {a.out}")
+    else:
+        print(text, end="")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="shio", description="Shio: the model reads, code decides.")
     p.add_argument("--version", action="version", version=f"shio {__version__}")
@@ -167,6 +239,8 @@ def main(argv=None):
     r.add_argument("file")
     r.add_argument("args", nargs="*")
     r.add_argument("--traces", help="where run traces are written (default ./shio-traces)")
+    r.add_argument("--as", dest="actor", help="who is running it: the requester of any sign-off (default: SHIO_ACTOR "
+                                              "or your login)")
     r.set_defaults(fn=_run)
     c = sub.add_parser("check", help="compile and check the read/rule boundary, without running")
     c.add_argument("file")
@@ -193,6 +267,8 @@ def main(argv=None):
     v.add_argument("--pubkey", help="the public key from `shio keygen`, to check Ed25519 signatures")
     v.add_argument("--secret", help="the HMAC secret, for records signed with hmac:")
     v.add_argument("--head", help="the head hash anchored earlier; fails if the chain no longer ends there")
+    v.add_argument("--signer-pubkey", action="append", help="a person's public key, to check sign-offs they signed "
+                                                            "with their own key (repeatable)")
     v.set_defaults(fn=_verify)
     rp = sub.add_parser("replay", help="re-run a recorded decision from its recorded model answers and compare")
     rp.add_argument("record")
@@ -203,6 +279,22 @@ def main(argv=None):
     e.add_argument("record")
     e.add_argument("--reason", required=True)
     e.set_defaults(fn=_erase)
+    so = sub.add_parser("signoff", help="sign a pending decision (or, without --as, show what it is waiting for)")
+    so.add_argument("record")
+    so.add_argument("--as", dest="signer", help="the person signing")
+    so.add_argument("--role", help="the role they sign in; must be one the decision asks for")
+    so.add_argument("--meaning", help='what the signature means, e.g. "approved for payment"')
+    so.add_argument("--reject", action="store_true", help="sign a rejection instead of an approval")
+    so.add_argument("--key", help="the signer's own Ed25519 private key (from shio keygen), to sign as themselves")
+    so.set_defaults(fn=_signoff)
+    rs = sub.add_parser("reasons", help="a decision's reason codes and the customer-facing text for each")
+    rs.add_argument("record")
+    rs.set_defaults(fn=_reasons)
+    ex = sub.add_parser("explain", help="write a program's decision map: the documentation a model-risk team asks for")
+    ex.add_argument("file")
+    ex.add_argument("-o", "--out", help="write it to a file (.md or .html)")
+    ex.add_argument("--html", action="store_true", help="HTML instead of Markdown")
+    ex.set_defaults(fn=_explain)
     s = sub.add_parser("show", help="summarise trace files")
     s.add_argument("traces", nargs="+")
     s.set_defaults(fn=_show)

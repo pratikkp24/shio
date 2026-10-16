@@ -10,6 +10,11 @@ Free text (prompts, sources, raw model answers, check explanations, inputs) can 
 record keeps a sha256 of each item, so it still proves what was there. Erasing a vault (`shio erase`) is itself an
 entry in the chain. `shio verify` checks all of it and prints the chain's head hash, which should be anchored
 somewhere outside the folder (a ticket, a WORM bucket): a chain can only be trusted as far as its head is.
+
+A decision that needs a person (`signoff` in Shio) is recorded as PENDING with a sign-off request. `shio signoff`
+answers it with a signed entry in the same chain: who, in which role, when, what their signature means, and the hash
+of the record they saw. Maker-checker holds: the signer can't be the requester, anyone the record names as a maker,
+or someone who already signed it.
 """
 import base64
 import contextlib
@@ -265,15 +270,119 @@ def load_vault(record_path, record=None):
     return json.loads(p.read_text()) if p.exists() else None
 
 
+# ---------------- sign-off ----------------
+SIGNOFF_FIELDS = ("kind", "file", "record_sha256", "signer", "role", "meaning", "decision", "time")
+
+
+class SignoffRefused(ValueError):
+    pass
+
+
+def _same_person(a, b):
+    return " ".join(str(a).split()).casefold() == " ".join(str(b).split()).casefold()
+
+
+def signoff_state(request, entries):
+    """-> (status, problems) for a sign-off request and the sign-off entries that answer it, in ledger order.
+    status: PENDING, APPROVED or REJECTED. problems: sign-offs that break maker-checker or the request."""
+    problems, signed, covered, status = [], [], {}, "PENDING"
+    for e in entries:
+        who = f"sign-off by {e.get('signer')} ({e.get('role')})"
+        if status != "PENDING":
+            problems.append(f"{who} after the decision was already {status}")
+            continue
+        if e.get("role") not in request["roles"]:
+            problems.append(f"{who}: the request asks for {', '.join(request['roles'])}, not {e.get('role')}")
+            continue
+        if any(_same_person(e.get("signer"), m) for m in request.get("makers", [])):
+            problems.append(f"{who} breaks maker-checker: {e.get('signer')} requested or made this decision")
+            continue
+        if any(_same_person(e.get("signer"), s) for s in signed):
+            problems.append(f"{who} breaks maker-checker: {e.get('signer')} has already signed this decision")
+            continue
+        if e.get("role") in covered:
+            problems.append(f"{who}: the {e.get('role')} sign-off was already given by {covered[e['role']]}")
+            continue
+        signed.append(e.get("signer"))
+        covered[e["role"]] = e.get("signer")
+        if e.get("decision") == "rejected":
+            status = "REJECTED"
+        elif all(r in covered for r in request["roles"]):
+            status = "APPROVED"
+    return status, problems
+
+
+def _record_entry(entries, name):
+    for e in entries:
+        if e.get("kind", "record") == "record" and e.get("file") == name:
+            return e
+    return None
+
+
+def status(record_path):
+    """-> (request or None, status, the sign-off entries) for one record."""
+    record_path = Path(record_path)
+    rec = json.loads(record_path.read_text())
+    req = rec.get("signoff")
+    entries = [e for e in _entries(record_path.parent) if e.get("kind") == "signoff" and e.get("file") == record_path.name]
+    if not req:
+        return None, "DECIDED", entries
+    return req, signoff_state(req, entries)[0], entries
+
+
+def signoff(record_path, signer_name, role, meaning, signer=None, reject=False, personal_key=None):
+    """A person signs a pending decision. Refused (SignoffRefused) if the record is not pending, has been changed
+    since it was entered in the ledger, asks for another role, or the person is its maker or has signed it already.
+    signer: the ledger's key, which signs the entry like any other. personal_key: the person's own Ed25519 key
+    (optional), which signs it too, so the sign-off can be tied to them and not only to the system."""
+    record_path = Path(record_path)
+    folder = record_path.parent
+    if not signer_name.strip() or not role.strip() or not meaning.strip():
+        raise SignoffRefused("a sign-off needs the signer's name, their role and what the signature means")
+    with _locked(folder):
+        rec = json.loads(record_path.read_text())
+        req = rec.get("signoff")
+        if not req:
+            raise SignoffRefused(f"{record_path.name} does not need sign-off: its outcome was decided without a person")
+        entries = _entries(folder)
+        entry = _record_entry(entries, record_path.name)
+        if entry is None:
+            raise SignoffRefused(f"{record_path.name} is not in the ledger")
+        if "integrity" not in rec or record_hash(rec) != entry["sha256"]:
+            raise SignoffRefused(f"{record_path.name} has changed since it was entered in the ledger: not signing it")
+        if rec.get("integrity", {}).get("signature") and signer is None:
+            raise SignoffRefused("the record is signed, so its sign-off must be too: set SHIO_SIGNING_KEY")
+        prior = [e for e in entries if e.get("kind") == "signoff" and e.get("file") == record_path.name]
+        event = {"kind": "signoff", "file": record_path.name, "record_sha256": entry["sha256"], "signer": signer_name,
+                 "role": role, "meaning": meaning, "decision": "rejected" if reject else "approved", "time": time.time()}
+        state, problems = signoff_state(req, prior + [event])
+        new = [p for p in problems if p not in signoff_state(req, prior)[1]]
+        if new:
+            raise SignoffRefused(new[0])
+        event["sha256"] = sha256({k: event[k] for k in SIGNOFF_FIELDS})
+        if personal_key is not None:
+            event["signer_key_id"] = key_id(personal_key.public_key())
+            event["signer_signature"] = base64.b64encode(personal_key.sign(event["sha256"].encode())).decode()
+        _append(folder, event, signer)
+        return event, state
+
+
+def load_private_key(path):
+    from cryptography.hazmat.primitives import serialization
+    return serialization.load_pem_private_key(Path(path).expanduser().read_bytes(), password=None)
+
+
 # ---------------- verifying ----------------
-def verify(folder, public_key=None, secret=None, head=None):
-    """-> (ok, lines of report, head hash)."""
+def verify(folder, public_key=None, secret=None, head=None, signer_keys=()):
+    """-> (ok, lines of report, head hash). signer_keys: public keys of people who sign off with their own key."""
     folder = Path(folder)
     entries = _entries(folder)
     problems, notes = [], []
     if not entries:
         return False, [f"{folder}: no ledger"], None
     erased = {e["file"]: e for e in entries if e.get("kind") == "erasure"}
+    people = {key_id(k): k for k in signer_keys}
+    signoffs, requests, record_hashes = {}, {}, {}
     seen = set()
     prev = GENESIS
     sig_states = {}
@@ -293,8 +402,30 @@ def verify(folder, public_key=None, secret=None, head=None):
             if sha256(body) != e["sha256"]:
                 problems.append(f"{where}: erasure entry edited")
             continue
+        if e.get("kind") == "signoff":
+            if sha256({k: e.get(k) for k in SIGNOFF_FIELDS}) != e.get("sha256"):
+                problems.append(f"{where}: sign-off entry edited")
+                continue
+            if e.get("file") not in record_hashes:
+                problems.append(f"{where}: sign-off for {e.get('file')}, which is not an earlier record in the ledger")
+                continue
+            if e.get("record_sha256") != record_hashes[e["file"]]:
+                problems.append(f"{where}: sign-off by {e.get('signer')} is for a different version of {e['file']}")
+            if e.get("signer_key_id"):
+                k = people.get(e["signer_key_id"])
+                if k is None:
+                    notes.append(f"{e['file']}: {e.get('signer')}'s own signature not checked (no --signer-pubkey "
+                                 f"for {e['signer_key_id']})")
+                else:
+                    try:
+                        k.verify(base64.b64decode(e["signer_signature"]), e["sha256"].encode())
+                    except Exception:
+                        problems.append(f"{where}: BAD SIGNATURE from {e.get('signer')}'s own key")
+            signoffs.setdefault(e["file"], []).append(e)
+            continue
         path = folder / e["file"]
         seen.add(e["file"])
+        record_hashes[e["file"]] = e.get("sha256")
         if not path.exists():
             problems.append(f"{e['file']}: MISSING (in the ledger, not on disk)")
             continue
@@ -306,6 +437,8 @@ def verify(folder, public_key=None, secret=None, head=None):
         if actual != e["sha256"] or integ.get("sha256") != e["sha256"]:
             problems.append(f"{e['file']}: TAMPERED (its content no longer matches the hash in the ledger)")
             continue
+        if rec.get("signoff"):
+            requests[e["file"]] = rec["signoff"]
         v = rec.get("vault")
         if v:
             vp = folder / v["file"]
@@ -319,13 +452,25 @@ def verify(folder, public_key=None, secret=None, head=None):
                              f"({er['reason']})")
             else:
                 problems.append(f"{v['file']}: vault MISSING with no erasure entry")
+    pending = 0
+    for name, req in requests.items():
+        state, bad = signoff_state(req, signoffs.get(name, []))
+        problems += [f"{name}: {b}" for b in bad]
+        if state == "PENDING":
+            pending += 1
+            given = {s["role"] for s in signoffs.get(name, [])}
+            notes.append(f"{name}: PENDING sign-off by " + ", ".join(r for r in req["roles"] if r not in given))
+    for name in signoffs:
+        if name not in requests and name in record_hashes and (folder / name).exists():
+            problems.append(f"{name}: signed off, but its record asks for no sign-off")
     on_disk = {p.name for p in folder.glob("*.json")}
     for extra in sorted(on_disk - seen):
         problems.append(f"{extra}: not in the ledger (written outside it, or a ledger entry was removed)")
     head_hash = entries[-1]["sha256"]
     if head and not head_hash.startswith(head):
         problems.append(f"head is {head_hash[:16]}…, not the anchored {head[:16]}… (entries were added or replaced)")
-    report = [f"{len(entries)} ledger entries, {len(seen)} records, {len(erased)} erasures",
+    report = [f"{len(entries)} ledger entries, {len(seen)} records, {len(erased)} erasures, "
+              f"{sum(len(v) for v in signoffs.values())} sign-offs, {pending} pending",
               "signatures: " + ", ".join(f"{n} {s}" for s, n in sig_states.items())]
     report += [f"  note: {n}" for n in notes]
     report += [f"  PROBLEM: {p}" for p in problems]
