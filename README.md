@@ -201,6 +201,7 @@ shio show shio-traces/*.json      # readings, checks passed and failed, per run
 shio train program.shio [--go]    # traces -> sft.jsonl, grpo.jsonl and a TRL script
 shio keygen | verify | replay | erase   # signed decision records (see docs/REGULATED.md)
 shio evidence records/ --from DATE --to DATE --policies policies/ -o pack/   # an audit evidence pack; --check pack/ to verify it
+shio vaultkey [folder]            # a key to encrypt personal-data vaults at rest (AES-256-GCM; set SHIO_VAULT_KEY)
 shio signoff | reasons | explain        # human sign-off, reason codes, the decision map
 ```
 
