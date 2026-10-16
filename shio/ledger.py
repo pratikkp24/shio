@@ -359,7 +359,8 @@ def _tighter(record, handling):
 
 def migrate(folder, handling, reason, signer=None, dry_run=False):
     """Re-seal records written under a less protective rule than `handling` (never a more permissive one). Each
-    becomes a signed migration entry chaining the record's old hash to its new one; verify follows the chain."""
+    becomes a signed migration entry chaining the record's old hash to its new one; verify follows the chain.
+    A handling resolved for a jurisdiction (Store.handling(on, "IN")) re-seals only that jurisdiction's records."""
     import copy
     folder = Path(folder)
     done = []
@@ -371,6 +372,9 @@ def migrate(folder, handling, reason, signer=None, dry_run=False):
             if not path.exists():
                 continue
             rec = json.loads(path.read_text())
+            scope = getattr(handling, "jurisdiction", None)
+            if scope is not None and rec.get("jurisdiction") != scope:    # another regulator's records
+                continue
             changes = _tighter(rec, handling)
             if not changes:
                 continue

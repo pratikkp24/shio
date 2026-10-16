@@ -10,9 +10,12 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+import datetime as dt
+
 from . import core
 from .core import Source
 from .ledger import load_vault, merge
+from .policy import PolicyError
 
 
 class Divergence(Exception):
@@ -79,9 +82,10 @@ def _summary(run):
     return checks, rules, json.dumps(run.get("outcome"), sort_keys=True, default=str)
 
 
-def replay(record_path, program=None, allow_changed=False, policies=None, at=None):
+def replay(record_path, program=None, allow_changed=False, policies=None, at=None, jurisdiction=None):
     """-> (reproduced: bool, report lines). Decision tables come from the record (the values it used), unless
     `policies` (a policy.Store) is given: then the tables in force on `at` (default: the decision's date) are used,
+    for the record's jurisdiction (or `jurisdiction`, to see what another regulator's limits would have decided),
     which shows what a proposed or new limit would have decided."""
     from . import load
     record_path = Path(record_path)
@@ -111,9 +115,14 @@ def replay(record_path, program=None, allow_changed=False, policies=None, at=Non
         kwargs = _decode(record["inputs"].get("kwargs", {}), model)
     except Divergence as e:
         return False, [str(e)]
-    import datetime as dt
-    from .policy import PolicyError
-    saved = {k: core._config.get(k) for k in ("table_override", "as_of", "policies")}
+    saved = {k: core._config.get(k) for k in ("table_override", "as_of", "policies", "jurisdiction")}
+    scope = jurisdiction or record.get("jurisdiction")
+    if policies is not None:
+        try:
+            scope = policies.require_jurisdiction(scope, f"replaying {record_path.name} under {policies.where or 'them'}")
+        except PolicyError as e:
+            return False, [str(e)]
+    core._config["jurisdiction"] = scope
     if policies is None:
         core._config["table_override"] = {t["name"]: {"stamp": {k: v for k, v in t.items() if k != "used"},
                                                       "rows": t.get("used") or {}}
@@ -139,7 +148,8 @@ def replay(record_path, program=None, allow_changed=False, policies=None, at=Non
     table_note = [f"  table {t['name']!r}: recorded v{t['version']}, now v{used[t['name']]['version']}"
                   for t in record.get("tables") or [] if t["name"] in used and used[t["name"]]["version"] != t["version"]]
     lines = [f"replayed {record_path.name} with {path.name}" + (" (CHANGED since the decision)" if changed else "")
-             + (f" under the policies in force on {as_of}" if policies is not None else ""),
+             + (f" under the policies in force on {as_of}" + (f" for {scope}" if scope else "")
+                if policies is not None else ""),
              f"  {model.used} recorded model answers used, {len(c1)} checks, {len(r1)} rules"] + table_note
     diffs = []
     if c0 != c1:

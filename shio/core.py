@@ -121,6 +121,7 @@ class Run:
         self.sources, self.outcome, self.error = {}, None, None
         self.codes = {}          # the program's reason-code table
         self.signoff = None      # set on the top-level run when an outcome needs a person
+        self.jurisdiction = None # the top-level run's: which regulator's rules govern this decision
         if parent is None:
             self._seq = itertools.count()
             self.tables = {}       # decision tables read in this decision: name -> {stamp, used values}
@@ -150,6 +151,8 @@ class Run:
             d["signoff"] = self.signoff
         if self.parent is None or (self.program or {}).get("sha256") != (self.parent.program or {}).get("sha256"):
             d["program"] = self.program
+        if self.parent is None and self.jurisdiction:
+            d["jurisdiction"] = self.jurisdiction
         if self.parent is None and self.tables:
             d["tables"] = [{**t["stamp"], "used": dict(sorted(t["used"].items()))} for t in self.tables.values()]
         return d
@@ -414,16 +417,20 @@ def rule(fn=None, *, name=None):
 
 
 _config = {"trace_dir": "shio-traces", "vault": False, "signer": None, "actor": None, "policies": None,
-           "table_override": None, "as_of": None}
+           "table_override": None, "as_of": None, "jurisdiction": None}
 last_run = {"run": None}        # the most recent top-level run (shio replay reads it)
 
 
-def configure(trace_dir=None, vault=None, signer=None, actor=None, policies=None):
+def configure(trace_dir=None, vault=None, signer=None, actor=None, policies=None, jurisdiction=None):
     """trace_dir=None turns trace files off (not allowed for a regulated program). vault=True keeps free text and
     personal data in a separate, erasable vault file. signer: a ledger.Signer (default: SHIO_SIGNING_KEY).
     actor: who is running the program, recorded as the requester of any sign-off (default: SHIO_ACTOR, or the
-    operating-system user)."""
+    operating-system user). jurisdiction: whose rules govern each decision, e.g. "IN" (default: SHIO_JURISDICTION;
+    "" clears it); policy and table versions with `applies_to` are resolved for it."""
     _config["trace_dir"] = trace_dir
+    if jurisdiction is not None:
+        from .policy import jurisdiction_code
+        _config["jurisdiction"] = jurisdiction_code(jurisdiction) if jurisdiction else None
     if policies is not None:      # a folder of .policy files, a policy.Store, or False for none
         from .policy import Store
         _config["policies"] = policies if policies is False or isinstance(policies, Store) else Store.load(policies)
@@ -442,6 +449,22 @@ def _policies():
         from .policy import Store
         _config["policies"] = Store.load(path) if path else False
     return _config["policies"] or None
+
+
+def _jurisdiction(run):
+    """The jurisdiction a top-level run decides for. With jurisdiction-scoped policies configured, a run without one
+    (or with one no version is scoped to) is refused rather than resolved by guessing."""
+    from .policy import PolicyError, jurisdiction_code
+    j = _config["jurisdiction"] or os.getenv("SHIO_JURISDICTION") or None
+    store = _policies()
+    try:
+        if store is None:
+            return jurisdiction_code(j) if j else None
+        return store.require_jurisdiction(j, f"a decision by {run.agent}")
+    except PolicyError as e:
+        if run.regulated:
+            raise RegulatedError(f"{run.program['path']} is regulated: {e}") from None
+        raise
 
 
 class InForce:
@@ -482,9 +505,10 @@ def in_force(name):
         else:
             on = _config.get("as_of") or datetime.date.fromtimestamp(root.started)
             store = _policies()
-            t = store.table(name, on) if store else None
+            t = store.table(name, on, root.jurisdiction) if store else None
             if t is None:
                 raise PolicyError(f"no version of table {name!r} is in force on {on}"
+                                  + (f" for {root.jurisdiction}" if root.jurisdiction else "")
                                   + ("" if store else " (no policies configured: --policies or SHIO_POLICIES)"))
             stamp, rows = t.stamp(), t.rows
         root.tables[name] = {"stamp": stamp, "rows": rows, "used": {}}
@@ -595,6 +619,8 @@ def agent(fn=None, *, record=True, name=None, signoffs=()):
                 if not _signer():
                     raise RegulatedError(f"{run.program['path']} is regulated: set SHIO_SIGNING_KEY to a key from "
                                          "`shio keygen` (or hmac:<secret>) so every record is signed")
+            if parent is None:
+                run.jurisdiction = _config["jurisdiction"] if wrapper.replaying else _jurisdiction(run)
             run.inputs = {"args": [_encode_input(a) for a in args if not _has_reading(a)],
                           "kwargs": {k: _encode_input(v) for k, v in kwargs.items() if not _has_reading(v)}}
             tok = _run.set(run)
@@ -625,7 +651,8 @@ def agent(fn=None, *, record=True, name=None, signoffs=()):
                     if record and _config["trace_dir"] and not wrapper.replaying:
                         from .trace import write
                         store = _policies()
-                        handling = store.handling(datetime.date.fromtimestamp(run.started)) if store else None
+                        handling = store.handling(datetime.date.fromtimestamp(run.started),
+                                                  run.jurisdiction) if store else None
                         wrapper.last_trace = write(run, _config["trace_dir"],
                                                    vault=_config["vault"] or run.regulated or handling is not None,
                                                    signer=_signer(), handling=handling)

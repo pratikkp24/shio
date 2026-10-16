@@ -1,4 +1,5 @@
-"""shio run | check | build | train | show | new | keygen | verify | replay | erase | signoff | reasons | explain"""
+"""shio run | check | build | train | show | new | keygen | verify | replay | erase | signoff | reasons | explain |
+policy | audit | migrate | retention | evidence | monitor"""
 import argparse
 import json
 import subprocess
@@ -19,6 +20,8 @@ def _run(a):
         configure(_config_dir(), actor=a.actor)
     if a.policies:
         configure(_config_dir(), policies=a.policies)
+    if a.jurisdiction:
+        configure(_config_dir(), jurisdiction=a.jurisdiction)
     mod = load(a.file, argv=a.args)
     main = getattr(mod, "__shio_main__", None)
     if main is None:
@@ -159,7 +162,8 @@ def _verify(a):
 def _replay(a):
     from .replay import replay
     store = _store(a) if a.policies else None
-    ok, lines = replay(a.record, a.program, a.allow_changed, store, _date(a.at) if a.at else None)
+    ok, lines = replay(a.record, a.program, a.allow_changed, store, _date(a.at) if a.at else None,
+                       _jurisdiction(a))
     print("\n".join(lines))
     sys.exit(0 if ok else 1)
 
@@ -245,32 +249,51 @@ def _store(a):
     return Store.load(a.policies)
 
 
+def _jurisdiction(a):
+    from .policy import jurisdiction_code
+    j = getattr(a, "jurisdiction", None)
+    return jurisdiction_code(j) if j else None
+
+
+def _scopes(store, a):
+    """The jurisdictions a command covers: the one asked for, else each one the store is scoped to."""
+    j = _jurisdiction(a)
+    return [store.require_jurisdiction(j)] if j else (store.jurisdictions or [None])
+
+
 def _policy(a):
     from .policy import check_programs, impact
     store = _store(a)
     if a.action == "show":
-        h = store.handling(_date(a.at))
-        print(f"in force on {_date(a.at)}:")
-        for p in store.in_force(_date(a.at)):
-            print(f"  {p.name} v{p.version}, effective {p.effective}, source: {p.source}"
-                  + (f", approved by {p.approved_by}" if p.approved_by else "") + f"  (sha256 {p.sha256[:12]})")
-        for cls, (handling, years, by) in sorted(h.rules.items()):
-            print(f"    {cls:<16} {handling:<7}" + (f" retain {years} years" if years else "") + f"   ({by})")
-        if h.default:
-            print(f"    {'(any other)':<16} {h.default[0]:<7}   ({h.default[2]})")
+        on = _date(a.at)
+        for j in _scopes(store, a):
+            h = store.handling(on, j)
+            print(f"in force on {on}" + (f" for {j}" if j else "") + ":")
+            for p in store.in_force(on, j):
+                print(f"  {p.label()}, effective {p.effective}, source: {p.source}"
+                      + (f", approved by {p.approved_by}" if p.approved_by else "") + f"  (sha256 {p.sha256[:12]})")
+            for cls, (handling, years, by) in sorted(h.rules.items()):
+                print(f"    {cls:<16} {handling:<7}" + (f" retain {years} years" if years else "") + f"   ({by})")
+            if h.default:
+                print(f"    {'(any other)':<16} {h.default[0]:<7}   ({h.default[2]})")
+            for name in store.tables_by_name:
+                t = store.table(name, on, j)
+                if t:
+                    print(f"  table {t.label()}, effective {t.effective}, source: {t.source}: "
+                          + ", ".join(f"{k}={v!r}" for k, v in sorted(t.rows.items())))
         return
     if not a.programs:
         sys.exit("name the .shio programs to check")
     if a.action == "check":
-        ok, lines = check_programs(a.programs, store, _date(a.at))
+        ok, lines = check_programs(a.programs, store, _date(a.at), _jurisdiction(a))
         print("\n".join(lines))
         sys.exit(0 if ok else 1)
-    print("\n".join(impact(a.programs, store, _date(a.at))))
+    print("\n".join(impact(a.programs, store, _date(a.at), _jurisdiction(a))))
 
 
 def _audit(a):
     from .policy import audit
-    ok, report, _ = audit(a.folder, _store(a), _date(a.today))
+    ok, report, _ = audit(a.folder, _store(a), _date(a.today), _jurisdiction(a))
     print("\n".join(report))
     print("COMPLIANT" if ok else "FINDINGS")
     sys.exit(0 if ok else 1)
@@ -283,7 +306,9 @@ def _migrate(a):
     at = _date(a.at)
     if at > dt.date.today():
         sys.exit("migrate applies a policy already in force; --at cannot be in the future")
-    done = migrate(a.folder, _store(a).handling(at), a.reason, _signer(), dry_run=a.dry_run)
+    store = _store(a)
+    done = [d for j in _scopes(store, a)       # each jurisdiction's records under its own rules
+            for d in migrate(a.folder, store.handling(at, j), a.reason, _signer(), dry_run=a.dry_run)]
     for name, changes in done:
         print(f"{'would re-seal' if a.dry_run else 're-sealed'} {name}: " +
               "; ".join(f"{r}.{p} {was} -> {now}" for r, p, was, now in changes))
@@ -293,7 +318,8 @@ def _migrate(a):
 def _retention(a):
     from .core import _signer
     from .policy import retention
-    done = retention(a.folder, _store(a), _signer(), apply=a.apply, today=_date(a.today))
+    done = retention(a.folder, _store(a), _signer(), apply=a.apply, today=_date(a.today),
+                     jurisdiction=_jurisdiction(a))
     for name, by, ends in done:
         print(f"{'erased' if a.apply else 'due'}: {name} (retention under {by} ended {ends})")
     print(f"{len(done)} vault{'s' if len(done) != 1 else ''} " + ("erased" if a.apply else "due; add --apply to erase"))
@@ -315,7 +341,7 @@ def _evidence(a):
     from .core import _signer
     from .evidence import build
     data, out = build(a.folder, a.out, _date(a.start), _date(a.end), _store(a) if a.policies else None, pub, secret,
-                      _signer())
+                      _signer(), jurisdiction=_jurisdiction(a))
     mon = data["monitoring"]["flags"]
     print(f"evidence pack for {a.start} to {a.end}: {out}/evidence.md")
     print(f"  {data['decisions']} decisions; ledger {'VERIFIED' if data['integrity']['verified'] else 'NOT VERIFIED'}"
@@ -323,6 +349,36 @@ def _evidence(a):
           + f"; {len(mon)} monitoring flag{'s' if len(mon) != 1 else ''}")
     for f in mon:
         print(f"  flag: {f}")
+
+
+def _monitor(a):
+    from .evidence import monitor, post
+    today = _date(a.today)
+    result = monitor(a.folder, _date(a.since) if a.since else None, today, a.baseline_weeks, a.pending_days,
+                     _jurisdiction(a))
+    if a.json:
+        print(json.dumps(result, indent=1, default=str))
+    else:
+        s, e = result["window"]
+        print(f"monitoring {a.folder} from {s} to {e}" + (f" for {result['jurisdiction']}" if result["jurisdiction"]
+                                                          else "")
+              + f": {result['decisions']} decisions, {result['reads']} model calls, "
+              f"{len(result['pending'])} waiting for sign-off")
+        for f in result["flags"]:
+            print(f"  FLAG: {f}")
+        print(f"{len(result['flags'])} flag{'s' if len(result['flags']) != 1 else ''}")
+    failed = False
+    if a.webhook and (result["flags"] or a.always_post):
+        try:
+            status = post(a.webhook, result)
+            print(f"posted to webhook ({status})", file=sys.stderr)
+        except (OSError, ValueError) as err:
+            print(f"webhook failed: {err}", file=sys.stderr)
+            failed = True
+    if failed:
+        sys.exit(2)
+    if a.exit_code and result["flags"]:
+        sys.exit(1)
 
 
 def main(argv=None):
@@ -336,6 +392,8 @@ def main(argv=None):
     r.add_argument("--policies", help="a folder of .policy files: data handling for each decision (or SHIO_POLICIES)")
     r.add_argument("--as", dest="actor", help="who is running it: the requester of any sign-off (default: SHIO_ACTOR "
                                               "or your login)")
+    r.add_argument("--jurisdiction", help="whose rules govern these decisions, e.g. IN (or SHIO_JURISDICTION); "
+                                          "required when the policies are scoped with applies_to")
     r.set_defaults(fn=_run)
     c = sub.add_parser("check", help="compile and check the read/rule boundary, without running")
     c.add_argument("file")
@@ -371,6 +429,7 @@ def main(argv=None):
     rp.add_argument("--allow-changed", action="store_true", help="replay with a changed program (impact analysis)")
     rp.add_argument("--policies", help="use the decision tables in this folder instead of the recorded values")
     rp.add_argument("--at", help="with --policies: the tables in force on this date (default: the decision's date)")
+    rp.add_argument("--jurisdiction", help="with --policies: another jurisdiction's tables (default: the record's)")
     rp.set_defaults(fn=_replay)
     e = sub.add_parser("erase", help="delete a record's vault (personal data) and enter the erasure in the ledger")
     e.add_argument("record")
@@ -397,11 +456,13 @@ def main(argv=None):
     po.add_argument("programs", nargs="*")
     po.add_argument("--policies", required=True, help="a folder of .policy files")
     po.add_argument("--at", help="the date (YYYY-MM-DD; default today); for impact, the day a new version takes effect")
+    po.add_argument("--jurisdiction", help="only this jurisdiction (default: each one the policies are scoped to)")
     po.set_defaults(fn=_policy)
     au = sub.add_parser("audit", help="check every record against the data-handling policy in force on its date")
     au.add_argument("folder")
     au.add_argument("--policies", required=True)
     au.add_argument("--today", help="audit as of this date (default today)")
+    au.add_argument("--jurisdiction", help="only the records decided for this jurisdiction")
     au.set_defaults(fn=_audit)
     mg = sub.add_parser("migrate", help="re-seal records under today's stricter data-handling rules (never looser)")
     mg.add_argument("folder")
@@ -409,12 +470,14 @@ def main(argv=None):
     mg.add_argument("--reason", required=True)
     mg.add_argument("--dry-run", action="store_true")
     mg.add_argument("--at", help="apply the policies in force on this date (default today; never a future date)")
+    mg.add_argument("--jurisdiction", help="only this jurisdiction's records (default: each jurisdiction under its own rules)")
     mg.set_defaults(fn=_migrate)
     rt = sub.add_parser("retention", help="vaults whose retention period has ended; --apply erases them")
     rt.add_argument("folder")
     rt.add_argument("--policies", required=True)
     rt.add_argument("--apply", action="store_true")
     rt.add_argument("--today", help="as of this date (default today)")
+    rt.add_argument("--jurisdiction", help="only the records decided for this jurisdiction")
     rt.set_defaults(fn=_retention)
     evp = sub.add_parser("evidence", help="an evidence pack for an audit period: integrity, decisions, oversight, "
                                            "monitoring, policies and decision maps, with a signed manifest")
@@ -426,7 +489,21 @@ def main(argv=None):
     evp.add_argument("--pubkey")
     evp.add_argument("--secret")
     evp.add_argument("--check", metavar="PACK", help="check an existing pack against its manifest")
+    evp.add_argument("--jurisdiction", help="only the decisions made for this jurisdiction")
     evp.set_defaults(fn=_evidence)
+    mo = sub.add_parser("monitor", help="the evidence pack's monitoring flags over a rolling window, for alerts: "
+                                        "check pass-rate drops, weight changes, model failures, old pending sign-offs")
+    mo.add_argument("folder")
+    mo.add_argument("--since", help="start of the window (default: 28 days before --today)")
+    mo.add_argument("--today", help="end of the window (default today)")
+    mo.add_argument("--baseline-weeks", type=int, default=8, help="weeks before the window to compare against")
+    mo.add_argument("--pending-days", type=int, default=3, help="flag sign-offs waiting longer than this")
+    mo.add_argument("--jurisdiction", help="only the decisions made for this jurisdiction")
+    mo.add_argument("--webhook", help="POST the result as JSON to this URL when anything is flagged")
+    mo.add_argument("--always-post", action="store_true", help="with --webhook: post even when nothing is flagged")
+    mo.add_argument("--exit-code", action="store_true", help="exit 1 when anything is flagged (for CI or cron)")
+    mo.add_argument("--json", action="store_true", help="print the result as JSON")
+    mo.set_defaults(fn=_monitor)
     s = sub.add_parser("show", help="summarise trace files")
     s.add_argument("traces", nargs="+")
     s.set_defaults(fn=_show)

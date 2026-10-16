@@ -21,6 +21,11 @@ Handling, from least to most protective:
 When a regulation changes, compliance adds a new version with its effective date; no program changes. Each decision
 is written under the versions in force on its date, and the record says which (name, version, sha256, source).
 Where two policies cover the same class, the more protective rule applies.
+
+One program may serve several regulators (an Indian bank with a UAE branch). A version with `applies_to "IN"` (or
+`applies_to "IN", "AE"`) governs only decisions made for those jurisdictions; a version without it applies
+everywhere. A decision's jurisdiction comes from the run (shio.configure(jurisdiction=...), shio run --jurisdiction,
+SHIO_JURISDICTION) and is stamped into its record.
 """
 import datetime as dt
 import hashlib
@@ -34,7 +39,8 @@ DEFAULT = "vault"           # a class no policy in force mentions: protected, bu
 
 HEADER = re.compile(r'^(?P<kind>policy|table)\s+"(?P<name>[^"]+)"\s+version\s+(?P<version>\d+)\s*:\s*$')
 ROW = re.compile(r"^(?P<key>[a-z_][a-z0-9_]*)\s*:\s*(?P<value>.+)$")
-SETTING = re.compile(r'^(?P<key>effective|source|approved_by)\s+(?P<value>.+)$')
+SETTING = re.compile(r'^(?P<key>effective|source|approved_by|applies_to)\s+(?P<value>.+)$')
+JURISDICTION = re.compile(r"^[A-Z][A-Z0-9_-]*$")
 RULE = re.compile(r"^(?P<cls>\*|[A-Z][A-Za-z0-9_]*)\s*:\s*(?P<handling>clear|vault|hashed)"
                   r"(?:\s*,\s*retain\s+(?P<years>\d+)\s+years?)?\s*$")
 
@@ -43,15 +49,31 @@ class PolicyError(ValueError):
     pass
 
 
+def jurisdiction_code(text):
+    """A jurisdiction as Shio records it: upper case, like IN, AE or AE-DIFC."""
+    code = str(text).strip().upper()
+    if not JURISDICTION.match(code):
+        raise PolicyError(f"{text!r} is not a jurisdiction code (use something like IN, AE or AE-DIFC)")
+    return code
+
+
 class Policy:
-    def __init__(self, name, version, effective, source, approved_by, rules, file, line):
+    def __init__(self, name, version, effective, source, approved_by, rules, file, line, applies_to=()):
         self.name, self.version, self.effective = name, version, effective
         self.source, self.approved_by, self.rules = source, approved_by, rules   # rules: {class: (handling, years)}
         self.file, self.line = file, line
+        self.applies_to = tuple(applies_to)      # () = every jurisdiction
+
+    def applies(self, jurisdiction):
+        """Governs decisions made for this jurisdiction (None: a decision with no jurisdiction)."""
+        return not self.applies_to or jurisdiction in self.applies_to
+
+    def _scope(self):          # only scoped versions carry the key, so older versions keep their sha256
+        return {"applies_to": list(self.applies_to)} if self.applies_to else {}
 
     def as_dict(self):
         return {"name": self.name, "version": self.version, "effective": self.effective.isoformat(),
-                "source": self.source, "approved_by": self.approved_by,
+                "source": self.source, "approved_by": self.approved_by, **self._scope(),
                 "rules": {c: {"handling": h, "retain_years": y} for c, (h, y) in sorted(self.rules.items())}}
 
     @property
@@ -60,10 +82,14 @@ class Policy:
 
     def stamp(self):
         return {"name": self.name, "version": self.version, "effective": self.effective.isoformat(),
-                "sha256": self.sha256, "source": self.source, "approved_by": self.approved_by}
+                "sha256": self.sha256, "source": self.source, "approved_by": self.approved_by, **self._scope()}
+
+    def label(self):
+        return f"{self.name} v{self.version}" + (f" [{', '.join(self.applies_to)}]" if self.applies_to else "")
 
     def __repr__(self):
-        return f"<{self.name} v{self.version} from {self.effective}>"
+        return f"<{self.name} v{self.version} from {self.effective}" + \
+            (f" for {', '.join(self.applies_to)}>" if self.applies_to else ">")
 
 
 class Table(Policy):
@@ -78,13 +104,14 @@ class Table(Policy):
             needs_hallmark: true
     """
 
-    def __init__(self, name, version, effective, source, approved_by, rows, file, line):
-        super().__init__(name, version, effective, source, approved_by, {}, file, line)
+    def __init__(self, name, version, effective, source, approved_by, rows, file, line, applies_to=()):
+        super().__init__(name, version, effective, source, approved_by, {}, file, line, applies_to)
         self.rows = rows
 
     def as_dict(self):
         return {"kind": "table", "name": self.name, "version": self.version, "effective": self.effective.isoformat(),
-                "source": self.source, "approved_by": self.approved_by, "rows": dict(sorted(self.rows.items()))}
+                "source": self.source, "approved_by": self.approved_by, **self._scope(),
+                "rows": dict(sorted(self.rows.items()))}
 
 
 def _literal(text, file, n):
@@ -134,7 +161,7 @@ def parse(text, file="<policy>"):
         if m and not raw.startswith((" ", "\t")):
             done()
             cur = {"kind": m["kind"], "name": m["name"], "version": int(m["version"]), "effective": None,
-                   "source": "", "approved_by": "", "rules": {}, "line": n}
+                   "source": "", "approved_by": "", "rules": {}, "line": n, "applies_to": ()}
             continue
         if cur is None or not raw.startswith((" ", "\t")):
             raise PolicyError(f"{file}:{n}: expected `policy \"NAME\" version N:` or `table \"NAME\" version N:`")
@@ -146,6 +173,14 @@ def parse(text, file="<policy>"):
                     cur["effective"] = dt.date.fromisoformat(m["value"].strip())
                 except ValueError:
                     raise PolicyError(f"{file}:{n}: effective date must be YYYY-MM-DD") from None
+            elif m["key"] == "applies_to":
+                codes = re.findall(r'"([^"]*)"', m["value"])
+                if not codes or re.sub(r'"[^"]*"|[\s,]', "", m["value"]):
+                    raise PolicyError(f'{file}:{n}: expected `applies_to "IN"` or `applies_to "IN", "AE"`')
+                try:
+                    cur["applies_to"] = tuple(dict.fromkeys(jurisdiction_code(c) for c in codes))
+                except PolicyError as e:
+                    raise PolicyError(f"{file}:{n}: {e}") from None
             else:
                 cur[m["key"]] = _unquote(m["value"])
             continue
@@ -188,15 +223,35 @@ class Store:
             names.setdefault(p.name, []).append(p)
         for name, ps in names.items():
             ps.sort(key=lambda p: p.version)
-            for a, b in zip(ps, ps[1:]):
-                if b.effective < a.effective:
-                    raise PolicyError(f"{name!r} v{b.version} takes effect before v{a.version}")
+            for i, b in enumerate(ps):         # within the jurisdictions two versions share, versions go forward in time
+                for a in ps[:i]:
+                    shared = not a.applies_to or not b.applies_to or set(a.applies_to) & set(b.applies_to)
+                    if shared and b.effective < a.effective:
+                        raise PolicyError(f"{name!r} v{b.version} takes effect before v{a.version}")
         return names
 
-    def table(self, name, on):
-        """The version of a decision table in force on a date, or None."""
-        live = [t for t in self.tables_by_name.get(name, []) if t.effective <= on]
-        return max(live, key=lambda t: (t.effective, t.version)) if live else None
+    @property
+    def jurisdictions(self):
+        """Every jurisdiction a version is scoped to (empty when every version applies everywhere)."""
+        return sorted({j for p in self.policies + self.tables for j in p.applies_to})
+
+    @property
+    def scoped(self):
+        return bool(self.jurisdictions)
+
+    def scoped_on(self, on):
+        """Some jurisdiction-scoped version had taken effect by this date."""
+        return any(p.applies_to and p.effective <= on for p in self.policies + self.tables)
+
+    @staticmethod
+    def _latest(versions, on, jurisdiction):
+        live = [p for p in versions if p.effective <= on and p.applies(jurisdiction)]
+        return max(live, key=lambda p: (p.effective, p.version)) if live else None
+
+    def table(self, name, on, jurisdiction=None):
+        """The version of a decision table in force on a date for a jurisdiction, or None. With no jurisdiction,
+        only versions that apply everywhere count."""
+        return self._latest(self.tables_by_name.get(name, []), on, jurisdiction)
 
     @classmethod
     def load(cls, path):
@@ -206,23 +261,38 @@ class Store:
             raise PolicyError(f"no .policy files in {path}")
         return cls([p for f in files for p in parse(f.read_text(), str(f))], str(path))
 
-    def in_force(self, on):
-        """The version of each data-handling policy in force on a date (none if the policy had not started)."""
-        out = []
-        for ps in self.by_name.values():
-            live = [p for p in ps if p.effective <= on]
-            if live:
-                out.append(max(live, key=lambda p: (p.effective, p.version)))
-        return out
+    def in_force(self, on, jurisdiction=None):
+        """The version of each data-handling policy in force on a date for a jurisdiction (none if the policy had not
+        started there). With no jurisdiction, only versions that apply everywhere count."""
+        return [p for p in (self._latest(ps, on, jurisdiction) for ps in self.by_name.values()) if p is not None]
 
-    def handling(self, on):
+    def handling(self, on, jurisdiction=None):
         """-> Handling: the rule for every class on a date, the most protective where policies overlap."""
-        return Handling.from_policies(self.in_force(on))
+        h = Handling.from_policies(self.in_force(on, jurisdiction))
+        h.jurisdiction = jurisdiction
+        return h
+
+    def require_jurisdiction(self, jurisdiction, what="this decision"):
+        """-> the jurisdiction code to resolve under, refusing to guess: a store with jurisdiction-scoped versions
+        needs one, and it must be one the store knows."""
+        if jurisdiction is None:
+            if self.scoped:
+                raise PolicyError(f"the policies in {self.where or 'the store'} are scoped to jurisdictions "
+                                  f"({', '.join(self.jurisdictions)}); {what} needs one "
+                                  "(--jurisdiction, SHIO_JURISDICTION or shio.configure(jurisdiction=...))")
+            return None
+        code = jurisdiction_code(jurisdiction)
+        if self.scoped and code not in self.jurisdictions:
+            raise PolicyError(f"no policy or table version in {self.where or 'the store'} is scoped to {code} "
+                              f"(scoped ones: {', '.join(self.jurisdictions)}); add `applies_to \"{code}\"` to the "
+                              "versions that govern it")
+        return code
 
 
 class Handling:
     def __init__(self, rules, default, stamps):
         self.rules, self.default, self.stamps = rules, default, stamps   # rules: {class: (handling, years, policy)}
+        self.jurisdiction = None
 
     @classmethod
     def from_policies(cls, policies):
@@ -248,7 +318,7 @@ class Handling:
         return r[0] if r else DEFAULT
 
     def as_dict(self):
-        return {"in_force": self.stamps,
+        return {**({"jurisdiction": self.jurisdiction} if self.jurisdiction else {}), "in_force": self.stamps,
                 "applied": {c: {"handling": h, "retain_years": y, "by": by} for c, (h, y, by) in sorted(self.rules.items())},
                 "default": ({"handling": self.default[0], "by": self.default[2]} if self.default
                             else {"handling": DEFAULT, "by": "Shio default (no policy covers the class)"})}
@@ -308,13 +378,16 @@ def _field_states(value, prefix=""):
     return out
 
 
-def audit(folder, store, today=None):
-    """Check every record against the data-handling policy in force on its date. -> (ok, report lines, findings)."""
+def audit(folder, store, today=None, jurisdiction=None):
+    """Check every record against the data-handling policy in force on its date, for its jurisdiction.
+    jurisdiction: audit only the records decided for it. -> (ok, report lines, findings)."""
+    from collections import Counter
     from .ledger import _entries, load_vault
     folder = Path(folder)
     today = today or dt.date.today()
+    want_j = jurisdiction_code(jurisdiction) if jurisdiction else None
     erased = {e["file"] for e in _entries(folder) if e.get("kind") == "erasure"}
-    findings, checked, retention_due = [], 0, []
+    findings, checked, retention_due, by_j = [], 0, [], Counter()
     for e in _entries(folder):
         if e.get("kind") != "record":
             continue
@@ -322,11 +395,20 @@ def audit(folder, store, today=None):
         if not path.exists():
             continue
         rec = json.loads(path.read_text())
+        j = rec.get("jurisdiction")
+        if want_j and j != want_j:
+            continue
         checked += 1
+        by_j[j or "(none)"] += 1
         on = dt.date.fromtimestamp(rec.get("started") or e.get("time"))
-        expected = store.handling(on)
+        expected = store.handling(on, j)
         stamped = (rec.get("data_policy") or {}).get("in_force")
-        name = e["file"]
+        name = e["file"] + (f" [{j}]" if j else "")
+        if j is None and store.scoped_on(on) and (stamped is not None or rec.get("tables")):
+            findings.append(f"{name}: written {on} with no jurisdiction, though jurisdiction-scoped versions were "
+                            f"in force ({', '.join(store.jurisdictions)}); its rules can't be told apart")
+        elif j is not None and store.scoped and j not in store.jurisdictions:
+            findings.append(f"{name}: decided for {j}, which no version in {store.where or 'the store'} is scoped to")
         if stamped is None:
             if expected.stamps:
                 findings.append(f"{name}: written {on} with no data policy, though "
@@ -343,9 +425,10 @@ def audit(folder, store, today=None):
                     findings.append(f"{name}: {key[0]} v{key[1]} has been edited since this record used it "
                                     "(a policy version must not change once in force; add a new version)")
         for t in rec.get("tables") or []:
-            current = store.table(t["name"], on)
+            current = store.table(t["name"], on, j)
             if current is None:
-                findings.append(f"{name}: used {t['name']!r} v{t['version']}, but no version of it was in force on {on}")
+                findings.append(f"{name}: used {t['name']!r} v{t['version']}, but no version of it was in force on {on}"
+                                + (f" for {j}" if j else ""))
             elif current.version != t["version"]:
                 findings.append(f"{name}: decided {on} with {t['name']!r} v{t['version']}, but v{current.version} "
                                 f"was in force from {current.effective}")
@@ -377,18 +460,20 @@ def audit(folder, store, today=None):
                                             f"{_by(expected, cls)} required hashed (kept nowhere)")
             for fpath, cls in (r.get("classes") or {}).items():
                 rule = expected.rule(cls)
-                if rule and rule[1] and vault is not None and name not in erased:
+                if rule and rule[1] and vault is not None and e["file"] not in erased:
                     ends = on.replace(year=on.year + rule[1]) if not (on.month == 2 and on.day == 29) else \
                         on.replace(year=on.year + rule[1], day=28)
                     if ends < today:
-                        retention_due.append((name, cls, ends, rule[2]))
+                        retention_due.append((e["file"], cls, ends, rule[2]))
     due = sorted({(n, by, ends) for n, _, ends, by in retention_due})
     for n, by, ends in due:
         findings.append(f"{n}: retention under {by} ended {ends}; its vault should be erased (shio retention --apply)")
-    report = [f"{checked} records checked against {store.where or 'the policies'}",
+    split_j = "" if set(by_j) == {"(none)"} or not by_j else \
+        " (" + ", ".join(f"{k}: {v}" for k, v in sorted(by_j.items())) + ")"
+    report = [f"{checked} records checked against {store.where or 'the policies'}" + split_j,
               f"{len(findings)} finding{'s' if len(findings) != 1 else ''}"]
     report += [f"  FINDING: {f}" for f in findings]
-    return not findings, report, {"findings": findings, "retention_due": due}
+    return not findings, report, {"findings": findings, "retention_due": due, "by_jurisdiction": dict(by_j)}
 
 
 def _readings_at(run, base=""):
@@ -404,10 +489,11 @@ def _by(handling, cls):
     return r[2] if r else "Shio's default"
 
 
-def retention(folder, store, signer=None, apply=False, today=None):
-    """Vaults whose retention period (under the policy in force when written) has ended; erase them with apply."""
+def retention(folder, store, signer=None, apply=False, today=None, jurisdiction=None):
+    """Vaults whose retention period (under the policy in force when written, for its jurisdiction) has ended;
+    erase them with apply."""
     from .ledger import erase
-    _, _, info = audit(folder, store, today)
+    _, _, info = audit(folder, store, today, jurisdiction)
     done = []
     for name, by, ends in info["retention_due"]:
         done.append((name, by, ends))
@@ -430,12 +516,27 @@ def program_tables(path):
     return sorted(set(re.findall(r'in_force\(\s*"([^"]+)"\s*\)', Path(path).read_text())))
 
 
-def check_programs(programs, store, on):
+def _scopes(store, jurisdiction):
+    """The jurisdictions to look at: the one asked for, else every one the store is scoped to (or just None)."""
+    if jurisdiction:
+        return [store.require_jurisdiction(jurisdiction)]
+    return store.jurisdictions or [None]
+
+
+def check_programs(programs, store, on, jurisdiction=None):
     """Every classified field has an explicit rule, and every decision table a program reads has a version, in the
-    policies in force on a date."""
-    h = store.handling(on)
-    lines, ok = [f"policies in force on {on}: " + (", ".join(f"{s['name']} v{s['version']}" for s in h.stamps) or
-                                                     "none")], True
+    policies in force on a date, for a jurisdiction (default: each jurisdiction the store is scoped to)."""
+    ok, lines = True, []
+    for j in _scopes(store, jurisdiction):
+        one_ok, one = _check_programs(programs, store, on, j)
+        ok, lines = ok and one_ok, lines + one
+    return ok, lines
+
+
+def _check_programs(programs, store, on, j):
+    h = store.handling(on, j)
+    lines, ok = [f"policies in force on {on}" + (f" for {j}" if j else "") + ": "
+                 + (", ".join(f"{s['name']} v{s['version']}" for s in h.stamps) or "none")], True
     for prog in programs:
         for tname, field, cls in program_classes(prog):
             rule = h.rule(cls)
@@ -447,30 +548,40 @@ def check_programs(programs, store, on):
                 lines.append(f"  {rule[0]:<7}  {Path(prog).name}: {tname}.{field} ({cls}) by {rule[2]}"
                              + (f", retain {rule[1]} years" if rule[1] else ""))
         for name in program_tables(prog):
-            t = store.table(name, on)
+            t = store.table(name, on, j)
             if t is None:
                 ok = False
-                lines.append(f"  NO TABLE {Path(prog).name}: reads table {name!r}, which has no version in force")
+                lines.append(f"  NO TABLE {Path(prog).name}: reads table {name!r}, which has no version in force"
+                             + (f" for {j}" if j else ""))
             else:
                 lines.append(f"  table    {Path(prog).name}: {name!r} v{t.version} (from {t.effective}): "
                              + ", ".join(f"{k}={v!r}" for k, v in sorted(t.rows.items())))
     return ok, lines
 
 
-def impact(programs, store, on):
-    """What changes for each program when the policies in force on `on` replace those of the day before."""
-    before, after = store.handling(on - dt.timedelta(days=1)), store.handling(on)
-    lines = [f"what changes on {on}:"]
+def impact(programs, store, on, jurisdiction=None):
+    """What changes for each program when the policies in force on `on` replace those of the day before, for a
+    jurisdiction (default: each jurisdiction the store is scoped to)."""
+    lines = []
+    for j in _scopes(store, jurisdiction):
+        lines += _impact(programs, store, on, j)
+    return lines
+
+
+def _impact(programs, store, on, j):
+    day_before = on - dt.timedelta(days=1)
+    before, after = store.handling(day_before, j), store.handling(on, j)
+    lines = [f"what changes on {on}" + (f" for {j}" if j else "") + ":"]
     for name, ps in store.by_name.items():
-        new = [p for p in ps if p.effective == on]
+        new = [p for p in ps if p.effective == on and p.applies(j)]
         if new:
-            old = store.in_force(on - dt.timedelta(days=1))
+            old = store.in_force(day_before, j)
             was = next((p for p in old if p.name == name), None)
             lines.append(f"  data policy {name!r} v{new[-1].version} replaces " + (f"v{was.version}" if was else "none"))
     for name, ts in store.tables_by_name.items():
-        new = [t for t in ts if t.effective == on]
+        new = [t for t in ts if t.effective == on and t.applies(j)]
         if new:
-            was = store.table(name, on - dt.timedelta(days=1))
+            was = store.table(name, day_before, j)
             lines.append(f"  table {name!r} v{new[-1].version} replaces " + (f"v{was.version}" if was else "none"))
     changed = 0
     for prog in programs:
@@ -483,7 +594,7 @@ def impact(programs, store, on):
                              + ("  (existing records can be re-sealed: shio migrate)" if tighter else
                                 "  (applies to new records only; existing ones stay as they are)"))
         for name in program_tables(prog):
-            a, b = store.table(name, on - dt.timedelta(days=1)), store.table(name, on)
+            a, b = store.table(name, day_before, j), store.table(name, on, j)
             if (a and a.version) != (b and b.version):
                 diff = {k: ((a.rows if a else {}).get(k), (b.rows if b else {}).get(k))
                         for k in set((a.rows if a else {})) | set((b.rows if b else {}))}
@@ -492,6 +603,6 @@ def impact(programs, store, on):
                 for k, (was, now) in sorted(diff.items()):
                     lines.append(f"  {Path(prog).name}: table {name!r}.{k} {was!r} -> {now!r}"
                                  f"  (see what past decisions would become: shio replay RECORD --policies DIR "
-                                 f"--at {on})")
+                                 f"--at {on}" + (f" --jurisdiction {j}" if j else "") + ")")
     lines.append(f"{changed} field{'s' if changed != 1 else ''} change")
     return lines

@@ -71,6 +71,28 @@
           }
         },
         {
+          "begin": "^\\s+(applies_to)\\b",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.other.applies_to.shio-policy"
+            }
+          },
+          "end": "$",
+          "patterns": [
+            {
+              "match": "\"[^\"]*\"",
+              "name": "string.quoted.double.jurisdiction.shio-policy"
+            },
+            {
+              "match": ",",
+              "name": "punctuation.separator.comma.shio-policy"
+            },
+            {
+              "include": "#comment"
+            }
+          ]
+        },
+        {
           "begin": "^\\s+([A-Za-z_][\\w.-]*|\"[^\"]*\")\\s*(:)",
           "beginCaptures": {
             "1": {
