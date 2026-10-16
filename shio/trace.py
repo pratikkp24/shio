@@ -6,24 +6,29 @@ import time
 from pathlib import Path
 
 
-def write(run, trace_dir):
-    d = Path(trace_dir)
-    d.mkdir(parents=True, exist_ok=True)
+def write(run, trace_dir, vault=False, signer=None):
+    """Write a top-level run as a record entered in the folder's ledger (see shio.ledger)."""
+    from .ledger import write as ledger_write
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(run.started))
-    path = d / f"{run.agent}-{stamp}-{run.id}.json"
-    path.write_text(json.dumps(run.to_dict(), indent=1, default=str))
-    return path
+    return ledger_write(run.to_dict(), trace_dir, f"{run.agent}-{stamp}-{run.id}", use_vault=vault, signer=signer)
 
 
 def load(patterns):
     """Yield every run (children included) from trace files matching the patterns."""
     files = sorted({f for p in ([patterns] if isinstance(patterns, str) else patterns)
                     for f in (glob.glob(p, recursive=True) if any(c in p for c in "*?[") else [p])})
+    from .ledger import load_vault, merge
     for f in files:
         if Path(f).is_dir():
             yield from load(str(Path(f) / "*.json"))
             continue
-        yield from _flatten(json.loads(Path(f).read_text()), None)
+        rec = json.loads(Path(f).read_text())
+        if "agent" not in rec:          # not a run record (a vault or another JSON file)
+            continue
+        vault = load_vault(f, rec)
+        if vault:                       # free text kept apart: put it back for training and inspection
+            rec = merge(rec, vault)
+        yield from _flatten(rec, None)
 
 
 def _flatten(run, sources):

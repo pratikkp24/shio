@@ -27,6 +27,7 @@ Issues = "https://github.com/Aonami-Labs/shio/issues"
 Security = "https://github.com/Aonami-Labs/shio/blob/main/SECURITY.md"
 
 [project.optional-dependencies]
+regulated = ["cryptography>=42"]
 pdf = ["pypdf>=4"]
 train = ["trl>=0.20", "datasets", "peft"]
 

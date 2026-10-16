@@ -6,10 +6,13 @@ model can never settle an outcome on its own: an @agent that returns a Reading i
 import contextvars
 import dataclasses
 import functools
+import hashlib
+import itertools
 import json
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from .schema import parse, schema_ref, to_json_schema, to_jsonable
 
@@ -23,6 +26,10 @@ class BoundaryError(TypeError):
     """A model proposal was used where only code may decide."""
 
 
+class RegulatedError(RuntimeError):
+    """A regulated program was asked to run without what regulated mode requires."""
+
+
 def _blocked(what):
     def method(self, *a, **k):
         raise BoundaryError(f"{self!r} is a model proposal: {what} it only inside a @check or @rule.")
@@ -31,12 +38,14 @@ def _blocked(what):
 
 class Reading:
     """What a model proposed. Opaque outside a @check or @rule."""
-    __slots__ = ("id", "name", "model", "request", "raw", "_value", "error", "schema", "run_id", "item")
+    __slots__ = ("id", "name", "model", "request", "raw", "_value", "error", "schema", "run_id", "item", "seq",
+                 "model_id")
 
     def __init__(self, name, model, request, raw, value, error, schema, run_id, item=None):
         self.id, self.name, self.model, self.request, self.raw = uuid.uuid4().hex[:12], name, model, request, raw
         self._value, self.error, self.schema, self.run_id = value, error, schema, run_id
         self.item = item         # (path, index) for one item of a list inside another reading
+        self.seq, self.model_id = None, None
 
     @property
     def value(self):
@@ -99,20 +108,80 @@ class ReadRequest:
 
 
 class Run:
-    def __init__(self, agent, parent=None):
+    def __init__(self, agent, parent=None, program=None):
         self.id, self.agent, self.parent = uuid.uuid4().hex[:12], agent, parent
+        self.root = parent.root if parent else self
+        self.program = program or (parent.program if parent else None)
         self.started, self.ended = time.time(), None
         self.inputs, self.readings, self.checks, self.rules, self.children = {}, [], [], [], []
         self.sources, self.outcome, self.error = {}, None, None
+        if parent is None:
+            self._seq = itertools.count()
+
+    def next_seq(self):
+        return next(self.root._seq)
+
+    @property
+    def regulated(self):
+        return bool((self.root.program or {}).get("regulated"))
 
     def to_dict(self):
-        return {"id": self.id, "agent": self.agent, "started": self.started, "ended": self.ended, "inputs": self.inputs,
-                "sources": self.sources,
-                "readings": [{"id": r.id, "name": r.name, "model": r.model, "schema": schema_ref(r.schema),
-                              "request": {**dataclasses.asdict(r.request), "sources": [s.id for s in r.request.sources]},
-                              "raw": r.raw, "value": to_jsonable(r._value), "error": r.error} for r in self.readings],
-                "checks": self.checks, "rules": self.rules, "outcome": to_jsonable(self.outcome), "error": self.error,
-                "children": [c.to_dict() for c in self.children]}
+        d = {"id": self.id, "agent": self.agent, "started": self.started, "ended": self.ended, "inputs": self.inputs,
+             "sources": self.sources,
+             "readings": [{"id": r.id, "seq": r.seq, "name": r.name, "model": r.model, "model_id": r.model_id,
+                           "schema": schema_ref(r.schema), "pii": sorted(_pii_fields(r.schema)),
+                           "prompt_sha256": _prompt_hash(r.request),
+                           "request": {**dataclasses.asdict(r.request), "sources": [s.id for s in r.request.sources]},
+                           "raw": r.raw, "value": to_jsonable(r._value), "error": r.error} for r in self.readings],
+             "checks": self.checks, "rules": self.rules, "outcome": to_jsonable(self.outcome), "error": self.error,
+             "children": [c.to_dict() for c in self.children]}
+        if self.parent is None or (self.program or {}).get("sha256") != (self.parent.program or {}).get("sha256"):
+            d["program"] = self.program
+        return d
+
+
+def _pii_fields(schema):
+    return set(getattr(schema, "__shio_pii__", ()) or ())
+
+
+def _prompt_hash(req):
+    from .models import messages_for
+    return hashlib.sha256(json.dumps(messages_for(req), sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _source_hash(s):
+    if s.text is not None:
+        return hashlib.sha256(s.text.encode()).hexdigest()
+    try:
+        return hashlib.sha256(Path(s.path).read_bytes()).hexdigest()
+    except (OSError, TypeError):
+        return None
+
+
+def model_identity(by):
+    try:
+        return by.identity() if hasattr(by, "identity") else {"kind": type(by).__name__}
+    except Exception as e:
+        return {"kind": type(by).__name__, "identity_error": str(e)[:200]}
+
+
+def _encode_input(x):
+    """An agent input as JSON that `shio replay` can turn back into the same input."""
+    if isinstance(x, Source):
+        return {"$source": dataclasses.asdict(x)}
+    if hasattr(x, "propose"):
+        return {"$model": model_identity(x)}
+    if isinstance(x, tuple):
+        return {"$tuple": [_encode_input(v) for v in x]}
+    if isinstance(x, list):
+        return [_encode_input(v) for v in x]
+    if isinstance(x, dict):
+        if all(isinstance(k, str) for k in x):
+            return {k: _encode_input(v) for k, v in x.items()}
+        return {"$dict": [[_encode_input(k), _encode_input(v)] for k, v in x.items()]}
+    if x is None or isinstance(x, (str, int, float, bool)):
+        return x
+    return {"$opaque": repr(x)[:300]}
 
 
 def _current(what):
@@ -159,16 +228,21 @@ def read(schema, ask, *, by, sources=(), context=None, system=None, name=None, b
     sources = [s if isinstance(s, Source) else Source(str(s), path=str(s)) for s in _flat(sources)]
     meta = {**(meta or {}), **({"key": key} if key is not None else {})}
     for s in sources:
-        run.sources.setdefault(s.id, {"name": s.name, "path": s.path, "text": s.text})
+        run.sources.setdefault(s.id, {"name": s.name, "path": s.path, "text": s.text, "sha256": _source_hash(s)})
     req = ReadRequest(name or getattr(schema, "__name__", "reading"), ask, system or "", sources,
                       to_jsonable(_uncover(context or {})), to_json_schema(schema), blind, meta)
+    ident = model_identity(by)
     try:
+        if run.regulated and ident.get("kind") not in ("replay",) and not ident.get("pinned"):
+            raise RegulatedError(f"model {ident.get('model', ident.get('kind'))} is not pinned; a regulated program "
+                                 "only calls a model pinned to an exact version (ollama(..., digest=...) or pinned=...)")
         raw = by.propose(req)
-    except Exception as e:  # a model that times out or errors gives a null reading, like a reply that does not fit
+    except Exception as e:  # a model that times out, errors or is refused gives a null reading
         raw, value, error = None, None, f"model call failed: {type(e).__name__}: {e}"
     else:
         value, error = parse(schema, raw)
     r = Reading(req.name, getattr(by, "name", type(by).__name__), req, raw, value, error, schema, run.id)
+    r.seq, r.model_id = run.next_seq(), ident
     run.readings.append(r)
     return r
 
@@ -305,12 +379,25 @@ def rule(fn=None, *, name=None):
     return wrapper
 
 
-_config = {"trace_dir": "shio-traces"}
+_config = {"trace_dir": "shio-traces", "vault": False, "signer": None}
+last_run = {"run": None}        # the most recent top-level run (shio replay reads it)
 
 
-def configure(trace_dir=None):
-    """trace_dir=None turns trace files off."""
+def configure(trace_dir=None, vault=None, signer=None):
+    """trace_dir=None turns trace files off (not allowed for a regulated program). vault=True keeps free text and
+    personal data in a separate, erasable vault file. signer: a ledger.Signer (default: SHIO_SIGNING_KEY)."""
     _config["trace_dir"] = trace_dir
+    if vault is not None:
+        _config["vault"] = vault
+    if signer is not None:
+        _config["signer"] = signer
+
+
+def _signer():
+    if _config["signer"] is None:
+        from .ledger import load_signer
+        _config["signer"] = load_signer() or False
+    return _config["signer"] or None
 
 
 def agent(fn=None, *, record=True, name=None):
@@ -319,9 +406,16 @@ def agent(fn=None, *, record=True, name=None):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             parent = _run.get()
-            run = Run(name or fn.__qualname__, parent)
-            run.inputs = to_jsonable({"args": [a for a in args if not _has_reading(a)], "kwargs": {
-                k: v for k, v in kwargs.items() if not _has_reading(v)}})
+            run = Run(name or fn.__qualname__, parent, fn.__globals__.get("__shio_program__"))
+            if parent is None and run.regulated and not wrapper.replaying:
+                if not (record and _config["trace_dir"]):
+                    raise RegulatedError(f"{run.program['path']} is regulated: every run must be recorded "
+                                         "(trace files cannot be turned off)")
+                if not _signer():
+                    raise RegulatedError(f"{run.program['path']} is regulated: set SHIO_SIGNING_KEY to a key from "
+                                         "`shio keygen` (or hmac:<secret>) so every record is signed")
+            run.inputs = {"args": [_encode_input(a) for a in args if not _has_reading(a)],
+                          "kwargs": {k: _encode_input(v) for k, v in kwargs.items() if not _has_reading(v)}}
             tok = _run.set(run)
             try:
                 out = fn(*args, **kwargs)
@@ -337,10 +431,14 @@ def agent(fn=None, *, record=True, name=None):
                 run.ended = time.time()
                 if parent is not None:
                     parent.children.append(run)
-                elif record and _config["trace_dir"]:
-                    from .trace import write
-                    wrapper.last_trace = write(run, _config["trace_dir"])
+                else:
+                    last_run["run"] = run
+                    if record and _config["trace_dir"] and not wrapper.replaying:
+                        from .trace import write
+                        wrapper.last_trace = write(run, _config["trace_dir"], vault=_config["vault"] or run.regulated,
+                                                   signer=_signer())
         wrapper.last_trace = None
+        wrapper.replaying = False
         return wrapper
     return deco(fn) if fn else deco
 

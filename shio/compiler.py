@@ -43,7 +43,7 @@ TRAIN = re.compile(r"^train\s+(?P<agent>[A-Za-z_]\w*)\s+on\s+(?P<traces>.+?)\s+w
 FIELD = re.compile(r"^(?P<name>[A-Za-z_]\w*)\s*:\s*(?P<type>.+?)(?:\s*=\s*(?P<default>.+))?$")
 
 PRELUDE = """import shio as __shio
-from typing import Optional, Literal, List
+from typing import Optional, Literal, List, ClassVar
 from pydantic import BaseModel as _ShioType, Field as _ShioField
 from shio.models import ollama, openai_compat, replay
 from shio.core import Source
@@ -214,6 +214,7 @@ class Compiler:
         self.tail = []         # module-level helpers emitted after everything else (checks, rules)
         self.agents = set()
         self.trains = []
+        self.regulated = False
         self.uses = []         # (names, line, where) used in prompts and checks, verified once the module is known
 
     # ---------------- helpers ----------------
@@ -330,6 +331,12 @@ class Compiler:
                 if not any(s.strip() and not s.strip().startswith("#") for s in body):
                     self.error(line, "main: needs a body")
                 i = self.body(j, 0, 1, {"kind": "main", "readings": set(), "agent": None})
+            elif text == "regulated":
+                # the program declares itself regulated: the escape hatches are compile errors, and at run time it
+                # needs a signing key and pinned models (see shio.ledger and docs/REGULATED.md)
+                self.regulated = True
+                self.emit(0, "pass  # regulated", line)
+                i = j
             elif word == "train":
                 m = TRAIN.match(text) or self.error(
                     line, 'expected: train AGENT on "traces/*.json" with model "Qwen/Qwen3-8B" [using grpo|sft] [into "dir"]')
@@ -365,6 +372,7 @@ class Compiler:
         self.emit(0, f"class {m['name']}(_ShioType):", line)
         body, k = self.block(i + 1, 0, raw=True)
         fields = 0
+        pii = []
         for n, raw in enumerate(body, i + 2):
             s = raw.strip()
             if not s or s.startswith("#"):
@@ -373,13 +381,19 @@ class Compiler:
                 self.emit(1, s, n)       # docstring: the type's description
                 continue
             code, desc = _strip_comment(s)
-            f = FIELD.match(code) or self.error(n, "expected a field: name: type [= default]  # description")
-            t = self.type_expr(f["type"].strip(), n)
+            f = FIELD.match(code) or self.error(n, "expected a field: name: type [pii] [= default]  # description")
+            ftype = f["type"].strip()
+            if re.search(r"\spii$", ftype):       # personal data: hashed in records, kept whole only in the vault
+                ftype = ftype[:-3].strip()
+                pii.append(f["name"])
+            t = self.type_expr(ftype, n)
             args = ([f["default"]] if f["default"] else []) + ([f"description={desc!r}"] if desc else [])
             self.emit(1, f"{f['name']}: {t}" + (f" = _ShioField({', '.join(args)})" if args else ""), n)
             fields += 1
         if not fields:
             self.error(line, f"type {m['name']} has no fields")
+        if pii:
+            self.emit(1, f"__shio_pii__: ClassVar[frozenset] = frozenset({sorted(pii)!r})", line)
         return k
 
     def type_expr(self, t, line):
@@ -668,7 +682,43 @@ def compile_source(source, path="<shio>"):
                 if n not in known:
                     hint = " (write {{ and }} for literal braces)" if where.startswith("the prompt") else ""
                     c.error(line, f"'{n}' is not defined, in {where}{hint}")
+    if c.regulated:
+        _regulated_scan(c, py, lines)
     return py, lines
+
+
+# What a regulated program may not do: every way to reach a reading's value, or the runtime's own state, without
+# going through a check or a rule. Python is not a sandbox; this makes each such route a compile error in Shio code,
+# and the hashes of imported local modules (trusted code) are recorded with every decision.
+REGULATED_NAMES = {"locals", "vars", "globals", "eval", "exec", "compile", "getattr", "setattr", "delattr",
+                   "__import__", "breakpoint", "memoryview"}
+REGULATED_MODULES = {"shio", "importlib", "inspect", "ctypes", "gc", "sys", "operator", "pickle", "marshal",
+                     "copyreg", "dill", "cloudpickle", "types", "builtins"}
+COMPILER_NAMES = {"_ShioType", "_ShioField", "__name__", "__file__"}
+
+
+def _regulated_scan(c, py, lines):
+    tree = ast.parse(py)
+    for node in ast.walk(tree):
+        ln = lines[node.lineno - 1] if getattr(node, "lineno", 0) and node.lineno <= len(lines) else 0
+        if not ln:               # the prelude the compiler adds
+            continue
+        why = None
+        if isinstance(node, ast.Name):
+            n = node.id
+            if n in REGULATED_NAMES:
+                why = f"'{n}' can reach a reading's value or the runtime without a check or rule"
+            elif n.startswith("__") and not n.startswith("__shio") and n not in COMPILER_NAMES:
+                why = f"'{n}' (a dunder name) is not allowed"
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("_"):
+            why = f"'.{node.attr}': private and dunder attributes are not allowed"
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            bad = [m for m in mods if m.split(".")[0] in REGULATED_MODULES]
+            if bad:
+                why = f"importing {bad[0]} is not allowed (it can reach the runtime's internals)"
+        if why:
+            c.error(ln, f"regulated: {why}")
 
 
 def to_code(source, path="<shio>"):

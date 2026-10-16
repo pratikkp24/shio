@@ -1,4 +1,4 @@
-"""shio run | check | build | train | show | new"""
+"""shio run | check | build | train | show | new | keygen | verify | replay | erase"""
 import argparse
 import json
 import subprocess
@@ -8,7 +8,7 @@ from pathlib import Path
 from . import __version__, load, trace
 from . import train as training
 from .compiler import ShioError, compile_source, to_code
-from .core import BoundaryError, configure
+from .core import BoundaryError, RegulatedError, configure
 
 
 def _run(a):
@@ -128,6 +128,37 @@ def _new(a):
     print(f"created {d}/agent.shio\n  cd {d} && shio run agent.shio")
 
 
+def _keygen(a):
+    from .ledger import keygen
+    priv, pub, kid = keygen(a.folder)
+    print(f"signing key {kid}\n  private: {priv}   (keep secret; export SHIO_SIGNING_KEY={priv})\n"
+          f"  public:  {pub}   (give to auditors: shio verify --pubkey {pub})")
+
+
+def _verify(a):
+    from .ledger import load_public_key, verify
+    pub = load_public_key(a.pubkey) if a.pubkey else None
+    secret = a.secret.encode() if a.secret else None
+    ok, report, _ = verify(a.folder, pub, secret, a.head)
+    print("\n".join(report))
+    print("VERIFIED" if ok else "NOT VERIFIED")
+    sys.exit(0 if ok else 1)
+
+
+def _replay(a):
+    from .replay import replay
+    ok, lines = replay(a.record, a.program, a.allow_changed)
+    print("\n".join(lines))
+    sys.exit(0 if ok else 1)
+
+
+def _erase(a):
+    from .core import _signer
+    from .ledger import erase
+    e = erase(a.record, a.reason, _signer())
+    print(f"erased the vault of {Path(a.record).name}; ledger entry {e['seq']} records it ({a.reason})")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="shio", description="Shio: the model reads, code decides.")
     p.add_argument("--version", action="version", version=f"shio {__version__}")
@@ -154,6 +185,24 @@ def main(argv=None):
     n = sub.add_parser("new", help="start a new agent project in a folder")
     n.add_argument("name")
     n.set_defaults(fn=_new)
+    k = sub.add_parser("keygen", help="make an Ed25519 key pair for signing decision records")
+    k.add_argument("folder")
+    k.set_defaults(fn=_keygen)
+    v = sub.add_parser("verify", help="check a traces folder: hash chain, signatures, vaults, nothing added or removed")
+    v.add_argument("folder")
+    v.add_argument("--pubkey", help="the public key from `shio keygen`, to check Ed25519 signatures")
+    v.add_argument("--secret", help="the HMAC secret, for records signed with hmac:")
+    v.add_argument("--head", help="the head hash anchored earlier; fails if the chain no longer ends there")
+    v.set_defaults(fn=_verify)
+    rp = sub.add_parser("replay", help="re-run a recorded decision from its recorded model answers and compare")
+    rp.add_argument("record")
+    rp.add_argument("--program", help="the .shio file, if not where the record says")
+    rp.add_argument("--allow-changed", action="store_true", help="replay with a changed program (impact analysis)")
+    rp.set_defaults(fn=_replay)
+    e = sub.add_parser("erase", help="delete a record's vault (personal data) and enter the erasure in the ledger")
+    e.add_argument("record")
+    e.add_argument("--reason", required=True)
+    e.set_defaults(fn=_erase)
     s = sub.add_parser("show", help="summarise trace files")
     s.add_argument("traces", nargs="+")
     s.set_defaults(fn=_show)
@@ -164,6 +213,8 @@ def main(argv=None):
         sys.exit(e.format())
     except BoundaryError as e:
         sys.exit(f"boundary error: {e}")
+    except RegulatedError as e:
+        sys.exit(f"regulated: {e}")
 
 
 if __name__ == "__main__":
