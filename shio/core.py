@@ -421,13 +421,17 @@ _config = {"trace_dir": "shio-traces", "vault": False, "signer": None, "actor": 
 last_run = {"run": None}        # the most recent top-level run (shio replay reads it)
 
 
-def configure(trace_dir=None, vault=None, signer=None, actor=None, policies=None, jurisdiction=None):
+def configure(trace_dir=None, vault=None, signer=None, actor=None, policies=None, jurisdiction=None, as_of=None):
     """trace_dir=None turns trace files off (not allowed for a regulated program). vault=True keeps free text and
     personal data in a separate, erasable vault file. signer: a ledger.Signer (default: SHIO_SIGNING_KEY).
     actor: who is running the program, recorded as the requester of any sign-off (default: SHIO_ACTOR, or the
     operating-system user). jurisdiction: whose rules govern each decision, e.g. "IN" (default: SHIO_JURISDICTION;
-    "" clears it); policy and table versions with `applies_to` are resolved for it."""
+    "" clears it); policy and table versions with `applies_to` are resolved for it. as_of: the date decisions are made
+    under (a datetime.date or "YYYY-MM-DD"); in_force() then reads the tables in force on that date, so a September close
+    run in October uses September's rates and limits. Default: the day each decision runs ("" clears it)."""
     _config["trace_dir"] = trace_dir
+    if as_of is not None:
+        _config["as_of"] = (datetime.date.fromisoformat(as_of) if isinstance(as_of, str) and as_of else as_of) or None
     if jurisdiction is not None:
         from .policy import jurisdiction_code
         _config["jurisdiction"] = jurisdiction_code(jurisdiction) if jurisdiction else None
