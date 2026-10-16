@@ -197,12 +197,21 @@ shio check program.shio           # compile and check the boundary, without runn
 shio build program.shio -o out.py # the Python it compiles to
 shio show shio-traces/*.json      # readings, checks passed and failed, per run
 shio train program.shio [--go]    # traces -> sft.jsonl, grpo.jsonl and a TRL script
+shio keygen | verify | replay | erase   # signed decision records (see docs/REGULATED.md)
 ```
 
 ## Editor
 
 A VS Code extension (also for Cursor and other forks) highlights `.shio` files, prompts and descriptions included,
 and shows `shio check` errors as you save. See [`editors/vscode`](https://github.com/Aonami-Labs/shio/tree/main/editors/vscode).
+
+## Regulated decisions
+
+For banks, insurers, pharma and the public sector, a `regulated` line at the top of a program makes every decision
+evidence: signed, hash-chained decision records that name the program, the pinned model and every source and prompt;
+`shio verify` to detect edited, missing or reordered records; `shio replay` to re-run a decision from its recorded
+model answers; `pii` fields hashed in the record and kept in an erasable vault (`shio erase`). The boundary's Python
+escape hatches become compile errors. See [docs/REGULATED.md](https://github.com/Aonami-Labs/shio/blob/main/docs/REGULATED.md).
 
 ## Status
 

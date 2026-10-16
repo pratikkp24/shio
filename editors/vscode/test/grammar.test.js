@@ -177,6 +177,13 @@ async function main() {
   expect(ed, L, 19, "read", "keyword.other.read.shio", { not: true });
   expect(ed, L, 9, "z", "entity.name.variable.reading.shio");
   {
+    const R = await tokenize("regulated\n\ntype Applicant:\n    name: str pii          # personal data\n    income: float\n");
+    expect("regulated", R, 1, "regulated", "keyword.other.regulated.shio");
+    expect("regulated", R, 4, "pii", "storage.modifier.pii.shio");
+    expect("regulated", R, 4, "str", "support.type");
+    expect("regulated", R, 4, "personal data", "string.quoted.docstring.description.shio");
+  }
+  {
     const C = await tokenize("agent a(x):\n    read v: int from x by m:\n        hi\n    check ok: v > 0\n    check big after ok, other: v > 10, \"small {v}\"\n");
     expect("check after", C, 5, "after", "keyword.other.after.shio");
     expect("check after", C, 5, "big", "entity.name.function.check.shio");

@@ -49,6 +49,8 @@ of the language rather than a convention:
 - A model call that times out or errors gives a null reading, like a reply that does not fit its type.
 - JSON schemas sent to models inline nested types (no `$ref`), which local models' structured output handles better.
 - `shio new NAME` starts a project that runs with no model.
+- `regulated` programs: signed, hash-chained decision records, `shio verify | replay | erase`, pinned models, `pii`
+  fields with an erasable vault, and the boundary's Python escape hatches as compile errors (docs/REGULATED.md).
 
 ## Left out of v0.1, on purpose
 

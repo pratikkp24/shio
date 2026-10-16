@@ -7,6 +7,9 @@
   ],
   "patterns": [
     {
+      "include": "#regulated-pragma"
+    },
+    {
       "include": "#type-block"
     },
     {
@@ -132,6 +135,10 @@
       "patterns": [
         {
           "include": "#field-description"
+        },
+        {
+          "match": "\\b(pii)\\b(?=\\s*(#|=|$))",
+          "name": "storage.modifier.pii.shio"
         },
         {
           "name": "meta.default.shio",
@@ -637,6 +644,17 @@
         },
         "2": {
           "name": "punctuation.section.main.begin.shio"
+        }
+      }
+    },
+    "regulated-pragma": {
+      "match": "^(regulated)\\s*(#.*)?$",
+      "captures": {
+        "1": {
+          "name": "keyword.other.regulated.shio"
+        },
+        "2": {
+          "name": "comment.line.number-sign.shio"
         }
       }
     }
