@@ -115,6 +115,104 @@ def load_public_key(path):
     return serialization.load_pem_public_key(Path(path).expanduser().read_bytes())
 
 
+# ---------------- vault encryption ----------------
+# A vault may be encrypted at rest with AES-256-GCM. The key comes from configure(vault_key=...) or SHIO_VAULT_KEY:
+# a path to a key file (from `shio vaultkey`), or "hex:<64 hex digits>". The record keeps the sha256 of the plaintext
+# (what it proves) and of the ciphertext (what verify can check without the key), and the key's id, never the key.
+# The record's file name is authenticated with the ciphertext, so a vault cannot be moved onto another record.
+_VAULT_KEY = None
+
+
+class VaultLocked(ValueError):
+    pass
+
+
+def set_vault_key(key):
+    """bytes, a key-file path, "hex:...", or None to fall back to SHIO_VAULT_KEY."""
+    global _VAULT_KEY
+    _VAULT_KEY = _parse_key(key) if key not in (None, "") else None
+
+
+def _parse_key(spec):
+    if isinstance(spec, bytes):
+        k = spec
+    else:
+        spec = str(spec).strip()
+        if spec.startswith("hex:"):
+            k = bytes.fromhex(spec[4:])
+        else:
+            raw = Path(spec).expanduser().read_text().strip()
+            k = bytes.fromhex(raw.removeprefix("hex:"))
+    if len(k) != 32:
+        raise ValueError("a vault key is 32 bytes (AES-256)")
+    return k
+
+
+def vault_key():
+    if _VAULT_KEY is not None:
+        return _VAULT_KEY
+    spec = os.environ.get("SHIO_VAULT_KEY")
+    return _parse_key(spec) if spec else None
+
+
+def vault_key_id(key):
+    return "aes256:" + hashlib.sha256(b"shio-vault-key-id" + key).hexdigest()[:16]
+
+
+def vaultkeygen(folder):
+    import secrets as _s
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "shio-vault.key"
+    if path.exists():
+        raise FileExistsError(f"{path} exists; a new key would make existing vaults unreadable")
+    key = _s.token_bytes(32)
+    path.write_text("hex:" + key.hex() + "\n")
+    os.chmod(path, 0o600)
+    return path, vault_key_id(key)
+
+
+def _seal(vault, aad):
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    key = vault_key()
+    nonce = os.urandom(12)
+    ct = AESGCM(key).encrypt(nonce, json.dumps(vault, ensure_ascii=False, default=str).encode(), aad.encode())
+    return {"alg": "AES-256-GCM", "key_id": vault_key_id(key), "nonce": base64.b64encode(nonce).decode(),
+            "ciphertext": base64.b64encode(ct).decode()}
+
+
+def _open(blob, aad):
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    key = vault_key()
+    if key is None:
+        raise VaultLocked("this vault is encrypted: set SHIO_VAULT_KEY (or configure(vault_key=...)) to read it")
+    if blob.get("key_id") != vault_key_id(key):
+        raise VaultLocked(f"this vault was encrypted with key {blob.get('key_id')}, not {vault_key_id(key)}")
+    pt = AESGCM(key).decrypt(base64.b64decode(blob["nonce"]), base64.b64decode(blob["ciphertext"]), aad.encode())
+    return json.loads(pt)
+
+
+def _write_vault(folder, stem, vault, record_name):
+    """Write a vault (encrypted when a key is set) and return what the record says about it."""
+    vdir = Path(folder) / "vault"
+    vdir.mkdir(exist_ok=True)
+    if vault_key() is not None:
+        blob = _seal(vault, record_name)
+        vpath = vdir / f"{stem}.vault.enc"
+        text = json.dumps(blob, indent=1)
+        vpath.write_text(text)
+        return {"file": f"vault/{vpath.name}", "sha256": sha256(vault), "ciphertext_sha256": text_sha256(text),
+                "encryption": {"alg": blob["alg"], "key_id": blob["key_id"]}}
+    vpath = vdir / f"{stem}.vault.json"
+    vpath.write_text(json.dumps(vault, indent=1, ensure_ascii=False, default=str))
+    return {"file": f"vault/{vpath.name}", "sha256": sha256(vault)}
+
+
+def _read_vault(path, v, record_name):
+    text = Path(path).read_text()
+    return _open(json.loads(text), record_name) if v.get("encryption") else json.loads(text)
+
+
 # ---------------- vault ----------------
 VAULT_FIELDS_RUN = ("inputs",)
 VAULT_FIELDS_READING = ("raw", "error")
@@ -447,11 +545,7 @@ def write(record, folder, stem, use_vault=False, signer=None, handling=None):
     with _locked(folder):
         entries = _entries(folder)
         if vault:
-            vdir = folder / "vault"
-            vdir.mkdir(exist_ok=True)
-            vpath = vdir / f"{stem}.vault.json"
-            vpath.write_text(json.dumps(vault, indent=1, ensure_ascii=False, default=str))
-            record["vault"] = {"file": f"vault/{vpath.name}", "sha256": sha256(vault)}
+            record["vault"] = _write_vault(folder, stem, vault, f"{stem}.json")
         record["integrity"] = {"seq": len(entries), "prev": entries[-1]["sha256"] if entries else GENESIS}
         digest = record_hash(record)
         record["integrity"].update(sha256=digest)
@@ -535,9 +629,10 @@ def migrate(folder, handling, reason, signer=None, dry_run=False):
                 new_vault = None
                 new["vault"] = rec.get("vault")
             elif new_vault:
-                (folder / rec["vault"]["file"]).write_text(json.dumps(new_vault, indent=1, ensure_ascii=False,
-                                                                      default=str))
-                new["vault"] = {"file": rec["vault"]["file"], "sha256": sha256(new_vault)}
+                old_file = folder / rec["vault"]["file"]
+                new["vault"] = _write_vault(folder, path.stem, new_vault, path.name)
+                if (folder / new["vault"]["file"]) != old_file and old_file.exists():
+                    old_file.unlink()                  # re-sealed under the key now in force
             # the policy the decision was written under stays its policy; the migration says what was applied later
             new["data_policy"] = rec.get("data_policy")
             new["migrations"] = rec.get("migrations", []) + [
@@ -563,7 +658,7 @@ def load_vault(record_path, record=None):
     if not v:
         return None
     p = record_path.parent / v["file"]
-    return json.loads(p.read_text()) if p.exists() else None
+    return _read_vault(p, v, record_path.name) if p.exists() else None
 
 
 # ---------------- sign-off ----------------
@@ -753,7 +848,19 @@ def verify(folder, public_key=None, secret=None, head=None, signer_keys=()):
         v = rec.get("vault")
         if v:
             vp = folder / v["file"]
-            if vp.exists():
+            if vp.exists() and v.get("encryption"):
+                text = vp.read_text()
+                if text_sha256(text) != v.get("ciphertext_sha256"):
+                    problems.append(f"{v['file']}: TAMPERED vault (ciphertext changed)")
+                elif vault_key() is not None:
+                    try:
+                        if sha256(_open(json.loads(text), e["file"])) != v["sha256"]:
+                            problems.append(f"{v['file']}: TAMPERED vault")
+                    except VaultLocked as err:
+                        notes.append(f"{v['file']}: encrypted; contents not checked ({err})")
+                    except Exception:
+                        problems.append(f"{v['file']}: vault does not decrypt for its record (moved or altered)")
+            elif vp.exists():
                 vault = json.loads(vp.read_text())
                 if sha256(vault) != v["sha256"]:
                     problems.append(f"{v['file']}: TAMPERED vault")

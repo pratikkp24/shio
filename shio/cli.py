@@ -381,6 +381,16 @@ def _monitor(a):
         sys.exit(1)
 
 
+def _vaultkey(a):
+    from .ledger import vaultkeygen
+    try:
+        path, kid = vaultkeygen(a.folder)
+    except FileExistsError as e:
+        sys.exit(str(e))
+    print(f"  vault key: {path}   ({kid}; keep secret, back it up: without it encrypted vaults cannot be read)")
+    print(f"  export SHIO_VAULT_KEY={path}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="shio", description="Shio: the model reads, code decides.")
     p.add_argument("--version", action="version", version=f"shio {__version__}")
@@ -412,6 +422,9 @@ def main(argv=None):
     n = sub.add_parser("new", help="start a new agent project in a folder")
     n.add_argument("name")
     n.set_defaults(fn=_new)
+    vk = sub.add_parser("vaultkey", help="make an AES-256 key for encrypting vaults at rest (SHIO_VAULT_KEY)")
+    vk.add_argument("folder", nargs="?", default="keys")
+    vk.set_defaults(fn=_vaultkey)
     k = sub.add_parser("keygen", help="make an Ed25519 key pair for signing decision records")
     k.add_argument("folder")
     k.set_defaults(fn=_keygen)
