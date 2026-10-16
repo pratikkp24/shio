@@ -1,0 +1,37 @@
+# Card payment under PCI DSS. The card verification code is read and checked like any other field, but the policy
+# (pci/pci.policy) handles CardCVV as `drop`: after the run it is written nowhere, not even as a hash. Run:
+#   shio keygen keys && export SHIO_SIGNING_KEY=keys/shio-signing.key
+#   shio run card.shio --traces records --policies pci && shio audit records --policies pci
+#   grep -r 737 records          # nothing: not in the record, the vault or the ledger
+
+regulated
+
+type Card:
+    holder: str as CardholderName
+    number: str as CardNumber
+    expiry: str as CardExpiry     # MM/YY
+    cvv: str as CardCVV           # three or four digits on the back
+    amount: float                 # what the customer is paying
+
+# a stand-in for a real model: it copies the security code from the form, so this program's text holds none
+model clerk = replay(lambda req: {"holder": "Asha Rao", "number": "4111 1111 1111 1111", "expiry": "09/29",
+                                  "cvv": req.ask.split("CVV ")[1][:3], "amount": 2450.0})
+
+agent pay(form: str, llm):
+    read c: Card by llm:
+        Read the card payment details from this form.
+
+        {form}
+    check number_on_form: c.number in form, "the card number is not on the form"
+    check cvv_on_form: c.cvv in form, "the security code is not on the form"
+    check cvv_shape: c.cvv.isdigit() and len(c.cvv) in (3, 4), "the security code is not three or four digits"
+    rule decision:
+        if c is None:
+            return {"status": "REVIEW", "why": ["the model gave no usable answer"]}
+        if checks.failures():
+            return {"status": "DECLINE", "why": [x["detail"] for x in checks.failures()]}
+        return {"status": "AUTHORISE", "amount": c.amount, "card": "ending " + c.number[-4:]}
+    return decision
+
+main:
+    return pay("Asha Rao, card 4111 1111 1111 1111, expires 09/29, CVV 737, pay 2450.00", clerk)

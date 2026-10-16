@@ -22,6 +22,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -138,17 +139,23 @@ SCRUB_MIN = 4      # shorter values (a "5", a "No") would scrub ordinary text; s
 
 
 def _decide(handling):
-    """class -> clear | vault | hashed. Without a policy store, every classified field is kept in the vault."""
+    """class -> clear | vault | hashed | drop. Without a policy store, every classified field is kept in the vault."""
     return (lambda cls: handling.of(cls)) if handling is not None else (lambda cls: "vault")
 
 
 def _protected(v):
-    return isinstance(v, dict) and "$pii" in v
+    return isinstance(v, dict) and ("$pii" in v or "$dropped" in v)
+
+
+def _dropped(cls):
+    """What a dropped field leaves behind: that it existed and its class, never its value or a hash of it."""
+    return {"$dropped": True, "class": cls, "handling": "drop"}
 
 
 def _apply(value, classes, decide, scrub, for_vault=False, prefix=""):
-    """A reading's value with each classified field handled: clear stays, vault and hashed become a hash. For the
-    vault copy (for_vault), only hashed fields are replaced. Values of hashed fields are collected to be scrubbed."""
+    """A reading's value with each classified field handled: clear stays, vault and hashed become a hash, drop becomes
+    a marker with no hash. For the vault copy (for_vault), only hashed and dropped fields are replaced. Values of
+    hashed and dropped fields are collected to be scrubbed: {text: (replacement, whole_token)}."""
     if isinstance(value, list):
         return [_apply(v, classes, decide, scrub, for_vault, prefix) for v in value]
     if not isinstance(value, dict) or _protected(value):
@@ -157,13 +164,22 @@ def _apply(value, classes, decide, scrub, for_vault=False, prefix=""):
     for k, v in value.items():
         path = f"{prefix}{k}"
         cls = classes.get(path)
-        if cls is not None and v is not None and not _protected(v):
+        if cls is not None and v is not None:
             h = decide(cls)
-            if h == "hashed" and isinstance(v, (str, int, float)) and len(str(v)) >= SCRUB_MIN:
-                scrub[str(v)] = sha256(v)
-            if h == "hashed" or (h == "vault" and not for_vault):
-                out[k] = {"$pii": sha256(v), "class": cls, "handling": h}
+            if h == "drop":                   # any length: a 3-digit CVV must go too, so match it as a whole token
+                if isinstance(v, dict) and "$pii" in v:      # once hashed (a migration): its hash tag goes as well,
+                    scrub[f"[hashed {v['$pii'][:12]}]"] = (f"[dropped {cls}]", False)
+                    scrub[("sha256", v["$pii"])] = (f"[dropped {cls}]", True)   # and any copy left in the text
+                elif not _protected(v) and isinstance(v, (str, int, float)) and not isinstance(v, bool) and str(v):
+                    scrub[str(v)] = (f"[dropped {cls}]", True)
+                out[k] = _dropped(cls)
                 continue
+            if not _protected(v):
+                if h == "hashed" and isinstance(v, (str, int, float)) and len(str(v)) >= SCRUB_MIN:
+                    scrub.setdefault(str(v), (f"[hashed {sha256(v)[:12]}]", False))
+                if h == "hashed" or (h == "vault" and not for_vault):
+                    out[k] = {"$pii": sha256(v), "class": cls, "handling": h}
+                    continue
         if isinstance(v, list):
             out[k] = [_apply(x, classes, decide, scrub, for_vault, f"{path}[].") for x in v]
         elif isinstance(v, dict):
@@ -173,15 +189,51 @@ def _apply(value, classes, decide, scrub, for_vault=False, prefix=""):
     return out
 
 
+def _strings(node):
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, (list, tuple)):
+        for v in node:
+            yield from _strings(v)
+    elif isinstance(node, dict):
+        for v in node.values():
+            yield from _strings(v)
+
+
+def _find_hashed(scrub, *nodes):
+    """A value once hashed and now dropped is known only by its hash. A short one (under SCRUB_MIN) was hashed in
+    place and never scrubbed, so look for it among the words of the text: each word whose hash matches is scrubbed."""
+    wanted = {k[1]: scrub.pop(k) for k in [k for k in scrub if isinstance(k, tuple)]}
+    if not wanted:
+        return scrub
+    for text in (t for n in nodes for t in _strings(n)):
+        for word in set(re.findall(r"[0-9A-Za-z]+", text)):
+            for candidate in (word, int(word) if word.isdigit() else None):
+                if candidate is not None and sha256(candidate) in wanted:
+                    scrub.setdefault(word, wanted[sha256(candidate)])
+    return scrub
+
+
 def _scrub(node, scrub, skip=("integrity",)):
-    """Replace every occurrence of a hashed value in the strings of a JSON structure."""
+    """Replace every occurrence of a hashed or dropped value in a JSON structure: inside strings, and (for dropped
+    values) a number or string equal to it."""
     if not scrub:
         return node
     if isinstance(node, str):
-        for plain, digest in scrub.items():
-            if plain in node:
-                node = node.replace(plain, f"[hashed {digest[:12]}]")
+        if node in scrub and scrub[node][1]:
+            return scrub[node][0]
+        for plain in sorted(scrub, key=len, reverse=True):
+            new, whole = scrub[plain]
+            if plain not in node:
+                continue
+            if whole:
+                node = re.sub(rf"(?<![0-9A-Za-z]){re.escape(plain)}(?![0-9A-Za-z])", lambda _: new, node)
+            else:
+                node = node.replace(plain, new)
         return node
+    if isinstance(node, (int, float)) and not isinstance(node, bool):
+        hit = scrub.get(str(node))
+        return hit[0] if hit and hit[1] else node
     if isinstance(node, list):
         return [_scrub(v, scrub, ()) for v in node]
     if isinstance(node, dict):
@@ -240,7 +292,8 @@ def split(record, handling=None):
         for i, ch in enumerate(run.get("children", [])):
             walk(ch, f"{base}/children/{i}")
     walk(record, "")
-    if scrub:                              # hashed values: gone from the vault's free text and the record's
+    scrub = _find_hashed(scrub, record, vault)
+    if scrub:                              # hashed and dropped values: gone from the vault's free text and the record's
         vault = {k: _scrub(v, scrub, ()) for k, v in vault.items()}
         record = _scrub(record, scrub)
     return record, vault

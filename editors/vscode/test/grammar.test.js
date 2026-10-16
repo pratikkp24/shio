@@ -195,6 +195,9 @@ async function main() {
     expect("policy table", T, 1, "table", "storage.type.table.shio-policy");
     expect("policy table", T, 3, "max_dti", "variable.other.key.shio-policy");
     expect("policy table", T, 3, "0.4", "constant.numeric.shio-policy");
+    const D = await tokenize(fs.readFileSync(path.join(EXAMPLES, "regulated", "pci", "pci.policy"), "utf8"), "source.shio-policy");
+    expect("pci.policy", D, 12, "CardCVV", "variable.other.key.shio-policy");
+    expect("pci.policy", D, 12, "drop", "keyword.other.handling.shio-policy");
     const J = await tokenize('policy "UAE PDPL" version 1:\n    applies_to "AE", "AE-DIFC"  # the UAE branch\n', "source.shio-policy");
     expect("applies_to", J, 2, "applies_to", "keyword.other.applies_to.shio-policy");
     expect("applies_to", J, 2, '"AE"', "string.quoted.double.jurisdiction.shio-policy");

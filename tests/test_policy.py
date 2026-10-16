@@ -351,5 +351,110 @@ class Compile(unittest.TestCase):
                 shio.configure("shio-traces", vault=False, signer=False, policies=False)
 
 
+REGULATED = Path(__file__).resolve().parent.parent / "examples" / "regulated"
+CVV = "737"
+
+
+class Drop(unittest.TestCase):
+    """`drop` (PCI DSS 3.3.1: CVV, PIN, OTP): the run may use the value, but no file it writes holds it in any form,
+    not even as a hash. examples/regulated/card.shio under examples/regulated/pci."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.records = self.dir / "records"
+        self.signer = ledger.load_signer("hmac:k")
+        self.store = Store.load(REGULATED / "pci")
+
+    def tearDown(self):
+        shio.configure("shio-traces", vault=False, signer=False, policies=False)
+        self.tmp.cleanup()
+
+    def pay(self, policies=REGULATED / "pci", day="2026-10-16"):
+        shio.configure(str(self.records), signer=self.signer, policies=str(policies))
+        mod = shio.load(REGULATED / "card.shio")
+        with at(day):
+            out = mod.pay("Asha Rao, card 4111 1111 1111 1111, expires 09/29, CVV 737, pay 2450.00", mod.clerk)
+        return mod, out, Path(mod.pay.last_trace)
+
+    def written(self, *folders):
+        return {f: f.read_text() for d in folders for f in d.rglob("*") if f.is_file()}
+
+    def assert_cvv_nowhere(self, *folders):
+        hashes = {ledger.sha256(CVV), ledger.sha256(int(CVV))}
+        for f, text in self.written(*folders).items():
+            self.assertNotRegex(text, rf"(?<![0-9A-Za-z]){CVV}(?![0-9A-Za-z])", f.name)
+            for h in hashes:
+                self.assertNotIn(h[:12], text, f"{f.name} holds a hash of the CVV")
+
+    def test_parsing(self):
+        h = Store(parse('policy "P" version 1:\n    effective 2026-01-01\n    source "s"\n    CardCVV: drop\n'
+                        'policy "Q" version 1:\n    effective 2026-01-01\n    source "s"\n    CardCVV: hashed\n'
+                        '    *: drop\n')).handling(dt.date(2026, 6, 1))
+        self.assertEqual(h.of("CardCVV"), "drop")          # the most protective of hashed and drop
+        self.assertEqual(h.of("Anything"), "drop")
+        with self.assertRaises(PolicyError) as e:
+            parse('policy "P" version 1:\n    effective 2026-01-01\n    source "s"\n    CardPIN: drop, retain 1 years\n')
+        self.assertIn("no retention", str(e.exception))
+
+    def test_the_cvv_is_used_in_the_run_and_written_nowhere(self):
+        mod, out, path = self.pay()
+        self.assertEqual(out["status"], "AUTHORISE")     # cvv_on_form and cvv_shape passed: the value was there
+        rec = json.loads(path.read_text())
+        checks = {c["name"]: c["passed"] for c in rec["checks"]}
+        self.assertTrue(checks["cvv_on_form"] and checks["cvv_shape"])
+        value = rec["readings"][0]["value"]
+        self.assertEqual(value["cvv"], {"$dropped": True, "class": "CardCVV", "handling": "drop"})
+        self.assertEqual(value["number"]["handling"], "hashed")
+        self.assertEqual(rec["readings"][0]["handled"]["cvv"], "drop")
+        self.assertEqual(ledger.load_vault(path)["/readings/0/value"]["cvv"]["$dropped"], True)
+        from shio.evidence import build
+        build(self.records, self.dir / "pack", dt.date(2026, 10, 1), dt.date(2026, 10, 31), self.store,
+              secret=b"k", today=dt.date(2026, 10, 17))
+        self.assert_cvv_nowhere(self.records, self.dir / "pack")     # record, vault, ledger, evidence pack
+        self.assertTrue(ledger.verify(self.records, secret=b"k")[0])
+        ok, report, _ = audit(self.records, self.store, dt.date(2026, 10, 17))
+        self.assertTrue(ok, report)
+        ok, lines = replay(path)                                     # replay inputs: gone too, and it says so
+        self.assertFalse(ok)
+        self.assertIn("CardCVV was dropped", lines[0])
+
+    def write_older(self, handling):
+        older = self.dir / "older"
+        older.mkdir()
+        (older / "pci.policy").write_text((REGULATED / "pci" / "pci.policy").read_text()
+                                          .replace("CardCVV:        drop", f"CardCVV:        {handling}")
+                                          .replace("version 1", "version 0").replace("2026-01-01", "2025-01-01"))
+        return older
+
+    def test_audit_flags_and_migrate_removes_a_cvv_kept_any_other_way(self):
+        for was in ("clear", "vault", "hashed"):
+            with self.subTest(was=was):
+                self.tearDown()
+                self.setUp()
+                _, _, path = self.pay(self.write_older(was))
+                rec = json.loads(path.read_text())
+                self.assertEqual(rec["readings"][0]["handled"]["cvv"], was)
+                ok, report, _ = audit(self.records, self.store, dt.date(2026, 10, 17))
+                self.assertFalse(ok)
+                self.assertIn("(CardCVV) is stored", "\n".join(report))
+                self.assertIn("required drop", "\n".join(report))
+                done = ledger.migrate(self.records, self.store.handling(dt.date(2026, 10, 17)), "PCI DSS 3.3.1",
+                                      self.signer)
+                self.assertIn(("cvv", was, "drop"), [(c[1], c[2], c[3]) for c in done[0][1]])
+                self.assert_cvv_nowhere(self.records)
+                self.assertTrue(ledger.verify(self.records, secret=b"k")[0])
+                _, report, _ = audit(self.records, self.store, dt.date(2026, 10, 17))
+                self.assertNotIn("CardCVV", "\n".join(report))       # left: only that v0 was the policy it used
+                self.assertEqual(ledger.migrate(self.records, self.store.handling(dt.date(2026, 10, 17)), "again",
+                                                self.signer), [])
+
+    def test_a_dropped_value_is_scrubbed_as_a_whole_word_only(self):
+        scrub = {}
+        ledger._apply({"cvv": "737"}, {"cvv": "CardCVV"}, lambda c: "drop", scrub)
+        self.assertEqual(ledger._scrub({"t": "CVV 737, ref 17375, id a737b", "n": 737}, scrub),
+                         {"t": "CVV [dropped CardCVV], ref 17375, id a737b", "n": "[dropped CardCVV]"})
+
+
 if __name__ == "__main__":
     unittest.main()

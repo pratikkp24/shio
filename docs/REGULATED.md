@@ -233,6 +233,15 @@ policy "RBI data handling" version 4:
 | `clear` | as it is | — |
 | `vault` | its sha256 | kept whole, until erased or its retention ends |
 | `hashed` | its sha256 | nowhere; it is also scrubbed from prompts, raw answers, explanations and the outcome |
+| `drop` | a marker (`{"$dropped": true, "class": ...}`), no hash | nowhere; scrubbed as a whole word, at any length, from everything written |
+
+`drop` is for sensitive authentication data that PCI DSS (Requirement 3.3.1) forbids keeping after authorization
+even encrypted or hashed: card verification codes, PINs, OTPs. Readings and checks use the value in memory during
+the run; the record, the vault, the ledger, evidence packs and replay inputs never hold it, so a record with a dropped
+field can't be replayed (`shio replay` says so). A dropped class takes no retention period. `shio audit` flags a
+record that holds a dropped class in clear or as a hash, and `shio migrate` removes it, including a short value that
+an earlier `hashed` rule left in free text (found by its hash). See `examples/regulated/card.shio` with
+`examples/regulated/pci`.
 
 Where several policies cover a class, the most protective rule applies. A class that no policy in force covers is
 kept in the vault.
@@ -430,7 +439,8 @@ check names, rates, model identities and record file names, never personal data.
   fields (an employee id is better than a display name).
 - **Scrubbing a hashed value is exact-match.** Its literal text is removed wherever it appears. A reformatted
   copy (`+91 98200 12345` written as `9820012345`) is not; values shorter than four characters are hashed in place
-  but not scrubbed from free text.
+  but not scrubbed from free text. A dropped value is scrubbed at any length, as a whole word (so `737` goes from
+  `CVV 737` but not from `17375`), and a number equal to it is replaced too; a reformatted copy is still not caught.
 - **A policy is only as good as its classes.** Shio checks that classified fields follow the policy; it relies on
   the program (and the regulated name check) to classify every personal field in the first place.
 - **A jurisdiction is the operator's claim.** Shio resolves and records the rules for the jurisdiction the run
@@ -453,7 +463,7 @@ counsel and regulator.
 | Audit trails that can't be altered (21 CFR Part 11; SOX) | Hash chain, signatures, `verify`, anchored heads |
 | Reasons for a decision (GDPR transparency; adverse-action notices) | Reason codes in clear with customer-facing text (`shio reasons`), surviving erasure; explanations in the vault |
 | Technical documentation (EU AI Act Art. 11, Annex IV; SR 11-7 documentation) | `shio explain`: the decision map generated from the program, tied to its hash |
-| Erasure and data minimisation (GDPR Art. 17; DPDP Act) | Data classes handled per policy (`clear`, `vault`, `hashed`), `shio erase`, `shio retention` |
+| Erasure and data minimisation (GDPR Art. 17; DPDP Act) | Data classes handled per policy (`clear`, `vault`, `hashed`, `drop`), `shio erase`, `shio retention` |
 | Rules that change over time (RBI, SEBI, DPDP directions) | Dated, sourced policy versions; the version in force stamped into each record; `shio audit`, `policy impact`, `migrate` |
 | Several regulators for one program (branches abroad, cross-border groups) | `applies_to` on policy and table versions; the jurisdiction stamped into each record; a run without one refused |
 | Ongoing monitoring (EU AI Act Art. 72 post-market monitoring; SR 11-7 ongoing monitoring) | `shio monitor` over a rolling window, with webhook alerts and a CI/cron exit code |

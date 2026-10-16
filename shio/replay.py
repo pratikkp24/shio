@@ -82,6 +82,19 @@ def _summary(run):
     return checks, rules, json.dumps(run.get("outcome"), sort_keys=True, default=str)
 
 
+def _dropped_classes(node):
+    """Classes of the fields a record holds only as a drop marker."""
+    if isinstance(node, dict):
+        if "$dropped" in node:
+            yield node.get("class")
+            return
+        for v in node.values():
+            yield from _dropped_classes(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _dropped_classes(v)
+
+
 def replay(record_path, program=None, allow_changed=False, policies=None, at=None, jurisdiction=None):
     """-> (reproduced: bool, report lines). Decision tables come from the record (the values it used), unless
     `policies` (a policy.Store) is given: then the tables in force on `at` (default: the decision's date) are used,
@@ -96,6 +109,11 @@ def replay(record_path, program=None, allow_changed=False, policies=None, at=Non
             return False, [f"{record_path.name}: its vault was erased, so the model's answers are gone; "
                            "the record still shows what was decided and why"]
         record = merge(record, vault)
+    dropped = sorted({c for c in _dropped_classes(record)})
+    if dropped:
+        return False, [f"{record_path.name}: {', '.join(dropped)} {'was' if len(dropped) == 1 else 'were'} dropped "
+                       "under the data policy (written nowhere), so the inputs and the model's answers cannot be "
+                       "rebuilt; the record still shows what was decided and why"]
     prog = record.get("program") or {}
     path = Path(program or prog.get("path", ""))
     if not path.exists():

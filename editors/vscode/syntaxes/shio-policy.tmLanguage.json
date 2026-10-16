@@ -108,7 +108,7 @@
               "include": "#comment"
             },
             {
-              "match": "\\b(clear|hashed|vault|retain|redact|forbid|deny|allow)\\b",
+              "match": "\\b(clear|hashed|vault|drop|retain|redact|forbid|deny|allow)\\b",
               "name": "keyword.other.handling.shio-policy"
             },
             {

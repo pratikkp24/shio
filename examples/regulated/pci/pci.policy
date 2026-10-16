@@ -1,0 +1,14 @@
+# Card data under PCI DSS, for illustration only. Sensitive authentication data (the card verification code, the PIN)
+# must not be retained after authorization, even encrypted or hashed, so those classes are `drop`: the run may use
+# the value in memory, and no record, vault, evidence pack or replay input ever holds it in any form.
+
+policy "PCI DSS card data" version 1:
+    effective 2026-01-01
+    source "PCI DSS v4.0.1, Requirements 3.3.1 (SAD not retained after authorization) and 3.5.1 (PAN unreadable)"
+    approved_by "Head of Payments Security"
+    CardholderName: vault
+    CardNumber:     hashed
+    CardExpiry:     vault, retain 2 years
+    CardCVV:        drop
+    CardPIN:        drop
+    OTP:            drop

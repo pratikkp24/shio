@@ -162,7 +162,7 @@ def build(path):
     if classes:
         b.append(("h2", "Data classes"))
         b.append(("p", "How each class is stored is set by the data-handling policy in force on the date of each "
-                       "decision (`clear`, `vault` or `hashed`), not by this program: " +
+                       "decision (`clear`, `vault`, `hashed` or `drop`), not by this program: " +
                        ", ".join(f"`{c}`" for c in classes) + ". See `shio policy check` and `shio audit`."))
 
     if m["types"]:

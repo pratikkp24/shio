@@ -17,6 +17,9 @@ Handling, from least to most protective:
     vault   hashed in the record; kept whole only in the erasable vault (shio erase)
     hashed  stored nowhere in clear: hashed in the record, and scrubbed from prompts, answers, explanations and
             outcomes in both the record and the vault
+    drop    written nowhere in any form, not even as a hash (PCI DSS 3.3: card verification codes, PINs, OTPs): the
+            record keeps only a marker that the field existed, and the value is scrubbed from every text in the
+            record and the vault. Readings and checks still see the value in memory during the run.
 
 When a regulation changes, compliance adds a new version with its effective date; no program changes. Each decision
 is written under the versions in force on its date, and the record says which (name, version, sha256, source).
@@ -33,7 +36,7 @@ import json
 import re
 from pathlib import Path
 
-HANDLING = ("clear", "vault", "hashed")
+HANDLING = ("clear", "vault", "hashed", "drop")
 STRICTNESS = {h: i for i, h in enumerate(HANDLING)}
 DEFAULT = "vault"           # a class no policy in force mentions: protected, but kept for audit and erasure
 
@@ -41,7 +44,7 @@ HEADER = re.compile(r'^(?P<kind>policy|table)\s+"(?P<name>[^"]+)"\s+version\s+(?
 ROW = re.compile(r"^(?P<key>[a-z_][a-z0-9_]*)\s*:\s*(?P<value>.+)$")
 SETTING = re.compile(r'^(?P<key>effective|source|approved_by|applies_to)\s+(?P<value>.+)$')
 JURISDICTION = re.compile(r"^[A-Z][A-Z0-9_-]*$")
-RULE = re.compile(r"^(?P<cls>\*|[A-Z][A-Za-z0-9_]*)\s*:\s*(?P<handling>clear|vault|hashed)"
+RULE = re.compile(r"^(?P<cls>\*|[A-Z][A-Za-z0-9_]*)\s*:\s*(?P<handling>clear|vault|hashed|drop)"
                   r"(?:\s*,\s*retain\s+(?P<years>\d+)\s+years?)?\s*$")
 
 
@@ -194,9 +197,11 @@ def parse(text, file="<policy>"):
             continue
         m = RULE.match(body)
         if not m:
-            raise PolicyError(f"{file}:{n}: expected `Class: clear|vault|hashed[, retain N years]`")
+            raise PolicyError(f"{file}:{n}: expected `Class: clear|vault|hashed|drop[, retain N years]`")
         if m["cls"] in cur["rules"]:
             raise PolicyError(f"{file}:{n}: {m['cls']} is listed twice")
+        if m["handling"] == "drop" and m["years"]:
+            raise PolicyError(f"{file}:{n}: a dropped class is never kept, so it has no retention period")
         cur["rules"][m["cls"]] = (m["handling"], int(m["years"]) if m["years"] else None)
     done()
     seen = set()
@@ -357,7 +362,7 @@ def _inner_types(t):
 
 # ---------------- audit ----------------
 def _field_states(value, prefix=""):
-    """{path: "protected" | "clear"} for every leaf of a reading's value as stored."""
+    """{path: "dropped" | "protected" | "clear"} for every leaf of a reading's value as stored."""
     out = {}
     if isinstance(value, list):         # a field is clear if any item holds it in clear
         for v in value:
@@ -369,7 +374,9 @@ def _field_states(value, prefix=""):
         return out
     for k, v in value.items():
         path = f"{prefix}{k}"
-        if isinstance(v, dict) and "$pii" in v:
+        if isinstance(v, dict) and "$dropped" in v:
+            out[path] = "dropped"
+        elif isinstance(v, dict) and "$pii" in v:
             out[path] = "protected"
         elif isinstance(v, (dict, list)):
             out.update(_field_states(v, f"{path}[]." if isinstance(v, list) else f"{path}."))
@@ -448,7 +455,11 @@ def audit(folder, store, today=None, jurisdiction=None):
                 have = states.get(fpath)
                 if have is None:
                     continue
-                if need in ("vault", "hashed") and have == "clear":
+                if need == "drop" and have != "dropped":
+                    findings.append(f"{name}: {r.get('name')}.{fpath} ({cls}) is stored "
+                                    f"{'in clear' if have == 'clear' else 'as a hash'}; "
+                                    f"{_by(expected, cls)} required drop (written nowhere, not even hashed)")
+                elif need in ("vault", "hashed") and have == "clear":
                     findings.append(f"{name}: {r.get('name')}.{fpath} ({cls}) is stored in clear; "
                                     f"{_by(expected, cls)} required {need}")
             if vault is not None and r.get("classes") and f"{vpath}/value" in vault:
@@ -458,6 +469,9 @@ def audit(folder, store, today=None, jurisdiction=None):
                         if cls and expected.of(cls) == "hashed" and state == "clear":
                             findings.append(f"{name}: {fpath} ({cls}) is kept in the vault; "
                                             f"{_by(expected, cls)} required hashed (kept nowhere)")
+                        elif cls and expected.of(cls) == "drop" and state != "dropped":
+                            findings.append(f"{name}: {fpath} ({cls}) is kept in the vault; "
+                                            f"{_by(expected, cls)} required drop (written nowhere)")
             for fpath, cls in (r.get("classes") or {}).items():
                 rule = expected.rule(cls)
                 if rule and rule[1] and vault is not None and e["file"] not in erased:
