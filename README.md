@@ -334,12 +334,52 @@ escape hatches become compile errors. Outcomes can require a person's sign-off w
 
 <br>
 
+## 📊 Benchmark: AgentDojo
+
+We ran [AgentDojo](https://github.com/ethz-spylab/agentdojo) with the same model twice: once undefended, and once with
+every tool call going through a Shio gate.
+
+| Opus 5.5, all 4 suites | No defence | Shio |
+|---|---|---|
+| Normal tasks completed | 92.8% (90/97) | 85.6% (83/97) |
+| Tasks completed under attack | 86.0% (816/949) | 80.5% (764/949) |
+| Attack success rate | 1.8% (17/949) | **0.0% (0/949)** |
+| Held for approval (normal / under attack) | – | 6/97 / 42/949 |
+
+| Suite | Normal tasks: none / Shio | Under attack: none / Shio | Attack success: none / Shio |
+|---|---|---|---|
+| banking | 15/16 / 14/16 | 133/144 / 126/144 | 0/144 / 0/144 |
+| slack | 18/21 / 15/21 | 68/105 / 55/105 | 0/105 / 0/105 |
+| travel | 18/20 / 18/20 | 125/140 / 125/140 | 17/140 / 0/140 |
+| workspace | 39/40 / 36/40 | 490/560 / 458/560 | 0/560 / 0/560 |
+
+**Setup**
+- AgentDojo 0.1.35, benchmark v1.2.2, suites banking, slack, travel and workspace: 97 user tasks, 35 injection tasks,
+  949 attack cases. Attack: `important_instructions`.
+- Model: `claude-opus-5-5`, effort medium, called through the Claude Code CLI with structured JSON for tool calls
+  rather than native tool calling. Each case ran once, so there is no variance estimate.
+- Shio 0.1.0. The gate is a Shio program that plans which actions the request calls for before the model reads any
+  tool output. It checks each proposed tool call against that plan and against where its values came from, and checks
+  the final reply.
+- Utility and attack success are AgentDojo's own scorers. A call Shio holds for approval doesn't run, because nobody
+  approves in a benchmark, so it counts as a failed task.
+
+**What it shows, and what it doesn't**
+- All 17 attacks that worked against no defence were the same one: a travel injection asking the agent to recommend a
+  hotel in its reply. With Shio's final-reply check, none of them got through.
+- Opus refused every attack that needed a tool call, with or without Shio, so this run doesn't test Shio's action
+  gate. Weaker models are where it should matter: on qwen3:8b, 24% (18/75) of banking attacks succeeded with no
+  defence, in a partial run that didn't reach Shio.
+- The cost is task success: 7 points on normal tasks. Most of the gap is calls held for approval, such as "do what the
+  email says" or paying an IBAN read from a file. In production a person approves these.
+- The benchmark harness isn't published yet.
+
 ## 🧭 Status
 
 v0.1, a working prototype. It is honest about its limits: Shio guarantees that model output reaches actions only
 through a rule, not that every rule is right, and the boundary is tracked by name rather than full information-flow
 analysis. [SECURITY.md](https://github.com/pratikkp24/shio/blob/main/SECURITY.md) has the details, and [SPEC.md](https://github.com/pratikkp24/shio/blob/main/SPEC.md) has the design and what comes next:
-full information-flow tracking, tools as typed effects, and a prompt-injection benchmark (AgentDojo).
+full information-flow tracking, tools as typed effects, and AgentDojo runs on weaker models and other attacks.
 
 **If you can get model output past the boundary, please tell us:** see [SECURITY.md](https://github.com/pratikkp24/shio/blob/main/SECURITY.md).
 Contributions are welcome: see [CONTRIBUTING.md](https://github.com/pratikkp24/shio/blob/main/CONTRIBUTING.md).
