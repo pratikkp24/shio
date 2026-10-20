@@ -73,10 +73,15 @@ class Compile(unittest.TestCase):
     def test_a_clean_regulated_program_compiles(self):
         compile_source(textwrap.dedent(PROGRAM), "t.shio")
 
-    def test_the_same_escape_compiles_outside_regulated_mode(self):
-        src = textwrap.dedent(PROGRAM).replace("regulated\n", "").replace(
-            "    rule decision:", '    v = locals()["a"]\n    rule decision:')
-        compile_source(src, "t.shio")      # why regulated mode exists
+    def test_outside_regulated_mode_only_the_reflection_routes_are_refused(self):
+        plain = textwrap.dedent(PROGRAM).replace("regulated\n", "")
+        with self.assertRaises(ShioError) as e:            # reaches a reading without naming it: refused everywhere
+            compile_source(plain.replace("    rule decision:", '    v = locals()["a"]\n    rule decision:'), "t.shio")
+        self.assertIn("'locals'", str(e.exception))
+        # the wider bans are regulated mode's: ordinary programs may still use getattr and sys
+        compile_source(plain.replace("    rule decision:", '    v = getattr(statement, "upper")\n    rule decision:'),
+                       "t.shio")
+        compile_source("import sys\n" + plain, "t.shio")
 
 
 class Records(unittest.TestCase):

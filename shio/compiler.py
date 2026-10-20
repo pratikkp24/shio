@@ -314,6 +314,29 @@ class Compiler:
                              f"A reading can only be looked at in a check, a when, a rule, or a later read's 'seeing' clause; "
                              f"write a check or a rule that decides from it.")
 
+    MUTATORS = {"append", "extend", "insert", "add", "update", "setdefault", "pop", "popitem", "remove", "discard",
+                "clear", "sort", "reverse", "write", "writelines", "send", "put", "put_nowait", "appendleft",
+                "extendleft", "__setitem__", "__setattr__"}
+
+    def pure(self, code, line, where):
+        """A check or when only decides: it may not assign (:=) or call a method that changes something, which could
+        carry a reading's value out into plain code."""
+        try:
+            tree = ast.parse(code, mode="eval")
+        except SyntaxError:
+            return               # reported by py()
+        for n in ast.walk(tree):
+            bad = None
+            if isinstance(n, ast.NamedExpr):
+                bad = "':=' assigns"
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("setattr", "delattr"):
+                bad = f"{n.func.id}() changes an object"
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in self.MUTATORS:
+                bad = f".{n.func.attr}() changes something"
+            if bad:
+                self.error(line, f"{where} only decides, so it cannot change anything: {bad}. "
+                                 f"Move it to a rule, after the check.")
+
     def py(self, code, line, mode="exec"):
         try:
             ast.parse(code, mode=mode)
@@ -710,6 +733,9 @@ class Compiler:
             if not detail.lower().startswith(("f", "rf", "fr")):
                 detail = "f" + detail
         self.py(body, line, "eval")
+        self.pure(body, line, "a check" if text.startswith("check") else "a when")
+        if detail:
+            self.pure(detail, line, "a check's message")
         if m["key"]:
             self.py(m["key"], line, "eval")
             self.scan(m["key"], line, ctx["readings"], "a check's key")
@@ -823,9 +849,40 @@ def _compile(source, path):
                 if n not in known:
                     hint = " (write {{ and }} for literal braces)" if where.startswith("the prompt") else ""
                     c.error(line, f"'{n}' is not defined, in {where}{hint}")
+    if bound is not None and not c.regulated:     # regulated programs get the stricter scan below
+        _reflection_scan(c, py, lines)
     if c.regulated:
         _regulated_scan(c, py, lines)
     return py, lines, c
+
+
+# Every program: the routes that reach a reading without naming it, so the name check above never sees them (found by
+# an escape test: each of these returned a reading's value from plain code). Regulated programs ban more, below.
+REFLECTION_NAMES = {"locals", "vars", "globals", "eval", "exec", "compile", "__import__", "breakpoint"}
+REFLECTION_ATTRS = {"_getframe", "f_locals", "f_globals", "f_back", "gi_frame", "cr_frame", "ag_frame", "tb_frame",
+                    "currentframe", "stack", "trace", "get_objects", "get_referrers", "get_referents", "__dict__",
+                    "__closure__", "__globals__", "__code__", "__self__", "_sealed", "_SEALED", "_gate"}
+REFLECTION_MODULES = {"gc", "inspect", "ctypes"}
+
+
+def _reflection_scan(c, py, lines):
+    tree = ast.parse(py)
+    for node in ast.walk(tree):
+        ln = lines[node.lineno - 1] if getattr(node, "lineno", 0) and node.lineno <= len(lines) else 0
+        if not ln:               # the prelude the compiler adds
+            continue
+        why = None
+        if isinstance(node, ast.Name) and node.id in REFLECTION_NAMES:
+            why = f"'{node.id}' can reach a model reading without naming it, so it is not allowed in Shio code"
+        elif isinstance(node, ast.Attribute) and node.attr in REFLECTION_ATTRS:
+            why = f"'.{node.attr}' can reach a model reading without naming it, so it is not allowed in Shio code"
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            bad = [m for m in mods if m.split(".")[0] in REFLECTION_MODULES]
+            if bad:
+                why = f"importing {bad[0]} is not allowed: it can reach a model reading without naming it"
+        if why:
+            c.error(ln, why + " (put such code in a Python module you import, which Shio treats as trusted code)")
 
 
 # What a regulated program may not do: every way to reach a reading's value, or the runtime's own state, without

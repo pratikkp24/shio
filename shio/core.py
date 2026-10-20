@@ -15,6 +15,7 @@ import json
 import os
 import time
 import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -40,29 +41,60 @@ def _blocked(what):
     return method
 
 
+@dataclasses.dataclass(frozen=True)
+class _Sealed:
+    value: object
+    raw: object
+    request: object
+    error: object
+
+
+_SEALED = {}          # id(reading) -> _Sealed; an entry is removed when its reading is collected (see Reading)
+
+
+def _sealed(r):
+    """Shio's own access to a reading's sealed contents (tracing, uncovering for a check or rule). Not for programs."""
+    return _SEALED[id(r)]
+
+
 class Reading:
-    """What a model proposed. Opaque outside a @check or @rule."""
-    __slots__ = ("id", "name", "model", "request", "raw", "_value", "error", "schema", "run_id", "item", "seq",
-                 "model_id")
+    """What a model proposed. Opaque outside a @check or @rule.
+
+    What the model said (the parsed value, its raw text, the request it answered, any parse error) is not stored on the
+    object, where plain code could reach it as an attribute: it is sealed in a private registry keyed by the reading.
+    Code reads it through .value (and .raw, .request, .error) only inside a @check or @rule; Shio's own tracing reads it
+    through _sealed()."""
+    __slots__ = ("id", "name", "model", "schema", "run_id", "item", "seq", "model_id", "__weakref__")
 
     def __init__(self, name, model, request, raw, value, error, schema, run_id, item=None):
-        self.id, self.name, self.model, self.request, self.raw = uuid.uuid4().hex[:12], name, model, request, raw
-        self._value, self.error, self.schema, self.run_id = value, error, schema, run_id
+        self.id, self.name, self.model = uuid.uuid4().hex[:12], name, model
+        self.schema, self.run_id = schema, run_id
+        _SEALED[id(self)] = _Sealed(value, raw, request, error)
+        weakref.finalize(self, _SEALED.pop, id(self), None)
         self.item = item         # (path, index) for one item of a list inside another reading
         self.seq, self.model_id = None, None
 
-    @property
-    def value(self):
+    def _gate(self, attr):
         if not _open.get():
-            raise BoundaryError(f"{self!r} is a model proposal: read .value only inside a @check or @rule.")
-        return self._value
+            raise BoundaryError(f"{self!r} is a model proposal: read .{attr} only inside a @check or @rule.")
+        return getattr(_SEALED[id(self)], attr)
+
+    value = property(lambda self: self._gate("value"))
+    raw = property(lambda self: self._gate("raw"))
+    request = property(lambda self: self._gate("request"))
+    error = property(lambda self: self._gate("error"))
+
+    def __reduce_ex__(self, protocol):
+        raise BoundaryError(f"{self!r} is a model proposal: it cannot be pickled or copied.")
+
+    __copy__ = __deepcopy__ = __reduce__ = _blocked("copy")
 
     def __repr__(self):
         return f"<Reading {self.name} by {self.model}>"
 
     def _part(self, path, index, value):
         """One item of a list inside this reading: still a proposal, and traced back to this reading."""
-        r = Reading(f"{self.name}.{path}[{index}]" if path else f"{self.name}[{index}]", self.model, self.request,
+        r = Reading(f"{self.name}.{path}[{index}]" if path else f"{self.name}[{index}]", self.model, _sealed(self).request,
                     None, value, None, None, self.run_id, (path, index))
         r.id = self.id
         return r
@@ -139,9 +171,11 @@ class Run:
              "readings": [{"id": r.id, "seq": r.seq, "name": r.name, "model": r.model, "model_id": r.model_id,
                            "schema": schema_ref(r.schema), "pii": sorted(_pii_fields(r.schema)),
                            "classes": _classes(r.schema),
-                           "prompt_sha256": _prompt_hash(r.request),
-                           "request": {**dataclasses.asdict(r.request), "sources": [s.id for s in r.request.sources]},
-                           "raw": r.raw, "value": to_jsonable(r._value), "error": r.error} for r in self.readings],
+                           "prompt_sha256": _prompt_hash(_sealed(r).request),
+                           "request": {**dataclasses.asdict(_sealed(r).request),
+                                       "sources": [s.id for s in _sealed(r).request.sources]},
+                           "raw": _sealed(r).raw, "value": to_jsonable(_sealed(r).value), "error": _sealed(r).error}
+                          for r in self.readings],
              "checks": self.checks, "rules": self.rules, "outcome": to_jsonable(self.outcome), "error": self.error,
              "children": [c.to_dict() for c in self.children]}
         reasons = self.reasons()
@@ -230,7 +264,7 @@ def _current(what):
 def _uncover(x):
     """Replace readings by their values (used when code, not a model, is about to look)."""
     if isinstance(x, Reading):
-        return x._value
+        return _sealed(x).value
     if not _has_reading(x):      # plain data passes through as the same object, so a rule can update it in place
         return x
     if isinstance(x, (list, tuple)):
@@ -295,7 +329,7 @@ def each(reading, path=""):
     """The items of a list the model returned (reading.path), each still a reading. For `for x in r.items:`."""
     if not isinstance(reading, Reading):
         raise BoundaryError(f"each() takes a reading, got {type(reading).__name__}")
-    v = reading._value
+    v = _sealed(reading).value
     for p in path.split(".") if path else []:
         v = None if v is None else (v.get(p) if isinstance(v, dict) else getattr(v, p, None))
     if v is None:
