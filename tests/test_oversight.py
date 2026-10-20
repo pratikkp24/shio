@@ -1,6 +1,7 @@
 """Regulated mode, phase 2: human sign-off as a language form with maker-checker, stable reason codes that survive
 erasure, and `shio explain`, the decision map a model-risk team asks for."""
 import contextlib
+import importlib.util
 import io
 import json
 import textwrap
@@ -98,6 +99,7 @@ class Setup(unittest.TestCase):
 
 
 class ReasonCodes(Setup):
+    @unittest.skipUnless(importlib.util.find_spec("cryptography"), "needs the [regulated] extra (cryptography)")
     def test_codes_are_recorded_in_clear_with_their_text(self):
         out, path = self.pay(SMALL, model="odd")
         self.assertEqual(out["codes"], ["UNKNOWN_SUPPLIER"])
