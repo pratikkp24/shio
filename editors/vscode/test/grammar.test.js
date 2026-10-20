@@ -248,6 +248,13 @@ async function main() {
     expect("mail.shio", ML, lineOf("guard request"), "guard", "keyword.other.guard.shio");
     expect("mail.shio", ML, lineOf("call read_file"), "read_file", "entity.name.function.tool.shio");
     promptInvariant("mail.shio", mailSrc, ML);
+    const AS = "async agent fetch_all(docs, llm):\n    read t: str from docs by llm:\n        Summarise.\n    x = await other(docs)\n";
+    const AL = await tokenize(AS);
+    expect("async agent", AL, 1, "async", "storage.modifier.async.shio");
+    expect("async agent", AL, 1, "agent", "storage.type.agent.shio");
+    expect("async agent", AL, 1, "fetch_all", "entity.name.function.agent.shio");
+    expect("async agent", AL, 3, "Summarise.", "string.unquoted.prompt.shio");
+    promptInvariant("async agent", AS, AL);
   }
   {
     const P = await tokenize([

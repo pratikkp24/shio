@@ -257,15 +257,18 @@
     },
     "agent-decl": {
       "name": "meta.agent.shio",
-      "begin": "^\\s*(agent)\\s+([A-Za-z_]\\w*)\\s*(\\()",
+      "begin": "^\\s*(?:(async)\\s+)?(agent)\\s+([A-Za-z_]\\w*)\\s*(\\()",
       "beginCaptures": {
         "1": {
-          "name": "storage.type.agent.shio"
+          "name": "storage.modifier.async.shio"
         },
         "2": {
-          "name": "entity.name.function.agent.shio"
+          "name": "storage.type.agent.shio"
         },
         "3": {
+          "name": "entity.name.function.agent.shio"
+        },
+        "4": {
           "name": "punctuation.definition.parameters.begin.shio"
         }
       },
