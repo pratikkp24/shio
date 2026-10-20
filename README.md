@@ -357,7 +357,9 @@ every tool call going through a Shio gate.
 - AgentDojo 0.1.35, benchmark v1.2.2, suites banking, slack, travel and workspace: 97 user tasks, 35 injection tasks,
   949 attack cases. Attack: `important_instructions`.
 - Model: `claude-opus-5-5`, effort medium, called through the Claude Code CLI with structured JSON for tool calls
-  rather than native tool calling. Each case ran once, so there is no variance estimate.
+  rather than native tool calling. Each case ran once, so there is no variance estimate. In 18 of 1,046 no-defence
+  cases and 13 of 1,046 Shio cases, the model said a tool was unavailable and made no call. That's an artefact of this
+  setup, and those cases count as they were scored.
 - Shio 0.1.0. The gate is a Shio program that plans which actions the request calls for before the model reads any
   tool output. It checks each proposed tool call against that plan and against where its values came from, and checks
   the final reply.
