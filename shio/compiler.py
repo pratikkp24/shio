@@ -41,7 +41,7 @@ CHECK = re.compile(r"^(?:check|when)\s+(?P<name>[A-Za-z_]\w*)(?:\[(?P<key>.+?)\]
 EACH = re.compile(r"^for\s+(?:(?P<idx>[A-Za-z_]\w*)\s*,\s*)?(?P<var>[A-Za-z_]\w*)\s+in\s+(?P<enum>enumerate\(\s*)?"
                   r"(?P<root>[A-Za-z_]\w*)(?P<path>(?:\.[A-Za-z_]\w*)*)\s*(?(enum)\))\s*:$")
 RULE = re.compile(r"^rule\s+(?P<name>[A-Za-z_]\w*)(?:\[(?P<key>.+?)\])?\s*:$")
-AGENT = re.compile(r"^agent\s+(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*(?:->\s*(?P<ret>.+?))?\s*:$", re.S)
+AGENT = re.compile(r"^(?P<async>async\s+)?agent\s+(?P<name>[A-Za-z_]\w*)\s*\((?P<params>.*)\)\s*(?:->\s*(?P<ret>.+?))?\s*:$", re.S)
 TYPE = re.compile(r"^type\s+(?P<name>[A-Za-z_]\w*)\s*:$")
 MODEL = re.compile(r"^model\s+(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<expr>.+)$", re.S)
 TRAIN = re.compile(r"^train\s+(?P<agent>[A-Za-z_]\w*)\s+on\s+(?P<traces>.+?)\s+with\s+model\s+(?P<model>.+?)"
@@ -378,7 +378,7 @@ class Compiler:
                 self.emit(0, f"{m['name']} = {m['expr']}", line)
                 self.meta["models"].append({"name": m["name"], "expr": " ".join(m["expr"].split()), "line": line})
                 i = j
-            elif word == "agent":
+            elif word == "agent" or word == "async" and re.match(r"^async\s+agent\s", text):
                 i = self.agent_decl(i, j, text)
             elif word == "tool" and re.match(r"^tool\s+[A-Za-z_]\w*\s*\(", text):
                 i = self.tool_decl(line, text, j)
@@ -552,19 +552,21 @@ class Compiler:
     # ---------------- agents ----------------
     def agent_decl(self, i, j, header):
         line = i + 1
-        m = AGENT.match(header) or self.error(line, "expected: agent NAME(PARAMS) [-> TYPE]:")
+        m = AGENT.match(header) or self.error(line, "expected: [async] agent NAME(PARAMS) [-> TYPE]:")
         name = m["name"]
         self.agents.add(name)
         body, k = self.block(j, 0)
         readings = self.reads_in(body, start=j)
         deco = self.emit(0, f"@__shio.agent(name={name!r})", line)
-        start = self.emit(0, f"def {name}({m['params']}):", line)
+        start = self.emit(0, f"{'async def' if m['async'] else 'def'} {name}({m['params']}):", line)
         if readings:
             self.emit(1, " = ".join(sorted(readings)) + " = None", line)
         ameta = {"name": name, "line": line, "params": " ".join(m["params"].split()), "reads": [], "checks": [],
                  "rules": [], "signoffs": [], "returns": []}
         self.meta["agents"].append(ameta)
-        ctx = {"kind": "agent", "readings": readings, "agent": name, "pending": [], "signoffs": [], "meta": ameta}
+        ctx = {"kind": "agent", "readings": readings, "agent": name, "pending": [], "signoffs": [], "meta": ameta,
+               "async": bool(m["async"])}
+        ameta["async"] = bool(m["async"])
         k = self.body(j, 0, 1, ctx)
         if ctx["signoffs"]:
             self.out[deco][0] = f"@__shio.agent(name={name!r}, signoffs={ctx['signoffs']!r})"
@@ -767,7 +769,8 @@ class Compiler:
             args.append("blind=True")
         if seeing:
             args.append("context={" + ", ".join(f"{s!r}: {s}" for s in seeing) + "}")
-        self.emit(level, f"{m['name']} = __shio.read({', '.join(args)})", line)
+        call = "await __shio.aread" if ctx.get("async") else "__shio.read"     # an async agent doesn't block on the model
+        self.emit(level, f"{m['name']} = {call}({', '.join(args)})", line)
         ctx["meta"]["reads"].append({"name": m["name"], "type": m["type"].strip(), "sources": m["src"],
                                      "model": m["model"].strip(), "blind": bool(m["blind"]), "seeing": seeing,
                                      "key": m["key"], "line": line,

@@ -3,7 +3,16 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
-## 0.7.0 (unreleased)
+## 0.8.0 (unreleased)
+
+- **Async agents.** `@shio.agent` on an `async def`, and `async agent` in `.shio`: reads become `await aread(...)`, so
+  the model call doesn't block the event loop. A model with `async apropose(request)` is awaited; any other runs in a
+  worker thread. Concurrent agents keep their own readings and traces (context variables).
+- **`shio label`.** A reviewer marks a recorded decision right or wrong (`--right|--wrong --by NAME [--note]`). The
+  label is a ledger entry bound to the record's hash, signed when a key is set, and checked by `shio verify`.
+  `trace.load` gives each run its labels, and `shio train` leaves decisions labelled wrong out of the fine-tune set.
+
+## 0.7.0 (2026-10-20)
 
 - **Typed tools in the language.** `tool NAME(ARG: KIND, ...) reads [trusted|untrusted|mixed] [opens] = fn` and
   `tool NAME(...) acts = fn` declare an agent's tools (kinds `email`, `url`, `iban`, `name`, `text` or a plain type);

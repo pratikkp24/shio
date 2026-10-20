@@ -1,4 +1,4 @@
-"""shio run | check | build | train | show | new | keygen | verify | replay | erase | signoff | reasons | explain |
+"""shio run | check | build | train | show | new | keygen | verify | replay | label | erase | signoff | reasons | explain |
 policy | audit | migrate | retention | evidence | monitor"""
 import argparse
 import json
@@ -166,6 +166,14 @@ def _replay(a):
                        _jurisdiction(a))
     print("\n".join(lines))
     sys.exit(0 if ok else 1)
+
+
+def _label(a):
+    from .core import _signer
+    from .ledger import label
+    verdict = "right" if a.right else "wrong"
+    e = label(a.record, verdict, a.by, a.note or "", _signer())
+    print(f"labelled {Path(a.record).name} {verdict} by {a.by}; ledger entry {e['seq']} records it")
 
 
 def _erase(a):
@@ -444,6 +452,15 @@ def main(argv=None):
     rp.add_argument("--at", help="with --policies: the tables in force on this date (default: the decision's date)")
     rp.add_argument("--jurisdiction", help="with --policies: another jurisdiction's tables (default: the record's)")
     rp.set_defaults(fn=_replay)
+    lb = sub.add_parser("label", help="a reviewer marks a recorded decision right or wrong (entered in the ledger; "
+                                      "shio train leaves out decisions labelled wrong)")
+    lb.add_argument("record")
+    verdict = lb.add_mutually_exclusive_group(required=True)
+    verdict.add_argument("--right", action="store_true")
+    verdict.add_argument("--wrong", action="store_true")
+    lb.add_argument("--by", required=True, help="the reviewer")
+    lb.add_argument("--note", help="why")
+    lb.set_defaults(fn=_label)
     e = sub.add_parser("erase", help="delete a record's vault (personal data) and enter the erasure in the ledger")
     e.add_argument("record")
     e.add_argument("--reason", required=True)

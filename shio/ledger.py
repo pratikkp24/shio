@@ -584,6 +584,36 @@ def erase(record_path, reason, signer=None):
 
 
 MIGRATION_FIELDS = ("kind", "file", "from_sha256", "to_sha256", "reason", "policies", "time")
+LABEL_FIELDS = ("kind", "file", "record_sha256", "verdict", "by", "note", "time")
+VERDICTS = ("right", "wrong")
+
+
+def label(record_path, verdict, by, note="", signer=None):
+    """A reviewer's verdict on a recorded decision: right or wrong, by whom, and why. Entered in the chain, bound to
+    the record's hash, so a label always says which version of the decision it judged. Labels feed `shio train`."""
+    if verdict not in VERDICTS:
+        raise ValueError(f"verdict must be one of {VERDICTS}, not {verdict!r}")
+    if not str(by).strip():
+        raise ValueError("a label needs the reviewer's name (by)")
+    record_path = Path(record_path)
+    folder = record_path.parent
+    with _locked(folder):
+        recs = [e for e in _entries(folder) if e.get("kind") == "record" and e.get("file") == record_path.name]
+        if not recs:
+            raise ValueError(f"{record_path.name} is not a record in this folder's ledger")
+        event = {"kind": "label", "file": record_path.name, "record_sha256": recs[-1]["sha256"], "verdict": verdict,
+                 "by": str(by), "note": note or "", "time": time.time()}
+        event["sha256"] = sha256({k: event[k] for k in LABEL_FIELDS})
+        return _append(folder, event, signer)
+
+
+def labels(folder):
+    """{record file: [label entries, oldest first]} for a folder. The last one is the current verdict."""
+    out = {}
+    for e in _entries(Path(folder)):
+        if e.get("kind") == "label":
+            out.setdefault(e["file"], []).append(e)
+    return out
 
 
 def _tighter(record, handling):
@@ -811,6 +841,12 @@ def verify(folder, public_key=None, secret=None, head=None, signer_keys=()):
         if e.get("kind") == "migration":
             if sha256({k: e.get(k) for k in MIGRATION_FIELDS}) != e.get("sha256"):
                 problems.append(f"{where}: migration entry edited")
+            continue
+        if e.get("kind") == "label":
+            if sha256({k: e.get(k) for k in LABEL_FIELDS}) != e.get("sha256"):
+                problems.append(f"{where}: label entry edited")
+            elif e.get("file") not in record_hashes:
+                problems.append(f"{where}: label for {e.get('file')}, which is not an earlier record in the ledger")
             continue
         if e.get("kind") == "signoff":
             if sha256({k: e.get(k) for k in SIGNOFF_FIELDS}) != e.get("sha256"):

@@ -41,6 +41,7 @@ shio check inbox_unsafe.shio      # the unsafe version: a compile error pointing
 | `signoff` | An outcome that needs a person's approval before it takes effect |
 | `tool name(arg: kind) reads ... = fn` / `... acts = fn` | A tool the agent may call. `acts` tools change something, so they can be called only inside a rule |
 | `guard request by model` | Starts the agent's task: a plan from the user's request alone, which every `acts` call is checked against |
+| `async agent name(params):` | An agent for async code: reads await the model, so many run at once |
 | `call name(args)` | Calls a declared tool. An `acts` call raises `GateHeld` or `GateDenied` instead of running when the gate says so |
 
 See [`examples/tools/mail.shio`](https://github.com/pratikkp24/shio/blob/main/examples/tools/mail.shio) for tools end to end.

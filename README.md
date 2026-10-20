@@ -356,6 +356,7 @@ outcome. That gives you three things:
 | `guard request by model [approved by approver]` | Starts the agent's task: a model reads only the user's request and plans which actions it calls for (Shio Guard). |
 | `call name(args)` | Calls a declared tool. An `acts` call runs if the gate lets it through, raises `GateHeld` if a person must approve, or `GateDenied` if refused. |
 | `agent name(params):` | A unit of work. Each call is saved as one trace. Agents nest. |
+| `async agent name(params):` | The same, for async code (FastAPI, asyncio): reads await the model instead of blocking, so many agents run at once. |
 | `read x[key]: T from sources by model [blind] [seeing a, b]:` | Asks a model for a `T`, with the prompt indented below and `{expr}` interpolating plain values. `blind` is an independent read that sees no other reading. A reply that does not fit `T` is a null reading, not a crash. |
 | `check name[key]: expr, "detail"` | A claim about readings. A check that raises counts as failed. |
 | `check b after a, c: expr` | Runs only if the checks it names passed; otherwise it is skipped, not failed. |
@@ -399,6 +400,7 @@ shio build program.shio -o out.py # the Python it compiles to
 shio show shio-traces/*.json      # readings, checks passed and failed, per run
 shio train program.shio [--go]    # traces -> sft.jsonl, grpo.jsonl and a TRL script
 shio keygen | verify | replay | erase   # signed decision records (see docs/REGULATED.md)
+shio label RECORD --wrong --by NAME     # a reviewer's verdict, entered in the chain; shio train leaves out wrong ones
 shio evidence records/ --from DATE --to DATE --policies policies/ -o pack/   # an audit evidence pack; --check pack/ to verify it
 shio vaultkey [folder]            # a key to encrypt personal-data vaults at rest (AES-256-GCM; set SHIO_VAULT_KEY)
 shio signoff | reasons | explain        # human sign-off, reason codes, the decision map

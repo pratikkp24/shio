@@ -65,7 +65,7 @@ of the language rather than a convention:
 - Batching many fields into one model call. The port reads one field per call, where the original batched 36; a
   `read many` form is the next step.
 - Multimodal sources. `Source.from_pdf` extracts text; models that take PDFs or images directly are not used that way yet.
-- Async agents and streaming.
+- Streaming. (Async agents arrived in 0.8.0: `async agent`, and `aread` from Python.)
 - Static types for plain values. Shio checks the read/decide boundary, not general types; Python type hints still
   work.
 - Its own package manager or runtime. Shio uses Python's.
@@ -79,8 +79,8 @@ of the language rather than a convention:
 3. ~~A prompt-injection benchmark.~~ Done: AgentDojo v1.2.2 on Opus 5.5, all 949 attack cases (README, "Benchmark").
 4. **A `read many` form** for batched extraction, and native PDF and image sources for models that take them.
 5. **A language server**, so errors show as you type.
-6. **A `label` command** that lets reviewers mark a trace's outcome right or wrong, so human verdicts become checks
-   and rewards too.
+6. ~~A `label` command.~~ Done in 0.8.0: `shio label RECORD --right|--wrong --by NAME`, entered in the chain;
+   `shio train` leaves decisions labelled wrong out of the fine-tune set.
 7. **One real GRPO run** on a GPU, comparing a small fine-tuned open model with a large hosted one on held-out data,
    with the program's checks as the only reward.
 

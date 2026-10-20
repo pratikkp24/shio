@@ -238,7 +238,8 @@ def load(patterns):
     """Yield every run (children included) from trace files matching the patterns."""
     files = sorted({f for p in ([patterns] if isinstance(patterns, str) else patterns)
                     for f in (glob.glob(p, recursive=True) if any(c in p for c in "*?[") else [p])})
-    from .ledger import load_vault, merge
+    from .ledger import labels as ledger_labels, load_vault, merge
+    folder_labels = {}
     for f in files:
         if Path(f).is_dir():
             yield from load(str(Path(f) / "*.json"))
@@ -249,15 +250,24 @@ def load(patterns):
         vault = load_vault(f, rec)
         if vault:                       # free text kept apart: put it back for training and inspection
             rec = merge(rec, vault)
+        folder = str(Path(f).parent)
+        if folder not in folder_labels:
+            try:
+                folder_labels[folder] = ledger_labels(folder)
+            except Exception:
+                folder_labels[folder] = {}
+        rec["labels"] = [{k: e.get(k) for k in ("verdict", "by", "note", "time", "record_sha256")}
+                         for e in folder_labels[folder].get(Path(f).name, [])]
         yield from _flatten(rec, None)
 
 
-def _flatten(run, sources):
+def _flatten(run, sources, labels=None):
     sources = {**(sources or {}), **run.get("sources", {})}
     run["sources"] = sources
+    run["labels"] = run.get("labels") or labels or []     # a decision's labels cover the agents it called
     yield run
     for c in run.get("children", []):
-        yield from _flatten(c, sources)
+        yield from _flatten(c, sources, run["labels"])
 
 
 def summary(run):

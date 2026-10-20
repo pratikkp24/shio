@@ -30,7 +30,8 @@ def build(patterns, agent=None, min_reward=1.0):
         runs = [r for r in runs if r["agent"] == agent or r["agent"].endswith("." + agent)]
     values = {x["id"]: (x["schema"], x["value"]) for r in runs for x in r["readings"]}
     sft, grpo = [], []
-    stats = {"runs": len(runs), "readings": 0, "with_checks": 0, "sft": 0, "grpo": 0, "not_replayable": 0}
+    stats = {"runs": len(runs), "readings": 0, "with_checks": 0, "sft": 0, "grpo": 0, "not_replayable": 0,
+             "labelled_wrong": 0}
     by_reading = {}
     for r in runs:   # a check in any run (a nested agent, say) may look at a reading
         for c in r["checks"]:
@@ -47,7 +48,10 @@ def build(patterns, agent=None, min_reward=1.0):
             stats["with_checks"] += 1
             prompt = messages_for(_request(x, run["sources"]))
             reward = sum(c["passed"] for c in mine) / len(mine)
-            if not x["error"] and reward >= min_reward:
+            verdict = (run.get("labels") or [{}])[-1].get("verdict")     # a reviewer's latest word on the decision
+            if verdict == "wrong":
+                stats["labelled_wrong"] += 1
+            if not x["error"] and reward >= min_reward and verdict != "wrong":
                 sft.append({"messages": prompt + [{"role": "assistant", "content": x["raw"]}], "reward": reward})
             ok = [c for c in mine if _replayable(c)]
             stats["not_replayable"] += len(mine) - len(ok)

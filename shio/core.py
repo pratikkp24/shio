@@ -10,6 +10,7 @@ import builtins
 import functools
 import getpass
 import hashlib
+import inspect
 import itertools
 import json
 import os
@@ -292,6 +293,29 @@ def read(schema, ask, *, by, sources=(), context=None, system=None, name=None, b
     context: earlier readings (or plain values) the model may see. A blind read sees none, so it is an independent
     second opinion. meta: anything a model or a replay needs to route the request (never shown to the model).
     """
+    run, req, ident = _prepare_read(schema, ask, by, sources, context, system, name, blind, key, meta)
+    try:
+        _check_pinned(run, ident)
+        raw = by.propose(req)
+    except Exception as e:  # a model that times out, errors or is refused gives a null reading
+        return _finish_read(run, req, ident, by, schema, None, e)
+    return _finish_read(run, req, ident, by, schema, raw, None)
+
+
+async def aread(schema, ask, *, by, sources=(), context=None, system=None, name=None, blind=False, key=None, meta=None):
+    """read() for async agents: the model call doesn't block the event loop. A model with `async apropose(request)`
+    is awaited; any other runs its propose() in a worker thread."""
+    import asyncio
+    run, req, ident = _prepare_read(schema, ask, by, sources, context, system, name, blind, key, meta)
+    try:
+        _check_pinned(run, ident)
+        raw = await (by.apropose(req) if hasattr(by, "apropose") else asyncio.to_thread(by.propose, req))
+    except Exception as e:
+        return _finish_read(run, req, ident, by, schema, None, e)
+    return _finish_read(run, req, ident, by, schema, raw, None)
+
+
+def _prepare_read(schema, ask, by, sources, context, system, name, blind, key, meta):
     run = _current("read()")
     if blind and context:
         raise BoundaryError("A blind read cannot see other readings; drop context= or blind=True.")
@@ -301,14 +325,18 @@ def read(schema, ask, *, by, sources=(), context=None, system=None, name=None, b
         run.sources.setdefault(s.id, {"name": s.name, "path": s.path, "text": s.text, "sha256": _source_hash(s)})
     req = ReadRequest(name or getattr(schema, "__name__", "reading"), ask, system or "", sources,
                       to_jsonable(_uncover(context or {})), to_json_schema(schema), blind, meta)
-    ident = model_identity(by)
-    try:
-        if run.regulated and ident.get("kind") not in ("replay",) and not ident.get("pinned"):
-            raise RegulatedError(f"model {ident.get('model', ident.get('kind'))} is not pinned; a regulated program "
-                                 "only calls a model pinned to an exact version (ollama(..., digest=...) or pinned=...)")
-        raw = by.propose(req)
-    except Exception as e:  # a model that times out, errors or is refused gives a null reading
-        raw, value, error = None, None, f"model call failed: {type(e).__name__}: {e}"
+    return run, req, model_identity(by)
+
+
+def _check_pinned(run, ident):
+    if run.regulated and ident.get("kind") not in ("replay",) and not ident.get("pinned"):
+        raise RegulatedError(f"model {ident.get('model', ident.get('kind'))} is not pinned; a regulated program "
+                             "only calls a model pinned to an exact version (ollama(..., digest=...) or pinned=...)")
+
+
+def _finish_read(run, req, ident, by, schema, raw, exc):
+    if exc is not None:
+        value, error = None, f"model call failed: {type(exc).__name__}: {exc}"
     else:
         value, error = parse(schema, raw)
     r = Reading(req.name, getattr(by, "name", type(by).__name__), req, raw, value, error, schema, run.id)
@@ -650,8 +678,7 @@ def agent(fn=None, *, record=True, name=None, signoffs=()):
     """A unit of work whose readings, checks and rules form one trace. Agents nest; the outermost writes the file.
     signoffs: the outcomes that need a person (`signoff` in Shio); such an outcome is returned as PENDING."""
     def deco(fn):
-        @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
+        def begin(args, kwargs):
             parent = _run.get()
             run = Run(name or fn.__qualname__, parent, fn.__globals__.get("__shio_program__"))
             run.codes = fn.__globals__.get("__shio_codes__") or {}
@@ -666,39 +693,60 @@ def agent(fn=None, *, record=True, name=None, signoffs=()):
                 run.jurisdiction = _config["jurisdiction"] if wrapper.replaying else _jurisdiction(run)
             run.inputs = {"args": [_encode_input(a) for a in args if not _has_reading(a)],
                           "kwargs": {k: _encode_input(v) for k, v in kwargs.items() if not _has_reading(v)}}
-            tok = _run.set(run)
-            try:
-                out = fn(*args, **kwargs)
-                if _has_reading(out):
-                    raise BoundaryError(f"agent {fn.__name__} returned a model proposal; settle it with a @rule first.")
-                if signoffs:
-                    out = _apply_signoffs(run, signoffs, out, fn.__globals__)
-                if parent is None and run.signoff and not (isinstance(out, dict) and out.get("status") == "PENDING"):
-                    # a nested agent needed sign-off and this one decided anyway: it still waits for the person
-                    out = {"status": "PENDING", "signoff": {"roles": run.signoff["roles"],
-                                                            "because": run.signoff["because"]},
-                           "decided": to_jsonable(out)}
-                    run.signoff["decided"] = out["decided"]
-                run.outcome = out
-                return out
-            except Exception as e:
-                run.error = f"{type(e).__name__}: {e}"
-                raise
-            finally:
-                _run.reset(tok)
-                run.ended = time.time()
-                if parent is not None:
-                    parent.children.append(run)
-                else:
-                    last_run["run"] = run
-                    if record and _config["trace_dir"] and not wrapper.replaying:
-                        from .trace import write
-                        store = _policies()
-                        handling = store.handling(datetime.date.fromtimestamp(run.started),
-                                                  run.jurisdiction) if store else None
-                        wrapper.last_trace = write(run, _config["trace_dir"],
-                                                   vault=_config["vault"] or run.regulated or handling is not None,
-                                                   signer=_signer(), handling=handling)
+            return run, parent, _run.set(run)
+
+        def settle(run, parent, out):
+            if _has_reading(out):
+                raise BoundaryError(f"agent {fn.__name__} returned a model proposal; settle it with a @rule first.")
+            if signoffs:
+                out = _apply_signoffs(run, signoffs, out, fn.__globals__)
+            if parent is None and run.signoff and not (isinstance(out, dict) and out.get("status") == "PENDING"):
+                # a nested agent needed sign-off and this one decided anyway: it still waits for the person
+                out = {"status": "PENDING", "signoff": {"roles": run.signoff["roles"],
+                                                        "because": run.signoff["because"]},
+                       "decided": to_jsonable(out)}
+                run.signoff["decided"] = out["decided"]
+            run.outcome = out
+            return out
+
+        def end(run, parent, tok):
+            _run.reset(tok)
+            run.ended = time.time()
+            if parent is not None:
+                parent.children.append(run)
+            else:
+                last_run["run"] = run
+                if record and _config["trace_dir"] and not wrapper.replaying:
+                    from .trace import write
+                    store = _policies()
+                    handling = store.handling(datetime.date.fromtimestamp(run.started),
+                                              run.jurisdiction) if store else None
+                    wrapper.last_trace = write(run, _config["trace_dir"],
+                                               vault=_config["vault"] or run.regulated or handling is not None,
+                                               signer=_signer(), handling=handling)
+
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def wrapper(*args, **kwargs):
+                run, parent, tok = begin(args, kwargs)
+                try:
+                    return settle(run, parent, await fn(*args, **kwargs))
+                except Exception as e:
+                    run.error = f"{type(e).__name__}: {e}"
+                    raise
+                finally:
+                    end(run, parent, tok)
+        else:
+            @functools.wraps(fn)
+            def wrapper(*args, **kwargs):
+                run, parent, tok = begin(args, kwargs)
+                try:
+                    return settle(run, parent, fn(*args, **kwargs))
+                except Exception as e:
+                    run.error = f"{type(e).__name__}: {e}"
+                    raise
+                finally:
+                    end(run, parent, tok)
         wrapper.last_trace = None
         wrapper.replaying = False
         return wrapper
