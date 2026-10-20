@@ -76,8 +76,9 @@ class Ollama(OpenAICompat):
 
     def propose(self, req):
         if self.pinned_digest:
-            served = self.served_digest() or ""
-            if not served.startswith(self.pinned_digest.removeprefix("sha256:")[:64]) or len(self.pinned_digest) < 12:
+            served = (self.served_digest() or "").removeprefix("sha256:")   # some proxies report "sha256:<hex>"
+            pinned = self.pinned_digest.removeprefix("sha256:")
+            if not served or not served.startswith(pinned[:64]) or len(pinned) < 12:
                 raise RuntimeError(f"model {self.model} refused: served digest {served[:16] or 'unknown'} is not "
                                    f"the pinned {self.pinned_digest[:16]}")
         return super().propose(req)
