@@ -3,7 +3,16 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
-## 0.5.0 (unreleased)
+## 0.6.0 (unreleased)
+
+- **Approvals for held calls** (`shio.guard`). A held call gets an id; `Guard(approver=...)` asks a person
+  (`ApprovalRequest -> Approval`; `terminal_approver()` built in), or `Session.approve(id, by=)` / `reject(...)`
+  answer it later. Approvals are bound to the exact arguments, only lift a hold (a denied call stays denied, and an
+  approved one is re-checked), follow four eyes (`start(requester=)`: the requester can't approve their own task),
+  and are recorded as runs in the signed chain. The adapters ask the approver too.
+- **SPEC: tools as typed effects.** The design for `tool` declarations and `call` in the language, planned for 0.7.0.
+
+## 0.5.0 (2026-10-20)
 
 - **Shio Guard adapters.** `Session.openai_tool_messages(tool_calls, run)` screens an OpenAI-style assistant
   message's tool calls and returns the tool messages; `Session.anthropic_tool_results(content, run)` does the same

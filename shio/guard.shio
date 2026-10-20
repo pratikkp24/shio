@@ -85,3 +85,10 @@ agent gate(proposal: Source, proposer, plan, ledger):
             return {"outcome": "hold", "why": why}
         return {"outcome": "deny", "why": why}
     return decide
+
+agent approval(call: dict, why: str, verdict: dict):
+    # A person's answer to a held call: who, approved or not, and why. Recorded as its own run in the chain, so the
+    # approval is signed and verifiable like every decision.
+    rule record:
+        return verdict
+    return record

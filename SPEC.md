@@ -73,17 +73,56 @@ of the language rather than a convention:
 ## Next
 
 1. **Full information-flow tracking.** Track model data through containers, closures and calls, with rules as the
-   only place it is approved for use, and fuzz the boundary. Today it is tracked by reading name inside an agent and
-   blocked at runtime by the reading object.
-2. **Tools as typed effects.** `tool send_email(to: Email)` declarations, so an agent can only call declared tools,
-   and only from a rule.
-3. **A prompt-injection benchmark.** AgentDojo tasks rewritten in Shio: attack success rate and task success.
+   only place it is approved for use. Today it is tracked by reading name inside an agent, reflection is refused, the
+   reading's contents are sealed at runtime, and the boundary is fuzzed in CI (0.3.0).
+2. **Tools as typed effects** (designed below; planned for 0.7.0). Shio Guard (0.3.0) is the library form.
+3. ~~A prompt-injection benchmark.~~ Done: AgentDojo v1.2.2 on Opus 5.5, all 949 attack cases (README, "Benchmark").
 4. **A `read many` form** for batched extraction, and native PDF and image sources for models that take them.
 5. **A language server**, so errors show as you type.
 6. **A `label` command** that lets reviewers mark a trace's outcome right or wrong, so human verdicts become checks
    and rewards too.
 7. **One real GRPO run** on a GPU, comparing a small fine-tuned open model with a large hosted one on held-out data,
    with the program's checks as the only reward.
+
+## Design: tools as typed effects (planned for 0.7.0)
+
+Shio Guard gives a Python agent this protection as a library. In the language it should be a declaration, so the
+compiler can refuse a call that isn't declared, isn't made from a rule, or passes a value of the wrong kind.
+
+```shio
+tool read_file(path: name) reads untrusted = files.read
+tool vendor_master() reads trusted = erp.vendors
+tool get_webpage(url: url) reads untrusted opens = web.get
+tool send_money(recipient: iban, amount: float, memo: text) acts = bank.send
+tool send_email(to: email, body: text) acts = mail.send
+
+agent pay(request: Source, llm, approver):
+    guard request by llm approved by approver      # the blind plan, from the request alone (as shio.guard)
+    read bill: Bill from call read_file(path=request.file) by llm
+    check on_record: bill.iban in vendor_master().ibans, "{bill.iban} is not the vendor's account on record"
+    rule pay:
+        if checks.failures():
+            return hold(bill)
+        return call send_money(recipient=bill.iban, amount=bill.total, memo=bill.number)
+    return pay
+```
+
+- **Declarations.** `tool NAME(ARG: KIND, ...) reads [trusted|untrusted|mixed] [opens] | acts = python.callable`.
+  Kinds are `email`, `url`, `iban`, `name` (control values, provenance-checked), `text` (free text: addresses inside
+  it are checked) and plain types (`float`, `int`, `bool`, `str`: not checked).
+- **Calls.** `call NAME(args)` is an expression. A `reads` tool may be called anywhere; its result is untrusted or
+  trusted text as declared, and is recorded in the task's ledger. An `acts` tool may be called **only inside a
+  rule**; anywhere else is a compile error, as is calling an undeclared tool or a tool's Python callable directly.
+- **Every `acts` call goes through the gate:** planned by the blind read of the request, every control value from
+  trusted text or a place the request pointed at, no address the agent never read. Outcomes as in Guard: it runs, it
+  is held (the rule's result becomes a sign-off for `approved by`), or it is denied (the rule's call raises a
+  `GateDenied` the rule can catch to choose an outcome).
+- **Traces.** The plan, every gated call and every approval are records in the same chain as the agent's run.
+- **Compatibility.** Programs without `tool` declarations compile as today. `shio.guard` stays the way to protect
+  agents written in Python.
+
+Open questions: whether `guard` belongs on the agent (one plan per call of the agent) or on `main:` (one plan per
+task); how a rule that calls several `acts` tools reports a partial hold; and whether reads should be cached per task.
 
 ## Evidence so far
 

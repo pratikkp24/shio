@@ -29,8 +29,10 @@ request, the system's own records, outputs of tools declared output="trusted"). 
 v1.2.2 (README, "Benchmark"), made general: there its tool declarations were written per suite; here you declare them.
 """
 import dataclasses
+import hashlib
 import json
 import re
+import time
 from pathlib import Path
 
 URL = re.compile(r"(?:https?://)?(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ly|co|ch|uk|de|in|"
@@ -121,6 +123,8 @@ class Tool:
 class Decision:
     outcome: str            # "run" | "hold" | "deny"
     why: str = ""
+    id: str = None          # a held call's id, for Session.approve / reject
+    approved_by: str = None
 
     @property
     def run(self):
@@ -423,22 +427,61 @@ def _program():
     return _PROGRAM
 
 
+@dataclasses.dataclass
+class ApprovalRequest:
+    """What a person is asked to approve: the call, why it was held, and the task it belongs to."""
+    id: str
+    tool: str
+    args: dict
+    why: str
+    request: str            # the user's request the task started from
+    requester: str = None   # who asked for the task (they may not approve their own held calls)
+
+
+@dataclasses.dataclass
+class Approval:
+    approved: bool
+    by: str
+    note: str = ""
+
+
+def terminal_approver(prompt=input, out=print):
+    """An approver that asks on the terminal. For Slack, a web page or a ticket, write a function with the same
+    shape: ApprovalRequest -> Approval."""
+    def ask(req):
+        out(f"\nShio is holding a call for approval: {req.tool}({json.dumps(req.args, default=str)})\n  why: {req.why}"
+            f"\n  task: {req.request}")
+        who = prompt("Your name (empty to refuse): ").strip()
+        if not who:
+            return Approval(False, "terminal", "no approver")
+        ok = prompt("Approve? [y/N]: ").strip().lower() in ("y", "yes")
+        return Approval(ok, who, prompt("Note (optional): ").strip())
+    return ask
+
+
 class Guard:
-    """The tools an agent may call, and the model that plans from the user's request alone."""
+    """The tools an agent may call, the model that plans from the user's request alone, and (optionally) who
+    approves held calls: approver(ApprovalRequest) -> Approval. Without one, held calls wait for Session.approve."""
 
-    def __init__(self, tools, planner):
+    def __init__(self, tools, planner, approver=None, four_eyes=True):
         self.tools = {t.name: t for t in tools}
-        self.planner = planner
+        self.planner, self.approver, self.four_eyes = planner, approver, four_eyes
 
-    def start(self, request, records=()):
-        """A task: the blind plan from `request`, and a ledger seeded with the system's own `records` (trusted)."""
-        return Session(self, request, records)
+    def start(self, request, records=(), requester=None):
+        """A task: the blind plan from `request`, and a ledger seeded with the system's own `records` (trusted).
+        requester: who asked for it; with four_eyes, they can't approve this task's held calls themselves."""
+        return Session(self, request, records, requester)
+
+
+def _call_key(name, args):
+    return hashlib.sha256(json.dumps([name, args], sort_keys=True, default=str).encode()).hexdigest()
 
 
 class Session:
-    def __init__(self, guard, request, records=()):
+    def __init__(self, guard, request, records=(), requester=None):
         import shio
-        self.guard, self.request = guard, request
+        self.guard, self.request, self.requester = guard, request, requester
+        self.pending, self._approved = {}, {}      # id -> held call; call key -> who approved it
         acts = [t for t in guard.tools.values() if t.side_effect]
         menu = "\n".join(f"- {t.name}: {t.description}" for t in acts)
         reads = "\n".join(f"- {t.name}: {t.description}" for t in guard.tools.values() if t.opens_address)
@@ -454,7 +497,48 @@ class Session:
         proposed = {"function": name, "args": dict(args or {})}
         out = _program().gate(shio.Source("proposed tool call", text=json.dumps(proposed, default=str)),
                               replay(lambda req, p=proposed: p, name="proposed tool call"), self.plan, self.ledger)
-        return Decision(out["outcome"], out.get("why", ""))
+        if out["outcome"] != "hold":
+            return Decision(out["outcome"], out.get("why", ""))
+        key = _call_key(name, proposed["args"])
+        if key in self._approved:                  # approved for exactly these arguments, and still only held
+            return Decision("run", f"approved by {self._approved[key]}", key[:12], self._approved[key])
+        self.pending[key[:12]] = {"tool": name, "args": proposed["args"], "why": out.get("why", ""), "key": key}
+        return Decision("hold", out.get("why", ""), key[:12])
+
+    # -- approvals ---------------------------------------------------------------------------------------------------
+
+    def _answer(self, id, by, note, approved):
+        p = self.pending.get(id)
+        if p is None:
+            raise KeyError(f"no held call {id!r} in this task")
+        if approved and self.guard.four_eyes and self.requester and by == self.requester:
+            raise PermissionError(f"{by} asked for this task, so can't approve its held calls (four eyes)")
+        verdict = {"approved": approved, "by": by, "note": note, "tool": p["tool"], "time": time.time()}
+        _program().approval({"tool": p["tool"], "args": p["args"]}, p["why"], verdict)     # a run in the chain
+        del self.pending[id]
+        if approved:
+            self._approved[p["key"]] = by
+            return self.check(p["tool"], p["args"])   # re-checked: a call that is now denied stays denied
+        return Decision("deny", f"refused by {by}" + (f": {note}" if note else ""), id)
+
+    def approve(self, id, by, note=""):
+        """A person approves held call `id`. -> the call's Decision now: "run" unless something since made it a deny."""
+        return self._answer(id, by, note, True)
+
+    def reject(self, id, by, note=""):
+        return self._answer(id, by, note, False)
+
+    def decide(self, name, args):
+        """check(), then, for a held call, ask the approver if there is one. -> Decision."""
+        d = self.check(name, args)
+        if d.outcome == "hold" and self.guard.approver:
+            p = self.pending[d.id]
+            a = self.guard.approver(ApprovalRequest(d.id, name, p["args"], d.why, self.request, self.requester))
+            try:
+                return self._answer(d.id, a.by, a.note, bool(a.approved))
+            except PermissionError as e:
+                return Decision("hold", str(e), d.id)
+        return d
 
     def record(self, name, args, result):
         """Note what a tool returned, so later calls are judged against it."""
@@ -462,7 +546,7 @@ class Session:
 
     def call(self, name, args, fn):
         """Check, then run fn(**args) only on "run", and record its result. -> (Decision, result or None)."""
-        d = self.check(name, args)
+        d = self.decide(name, args)
         if not d.run:
             return d, None
         result = fn(**(args or {}))
@@ -477,9 +561,10 @@ class Session:
 
     def _run_one(self, name, args, run):
         """-> (Decision, text the model is shown). A held or denied call never runs; the model is told why."""
-        d = self.check(name, args)
+        d = self.decide(name, args)
         if not d.run:
-            verb = "is waiting for a person to approve it" if d.outcome == "hold" else "was refused"
+            verb = (f"is waiting for a person to approve it (held call {d.id})" if d.outcome == "hold"
+                    else "was refused")
             return d, f"Shio: this call did not run; it {verb}. {d.why}".strip()
         try:
             result = run(name, args)
@@ -524,7 +609,7 @@ class Session:
     async def mcp_call(self, client, name, args):
         """Call a tool on an MCP server through an mcp.ClientSession (or anything with an async call_tool), only if
         Guard lets it through, and record what it returned. -> (Decision, the CallToolResult or None)."""
-        d = self.check(name, args)
+        d = self.decide(name, args)
         if not d.run:
             return d, None
         result = await client.call_tool(name, args)

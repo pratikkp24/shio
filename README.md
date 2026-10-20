@@ -305,7 +305,9 @@ Then each proposed call is checked:
 It plugs into the stack you have: `s.openai_tool_messages(tool_calls, run)` for OpenAI-style tool calls,
 `s.anthropic_tool_results(content, run)` for Claude's `tool_use` blocks, `guard.wrap_tools(s, tools)` for
 LangChain-style tools, and `await s.mcp_call(session, name, args)` with `Tool.from_mcp(...)` for MCP servers. A held or
-refused call never runs; the model is told why. [Docs](https://pratikkp24.github.io/shio/guard/).
+refused call never runs; the model is told why. A held call waits for a person: `approver=` asks one (a terminal,
+Slack, a ticket), or `s.approve(id, by=...)` later; every answer is signed into the chain, bound to the exact call,
+and the person who asked can't approve their own task. [Docs](https://pratikkp24.github.io/shio/guard/).
 
 Every plan and every decision is a traced Shio run. It is the gate from the benchmark below, made general: replayed
 over all 3,058 tool calls of that run, it reaches the same decision on every one.

@@ -28,6 +28,26 @@ for. Then each proposed call is checked:
 
 Every plan and every decision is a traced Shio run.
 
+## Approvals
+
+A held call gets an id and waits. A person answers it, either through an approver you give the Guard, or later:
+
+```python
+g = guard.Guard(tools, planner=models.ollama("qwen3:8b"), approver=guard.terminal_approver())
+s = g.start(request, requester="maya")          # maya can't approve her own task's held calls (four eyes)
+
+d = s.check("send_email", args)                 # without an approver: d.outcome == "hold", d.id
+s.pending                                       # {id: {"tool", "args", "why"}}
+s.approve(d.id, by="omar", note="checked")      # -> Decision("run", approved_by="omar")
+s.reject(d.id, by="omar", note="not now")       # -> Decision("deny")
+```
+
+- An approval is bound to the **exact arguments**: changing them needs a new approval.
+- Only a **hold** can be approved. A denied call stays denied, and an approved call is re-checked, so it stays denied
+  if something since made it one.
+- Every answer is a **run in the chain**: who, approved or not, the note, and the call, signed when a key is set.
+- An approver is any function `ApprovalRequest -> Approval`: a terminal prompt, a Slack button, a ticket.
+
 ## Declaring tools
 
 | Argument | Meaning |
