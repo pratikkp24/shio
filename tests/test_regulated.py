@@ -1,6 +1,7 @@
 """Regulated mode and decision records: the escape hatches are compile errors; a regulated program needs a signing
 key, recorded runs and pinned models; records are hash-chained and signed, and verify catches every edit, deletion,
 insertion and reordering; personal data is hashed in records and erasable; replay reproduces a decision."""
+import importlib.util
 import json
 import os
 import textwrap
@@ -14,6 +15,8 @@ from shio.compiler import ShioError, compile_source
 from shio.core import RegulatedError
 from shio.models import Ollama
 from shio.replay import replay
+
+NEEDS_CRYPTO = unittest.skipUnless(importlib.util.find_spec("cryptography"), "needs the [regulated] extra (cryptography)")
 
 PROGRAM = """
 regulated
@@ -84,6 +87,7 @@ class Compile(unittest.TestCase):
         compile_source("import sys\n" + plain, "t.shio")
 
 
+@NEEDS_CRYPTO
 class Records(unittest.TestCase):
     def setUp(self):
         self.tmp = TemporaryDirectory()
@@ -238,3 +242,19 @@ class RuntimeRules(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WithoutTheExtra(unittest.TestCase):
+    def test_a_missing_cryptography_package_says_which_extra_to_install(self):
+        import sys
+        saved = {k: v for k, v in sys.modules.items() if k == "cryptography" or k.startswith("cryptography.")}
+        for k in saved:
+            del sys.modules[k]
+        sys.modules["cryptography"] = None            # import cryptography now raises ImportError
+        try:
+            with TemporaryDirectory() as d, self.assertRaises(RuntimeError) as e:
+                ledger.keygen(d)
+            self.assertIn("pip install 'shio-lang[regulated]'", str(e.exception))
+        finally:
+            del sys.modules["cryptography"]
+            sys.modules.update(saved)

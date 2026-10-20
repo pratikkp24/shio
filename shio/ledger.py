@@ -16,6 +16,7 @@ answers it with a signed entry in the same chain: who, in which role, when, what
 of the record they saw. Maker-checker holds: the signer can't be the requester, anyone the record names as a maker,
 or someone who already signed it.
 """
+import importlib
 import base64
 import contextlib
 import hashlib
@@ -25,6 +26,16 @@ import os
 import re
 import time
 from pathlib import Path
+
+def _crypto(module):
+    """A module of the cryptography package, which the [regulated] extra installs. Signed records and the encrypted
+    vault need it; nothing else in Shio does."""
+    try:
+        return importlib.import_module(module)
+    except ImportError:
+        raise RuntimeError("signed records and the encrypted vault need the cryptography package: "
+                           "pip install 'shio-lang[regulated]'") from None
+
 
 LEDGER = "ledger.jsonl"
 GENESIS = "0" * 64
@@ -63,21 +74,21 @@ def load_signer(spec=None):
     if spec.startswith("hmac:"):
         secret = spec[5:].encode()
         return Signer("hmac", secret, "hmac:" + hashlib.sha256(secret).hexdigest()[:16])
-    from cryptography.hazmat.primitives import serialization
+    serialization = _crypto("cryptography.hazmat.primitives.serialization")
     key = serialization.load_pem_private_key(Path(spec).expanduser().read_bytes(), password=None)
     return Signer("ed25519", key, key_id(key.public_key()))
 
 
 def key_id(public_key):
-    from cryptography.hazmat.primitives import serialization
+    serialization = _crypto("cryptography.hazmat.primitives.serialization")
     raw = public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     return "ed25519:" + hashlib.sha256(raw).hexdigest()[:16]
 
 
 def keygen(folder):
     """Writes shio-signing.key (keep it secret: 0600) and shio-signing.pub (give it to auditors)."""
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    serialization = _crypto("cryptography.hazmat.primitives.serialization")
+    Ed25519PrivateKey = _crypto("cryptography.hazmat.primitives.asymmetric.ed25519").Ed25519PrivateKey
     d = Path(folder)
     d.mkdir(parents=True, exist_ok=True)
     key = Ed25519PrivateKey.generate()
@@ -111,7 +122,7 @@ def _check_signature(entry, public_key=None, secret=None):
 
 
 def load_public_key(path):
-    from cryptography.hazmat.primitives import serialization
+    serialization = _crypto("cryptography.hazmat.primitives.serialization")
     return serialization.load_pem_public_key(Path(path).expanduser().read_bytes())
 
 
@@ -173,7 +184,7 @@ def vaultkeygen(folder):
 
 
 def _seal(vault, aad):
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    AESGCM = _crypto("cryptography.hazmat.primitives.ciphers.aead").AESGCM
     key = vault_key()
     nonce = os.urandom(12)
     ct = AESGCM(key).encrypt(nonce, json.dumps(vault, ensure_ascii=False, default=str).encode(), aad.encode())
@@ -182,7 +193,7 @@ def _seal(vault, aad):
 
 
 def _open(blob, aad):
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    AESGCM = _crypto("cryptography.hazmat.primitives.ciphers.aead").AESGCM
     key = vault_key()
     if key is None:
         raise VaultLocked("this vault is encrypted: set SHIO_VAULT_KEY (or configure(vault_key=...)) to read it")
@@ -759,7 +770,7 @@ def signoff(record_path, signer_name, role, meaning, signer=None, reject=False, 
 
 
 def load_private_key(path):
-    from cryptography.hazmat.primitives import serialization
+    serialization = _crypto("cryptography.hazmat.primitives.serialization")
     return serialization.load_pem_private_key(Path(path).expanduser().read_bytes(), password=None)
 
 

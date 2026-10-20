@@ -7,3 +7,6 @@ node_modules/
 *.vsix
 .DS_Store
 erp.db
+dist/
+build/
+.coverage

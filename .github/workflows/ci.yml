@@ -5,14 +5,20 @@ jobs:
   python:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python: ["3.10", "3.12", "3.13"]
+        install: [".[regulated,pdf]"]
+        include:                       # a plain `pip install shio-lang`: the extra-only tests skip, the rest must pass
+          - python: "3.12"
+            install: "."
+    name: python ${{ matrix.python }} (${{ matrix.install }})
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e . pytest
+      - run: pip install -e "${{ matrix.install }}" pytest
       - run: pytest -q
       - name: every example compiles (except the one written to fail)
         run: for f in examples/*.shio examples/*/*.shio; do case "$f" in *_unsafe.shio) ;; *) shio check "$f";; esac; done
@@ -21,6 +27,21 @@ jobs:
           cd examples/injection
           shio run inbox.shio replay | grep HELD
           ! shio check inbox_unsafe.shio
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: the wheel installs and runs on its own
+        run: |
+          python -m venv /tmp/w && /tmp/w/bin/pip install dist/*.whl
+          cd examples/injection && /tmp/w/bin/shio run inbox.shio replay | grep HELD
 
   vscode:
     runs-on: ubuntu-latest

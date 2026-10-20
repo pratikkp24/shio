@@ -16,6 +16,8 @@ from shio.compiler import ShioError, compile_source
 from shio.explain import explain
 from shio.replay import replay
 
+NEEDS_CRYPTO = unittest.skipUnless(importlib.util.find_spec("cryptography"), "needs the [regulated] extra (cryptography)")
+
 PROGRAM = """
 regulated
 
@@ -98,8 +100,8 @@ class Setup(unittest.TestCase):
         return ledger.signoff(path, who, role, meaning, self.signer, **kw)
 
 
+@NEEDS_CRYPTO
 class ReasonCodes(Setup):
-    @unittest.skipUnless(importlib.util.find_spec("cryptography"), "needs the [regulated] extra (cryptography)")
     def test_codes_are_recorded_in_clear_with_their_text(self):
         out, path = self.pay(SMALL, model="odd")
         self.assertEqual(out["codes"], ["UNKNOWN_SUPPLIER"])
@@ -142,6 +144,7 @@ class ReasonCodes(Setup):
         compile_source(src, "t.shio")
 
 
+@NEEDS_CRYPTO
 class Signoff(Setup):
     def test_over_the_limit_is_pending_and_under_is_not(self):
         out, path = self.pay()
