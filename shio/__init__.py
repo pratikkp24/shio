@@ -10,7 +10,14 @@ from .compiler import ShioError, compile_source, to_code
 from .core import (BoundaryError, Checks, Reading, RegulatedError, Source, agent, check, configure, each,  # noqa: F401
                    in_force, parallel, read, rule)
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
+
+# The public API (see docs/API.md): these names, the modules shio.models, shio.guard and shio.trace (their documented
+# classes and functions), the `shio` command, and the .shio language. Anything else, and any name starting with "_",
+# is internal and may change in any release.
+__all__ = ["load", "program_identity", "ShioError", "compile_source", "to_code", "BoundaryError", "RegulatedError",
+           "Checks", "Reading", "Source", "agent", "read", "check", "rule", "each", "parallel", "in_force",
+           "configure", "__version__"]
 
 
 def load(path, name=None, argv=()):

@@ -305,6 +305,22 @@ Then each proposed call is checked:
 Every plan and every decision is a traced Shio run. It is the gate from the benchmark below, made general: replayed
 over all 3,058 tool calls of that run, it reaches the same decision on every one.
 
+## 📡 Traces in production
+
+Every run is a signed, hash-chained record in a local folder: that is the audit trail `shio verify` checks. Sinks send
+a copy of each record wherever you watch production, without touching the chain:
+
+```python
+from shio import trace
+trace.add_sink(trace.SqlSink(lambda: psycopg.connect(DSN)))                    # one row per run, any DB-API driver
+trace.add_sink(trace.Background(trace.S3Sink("audit-bucket", prefix="shio/")))  # pip install 'shio-lang[s3]'
+trace.add_sink(trace.OtelSink())               # spans for Datadog, Honeycomb, Tempo... pip install 'shio-lang[otel]'
+trace.add_sink(trace.JsonlSink("/var/log/shio/records.jsonl"))                 # for log shippers
+```
+
+A copy is the record as signed, without its vault, so personal data stays in the local, erasable vault. A sink that
+fails is logged and counted and never fails a run. `Background(...)` keeps slow sinks off the run's thread.
+
 ## 🧪 Checks are tests, and rewards
 
 Every run is saved as a trace: each reading's prompt and raw completion, each check's arguments and result, and the

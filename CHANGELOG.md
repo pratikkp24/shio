@@ -3,7 +3,17 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
-## 0.3.0 (unreleased)
+## 0.4.0 (unreleased)
+
+- **Trace sinks** (`shio.trace`). Copies of every signed record to SQL (`SqlSink`, any DB-API driver), S3
+  (`S3Sink`, `pip install 'shio-lang[s3]'`), OpenTelemetry (`OtelSink`: a span per run, child spans per read, check
+  and rule; `pip install 'shio-lang[otel]'`) or a JSONL file (`JsonlSink`). The local chain stays the source of truth;
+  copies carry no vault data, so erasure still works; a failing sink never fails a run. `Background()` sends off the
+  run's thread.
+- **A declared public API.** `shio.__all__`, and [docs/API.md](docs/API.md): what is public, what is internal, and
+  how each can change. Use `shio.Source` rather than `shio.core.Source`.
+
+## 0.3.0 (2026-10-20)
 
 - **Shio Guard** (`shio.guard`). Put Shio in front of any agent's tools without rewriting the agent: declare the
   tools (`Tool(name, side_effect=, control=, content=, output=)`), start a task from the user's request (a blind plan),

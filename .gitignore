@@ -10,3 +10,4 @@ erp.db
 dist/
 build/
 .coverage
+dist-next/
