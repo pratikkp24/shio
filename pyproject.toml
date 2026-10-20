@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shio-lang"
-version = "0.4.0"
+version = "0.5.0"
 description = "Shio: a language for agents in which the model reads and code decides. Checks double as training rewards."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -28,6 +28,8 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/pratikkp24/shio"
+Documentation = "https://pratikkp24.github.io/shio/"
+Changelog = "https://github.com/pratikkp24/shio/blob/main/CHANGELOG.md"
 Source = "https://github.com/pratikkp24/shio"
 Issues = "https://github.com/pratikkp24/shio/issues"
 Security = "https://github.com/pratikkp24/shio/blob/main/SECURITY.md"
@@ -37,6 +39,7 @@ regulated = ["cryptography>=42"]
 anthropic = ["anthropic>=1.0"]
 s3 = ["boto3>=1.34"]
 otel = ["opentelemetry-api>=1.24"]
+docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5,<10"]
 pdf = ["pypdf>=4"]
 train = ["trl>=0.20", "datasets", "peft"]
 

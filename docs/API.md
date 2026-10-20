@@ -1,14 +1,14 @@
 # Shio's public API and how it changes
 
 Shio follows [semantic versioning](https://semver.org). Before 1.0, a minor release (0.x) may change the public API,
-and every such change is listed in [CHANGELOG.md](../CHANGELOG.md) with what to write instead. From 1.0, the public
+and every such change is listed in [CHANGELOG.md](https://github.com/pratikkp24/shio/blob/main/CHANGELOG.md) with what to write instead. From 1.0, the public
 API changes only in a major release, after at least one minor release in which the old form still works and warns.
 
 ## What is public
 
 | Area | Public | Notes |
 |---|---|---|
-| The language | Everything in [SPEC.md](../SPEC.md): `type`, `model`, `agent`, `read`, `check`, `when`, `rule`, `signoff`, `codes`, `regulated` | A program that compiles keeps compiling, except where it reached a reading's value without a check or rule: closing such a route is a security fix and can land in any release |
+| The language | Everything in [SPEC.md](https://github.com/pratikkp24/shio/blob/main/SPEC.md): `type`, `model`, `agent`, `read`, `check`, `when`, `rule`, `signoff`, `codes`, `regulated` | A program that compiles keeps compiling, except where it reached a reading's value without a check or rule: closing such a route is a security fix and can land in any release |
 | `shio` | The names in `shio.__all__`: `load`, `agent`, `read`, `check`, `rule`, `each`, `parallel`, `in_force`, `configure`, `Source`, `Reading`, `Checks`, `BoundaryError`, `RegulatedError`, `ShioError`, `compile_source`, `to_code`, `program_identity` | |
 | `shio.models` | `ollama`, `openai_compat`, `anthropic`, `replay`, `messages_for`, and each backend's `propose(request)` / `identity()` | A backend is anything with `propose(request) -> str` |
 | `shio.guard` | `Guard`, `Tool`, `Decision`, `Session.check / call / record / reply` | |

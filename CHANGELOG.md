@@ -3,7 +3,18 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
-## 0.4.0 (unreleased)
+## 0.5.0 (unreleased)
+
+- **Shio Guard adapters.** `Session.openai_tool_messages(tool_calls, run)` screens an OpenAI-style assistant
+  message's tool calls and returns the tool messages; `Session.anthropic_tool_results(content, run)` does the same
+  for Claude's `tool_use` blocks (refusals marked `is_error`); `guard.wrap_tools(session, tools)` wraps LangChain-style
+  tools and plain functions; `await Session.mcp_call(client, name, args)` gates calls to an MCP server and records what
+  it returned. A held or refused call never runs, and the model is told why.
+- **Tool declarations from schemas.** `Tool.infer(name, description, schema)` guesses recipient, URL, IBAN and
+  free-text arguments from names and formats; `Tool.from_mcp(tool)` uses MCP's `readOnlyHint` and `openWorldHint`.
+- **Docs site** at https://pratikkp24.github.io/shio/ (MkDocs, built in CI with `--strict`, published from main).
+
+## 0.4.0 (2026-10-20)
 
 - **Trace sinks** (`shio.trace`). Copies of every signed record to SQL (`SqlSink`, any DB-API driver), S3
   (`S3Sink`, `pip install 'shio-lang[s3]'`), OpenTelemetry (`OtelSink`: a span per run, child spans per read, check

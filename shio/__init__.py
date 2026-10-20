@@ -10,7 +10,7 @@ from .compiler import ShioError, compile_source, to_code
 from .core import (BoundaryError, Checks, Reading, RegulatedError, Source, agent, check, configure, each,  # noqa: F401
                    in_force, parallel, read, rule)
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # The public API (see docs/API.md): these names, the modules shio.models, shio.guard and shio.trace (their documented
 # classes and functions), the `shio` command, and the .shio language. Anything else, and any name starting with "_",

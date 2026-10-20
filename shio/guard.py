@@ -41,6 +41,10 @@ NAME = re.compile(r"\b[A-Z][\w'&-]+(?:\s+(?:(?:of|the|de|la|du|and|&)\s+)?[A-Z][
 ADDRESS_KINDS = {"email", "iban", "url"}
 KINDS = ADDRESS_KINDS | {"name"}
 LONG = 120                  # characters: a record field longer than this is free text someone wrote, so untrusted
+_EMAIL_ARGS = {"to", "cc", "bcc", "recipient", "recipients", "email", "emails", "email_address", "user_email", "send_to"}
+_URL_ARGS = {"url", "urls", "link", "href", "website", "endpoint", "webhook", "callback_url", "uri"}
+_IBAN_ARGS = {"iban", "account_number", "account", "recipient_iban", "beneficiary_account"}
+_CONTENT_ARGS = {"body", "message", "text", "content", "comment", "description", "note", "notes", "summary"}
 STOP = {"the", "a", "an", "her", "his", "their", "its", "my", "our", "your", "website", "site", "page", "web", "blog",
         "email", "e-mail", "message", "file", "channel", "inbox", "from", "with", "and"}
 
@@ -66,6 +70,44 @@ class Tool:
     output: str = "untrusted"
     untrusted_keys: list = dataclasses.field(default_factory=list)
     opens_address: bool = False
+
+    @classmethod
+    def infer(cls, name, description="", schema=None, side_effect=True, output="untrusted", control=None, content=None):
+        """A Tool from a JSON schema of its arguments, guessing which arguments pick a target: a string argument
+        named like a recipient or email (to, cc, recipients, email...) or with format "email" is an email; one named
+        url, link, href, website or endpoint, or with format "uri", is a URL; iban or account_number is an IBAN.
+        Free-text arguments (body, message, text, content, comment, description) are content. Pass control= or
+        content= to say it yourself; side_effect defaults to True, so an unknown tool needs a plan to run."""
+        props = (schema or {}).get("properties") or {}
+        guessed, text = {}, []
+        for arg, spec in props.items():
+            spec = spec if isinstance(spec, dict) else {}
+            items = spec.get("items") if isinstance(spec.get("items"), dict) else {}
+            fmt, low = spec.get("format") or items.get("format"), arg.lower()
+            if fmt == "email" or low in _EMAIL_ARGS or low.endswith("_email"):
+                guessed[arg] = "email"
+            elif fmt in ("uri", "url") or low in _URL_ARGS or low.endswith("_url"):
+                guessed[arg] = "url"
+            elif low in _IBAN_ARGS:
+                guessed[arg] = "iban"
+            elif low in _CONTENT_ARGS:
+                text.append(arg)
+        return cls(name, description or "", side_effect=side_effect, output=output,
+                   control=guessed if control is None else control, content=text if content is None else content)
+
+    @classmethod
+    def from_mcp(cls, tool, **kw):
+        """A Tool from an MCP tool listing (an mcp.types.Tool or its dict). MCP's own hints decide the defaults: a
+        tool is an action unless it says readOnlyHint, and its output is untrusted unless it says openWorldHint=False
+        (it only reads the user's own system). A server's hints are its claim; pass side_effect= or output= to
+        override them for a server you don't trust."""
+        get = (lambda o, k, d=None: o.get(k, d)) if isinstance(tool, dict) else (lambda o, k, d=None: getattr(o, k, d))
+        ann = get(tool, "annotations") or {}
+        hint = (lambda k: ann.get(k)) if isinstance(ann, dict) else (lambda k: getattr(ann, k, None))
+        kw.setdefault("side_effect", not hint("readOnlyHint"))
+        kw.setdefault("output", "trusted" if hint("openWorldHint") is False else "untrusted")
+        schema = get(tool, "inputSchema") or get(tool, "input_schema") or {}
+        return cls.infer(get(tool, "name"), get(tool, "description") or "", schema, **kw)
 
     def __post_init__(self):
         if self.output not in ("untrusted", "trusted", "mixed"):
@@ -430,3 +472,93 @@ class Session:
     def reply(self, text):
         """Names and addresses in a final answer that only untrusted text contained."""
         return self.ledger.untrusted_entities(text)
+
+    # -- adapters for agent stacks ----------------------------------------------------------------------------------
+
+    def _run_one(self, name, args, run):
+        """-> (Decision, text the model is shown). A held or denied call never runs; the model is told why."""
+        d = self.check(name, args)
+        if not d.run:
+            verb = "is waiting for a person to approve it" if d.outcome == "hold" else "was refused"
+            return d, f"Shio: this call did not run; it {verb}. {d.why}".strip()
+        try:
+            result = run(name, args)
+        except Exception as e:                       # the tool's own error, reported like any tool error
+            return d, f"Error: {type(e).__name__}: {e}"
+        self.record(name, args, result)
+        return d, result if isinstance(result, str) else json.dumps(result, default=str)
+
+    def openai_tool_messages(self, tool_calls, run):
+        """Screen an OpenAI-style assistant message's tool_calls (objects or dicts); run(name, args) the ones Guard
+        lets through. -> the {"role": "tool", ...} messages to append, one per call, in order."""
+        out = []
+        for c in tool_calls or []:
+            fn = c.get("function") if isinstance(c, dict) else getattr(c, "function", None)
+            fget = (lambda k: fn.get(k)) if isinstance(fn, dict) else (lambda k: getattr(fn, k, None))
+            cid = c.get("id") if isinstance(c, dict) else getattr(c, "id", None)
+            raw = fget("arguments") or "{}"
+            try:
+                args = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            except json.JSONDecodeError:
+                out.append({"role": "tool", "tool_call_id": cid, "content": "Error: the arguments were not valid JSON"})
+                continue
+            d, text = self._run_one(fget("name"), args, run)
+            out.append({"role": "tool", "tool_call_id": cid, "content": text})
+        return out
+
+    def anthropic_tool_results(self, content, run):
+        """Screen the tool_use blocks of a Claude response's content (objects or dicts); run(name, args) the ones
+        Guard lets through. -> the tool_result blocks for the next user message (all of them, in one message)."""
+        out = []
+        for b in content or []:
+            get = (lambda k: b.get(k)) if isinstance(b, dict) else (lambda k: getattr(b, k, None))
+            if get("type") != "tool_use":
+                continue
+            d, text = self._run_one(get("name"), dict(get("input") or {}), run)
+            block = {"type": "tool_result", "tool_use_id": get("id"), "content": text}
+            if not d.run:
+                block["is_error"] = True
+            out.append(block)
+        return out
+
+    async def mcp_call(self, client, name, args):
+        """Call a tool on an MCP server through an mcp.ClientSession (or anything with an async call_tool), only if
+        Guard lets it through, and record what it returned. -> (Decision, the CallToolResult or None)."""
+        d = self.check(name, args)
+        if not d.run:
+            return d, None
+        result = await client.call_tool(name, args)
+        blocks = getattr(result, "content", None) or (result.get("content") if isinstance(result, dict) else []) or []
+        text = [getattr(x, "text", None) or (x.get("text") if isinstance(x, dict) else None) for x in blocks]
+        self.record(name, args, "\n".join(t for t in text if t) or result)
+        return d, result
+
+
+class GuardedTool:
+    """A LangChain-style tool (anything with .name and .invoke / .run, or a plain function) behind a Session: a call
+    Guard holds or refuses returns its reason as the observation instead of running. Everything else is the tool's."""
+
+    def __init__(self, session, tool):
+        self._session, self._tool = session, tool
+        self.name = getattr(tool, "name", None) or getattr(tool, "__name__", "tool")
+
+    def __getattr__(self, attr):
+        return getattr(self._tool, attr)
+
+    def _args(self, tool_input):
+        return dict(tool_input) if isinstance(tool_input, dict) else {"input": tool_input}
+
+    def invoke(self, tool_input, *a, **kw):
+        call = getattr(self._tool, "invoke", None) or getattr(self._tool, "run", None)
+        run = (lambda n, args: call(tool_input, *a, **kw)) if call else (lambda n, args: self._tool(**args))
+        return self._session._run_one(self.name, self._args(tool_input), run)[1]
+
+    run = invoke
+
+    def __call__(self, **kwargs):
+        return self.invoke(kwargs)
+
+
+def wrap_tools(session, tools):
+    """[GuardedTool] for a list of tools: hand these to the agent instead of the originals."""
+    return [GuardedTool(session, t) for t in tools]
