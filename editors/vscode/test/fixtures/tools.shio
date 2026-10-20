@@ -1,0 +1,26 @@
+def read(path): return "notes"
+def send(to, body): return "sent"
+
+tool read_file(path: name) reads untrusted = read
+tool get_page(url: url) reads untrusted opens = read
+tool vendor_master() reads trusted = read
+tool send_email(to: email, body: text) acts = send
+
+type Email:
+    to: str
+    body: str
+
+model planner = replay(lambda req: {"actions": "x", "delegated": True, "tools": [], "sources": []})
+
+agent mail(request: str, llm, approver):
+    guard request by planner approved by approver
+    read e: Email from Source("notes", text=call read_file(path="notes.txt")) by llm:
+        Write the email.
+    rule send:
+        try:
+            return call send_email(to=e.to, body=e.body)
+        except GateHeld as held:
+            return "waiting: " + held.decision.id
+        except GateDenied as refused:
+            return "refused: " + refused.decision.why
+    return send

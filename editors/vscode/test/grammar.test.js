@@ -219,6 +219,37 @@ async function main() {
     expect("in_force", I, 2, "in_force", "support.function.model.shio");
   }
   {
+    // typed tools (0.7.0): tool declarations, guard, call, and the gate exceptions
+    const toolsSrc = fs.readFileSync(path.join(__dirname, "fixtures", "tools.shio"), "utf8");
+    const TL = await tokenize(toolsSrc);
+    const tl = "tools.shio";
+    expect(tl, TL, 4, "tool", "storage.type.tool.shio");
+    expect(tl, TL, 4, "read_file", "entity.name.function.tool.shio");
+    expect(tl, TL, 4, "name", "support.type.argument-kind.shio");
+    expect(tl, TL, 4, "reads", "storage.modifier.tool-effect.shio");
+    expect(tl, TL, 4, "untrusted", "storage.modifier.tool-trust.shio");
+    expect(tl, TL, 5, "opens", "storage.modifier.tool-effect.shio");
+    expect(tl, TL, 6, "trusted", "storage.modifier.tool-trust.shio");
+    expect(tl, TL, 7, "acts", "storage.modifier.tool-effect.shio");
+    expect(tl, TL, 7, "send", "support.function.tool-impl.shio");
+    expect(tl, TL, 16, "guard", "keyword.other.guard.shio");
+    expect(tl, TL, 16, "approved by", "keyword.other.guard.shio");
+    expect(tl, TL, 17, "call", "keyword.other.call.shio");
+    expect(tl, TL, 18, "Write the email.", "string.unquoted.prompt.shio");
+    expect(tl, TL, 21, "call", "keyword.other.call.shio");
+    expect(tl, TL, 21, "send_email", "entity.name.function.tool.shio");
+    expect(tl, TL, 22, "GateHeld", "support.class.gate.shio");
+    expect(tl, TL, 24, "GateDenied", "support.class.gate.shio");
+    promptInvariant(tl, toolsSrc, TL);
+    const mailSrc = fs.readFileSync(path.join(EXAMPLES, "tools", "mail.shio"), "utf8");
+    const ML = await tokenize(mailSrc);
+    const lineOf = (needle) => mailSrc.split("\n").findIndex((l) => l.includes(needle)) + 1;
+    expect("mail.shio", ML, lineOf("tool send_email"), "acts", "storage.modifier.tool-effect.shio");
+    expect("mail.shio", ML, lineOf("guard request"), "guard", "keyword.other.guard.shio");
+    expect("mail.shio", ML, lineOf("call read_file"), "read_file", "entity.name.function.tool.shio");
+    promptInvariant("mail.shio", mailSrc, ML);
+  }
+  {
     const P = await tokenize([
       "codes:",
       '    INCOME_NOT_VERIFIED: "We could not verify your income from the documents you sent."',

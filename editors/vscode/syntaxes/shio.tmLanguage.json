@@ -19,6 +19,9 @@
       "include": "#model-decl"
     },
     {
+      "include": "#tool-decl"
+    },
+    {
       "include": "#agent-decl"
     },
     {
@@ -29,6 +32,9 @@
     },
     {
       "include": "#signoff-stmt"
+    },
+    {
+      "include": "#guard-stmt"
     },
     {
       "include": "#check-stmt"
@@ -59,6 +65,17 @@
     "shio-names": {
       "patterns": [
         {
+          "match": "(?<![\\w.])(call)\\s+([A-Za-z_]\\w*)(?=\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "keyword.other.call.shio"
+            },
+            "2": {
+              "name": "entity.name.function.tool.shio"
+            }
+          }
+        },
+        {
           "match": "\\b(checks)\\s*(\\.)\\s*(failed|failures)\\b",
           "captures": {
             "1": {
@@ -83,6 +100,10 @@
         {
           "match": "(?<![\\w.])argv\\b",
           "name": "variable.language.argv.shio"
+        },
+        {
+          "match": "(?<![\\w.])(GateHeld|GateDenied)\\b",
+          "name": "support.class.gate.shio"
         }
       ]
     },
@@ -739,6 +760,87 @@
         {
           "match": "\\b(when|by|roles?|maker)\\b",
           "name": "keyword.other.signoff.shio"
+        },
+        {
+          "include": "source.python#expression"
+        }
+      ]
+    },
+    "tool-decl": {
+      "comment": "tool NAME(ARG: KIND, ...) reads|acts [opens] [trusted|untrusted|mixed] = python.callable",
+      "match": "^(tool)\\s+([A-Za-z_]\\w*)\\s*(\\()(.*?)(\\))\\s*(.*?)\\s*(=)\\s*([A-Za-z_][\\w.]*)\\s*(#.*)?$",
+      "captures": {
+        "1": {
+          "name": "storage.type.tool.shio"
+        },
+        "2": {
+          "name": "entity.name.function.tool.shio"
+        },
+        "3": {
+          "name": "punctuation.definition.parameters.begin.shio"
+        },
+        "4": {
+          "patterns": [
+            {
+              "match": "([A-Za-z_]\\w*)\\s*(:)\\s*([A-Za-z_]\\w*)",
+              "captures": {
+                "1": {
+                  "name": "variable.parameter.function.shio"
+                },
+                "2": {
+                  "name": "punctuation.separator.annotation.shio"
+                },
+                "3": {
+                  "name": "support.type.argument-kind.shio"
+                }
+              }
+            },
+            {
+              "match": ",",
+              "name": "punctuation.separator.parameters.shio"
+            }
+          ]
+        },
+        "5": {
+          "name": "punctuation.definition.parameters.end.shio"
+        },
+        "6": {
+          "patterns": [
+            {
+              "match": "\\b(reads|acts|opens)\\b",
+              "name": "storage.modifier.tool-effect.shio"
+            },
+            {
+              "match": "\\b(trusted|untrusted|mixed)\\b",
+              "name": "storage.modifier.tool-trust.shio"
+            }
+          ]
+        },
+        "7": {
+          "name": "keyword.operator.assignment.shio"
+        },
+        "8": {
+          "name": "support.function.tool-impl.shio"
+        },
+        "9": {
+          "name": "comment.line.number-sign.shio"
+        }
+      }
+    },
+    "guard-stmt": {
+      "comment": "guard REQUEST by MODEL [approved by APPROVER]",
+      "name": "meta.guard.shio",
+      "begin": "^\\s*(guard)\\b",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.other.guard.shio"
+        }
+      },
+      "end": "$",
+      "patterns": [
+        {
+          "match": "\\b(approved\\s+by|by)\\b",
+          "name": "keyword.other.guard.shio"
         },
         {
           "include": "source.python#expression"
