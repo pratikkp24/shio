@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shio-lang"
-version = "0.9.0"
+version = "1.0.0rc1"
 description = "Shio: a language for agents in which the model reads and code decides. Checks double as training rewards."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -15,7 +15,7 @@ dependencies = ["pydantic>=2"]
 
 keywords = ["llm", "ai-agents", "prompt-injection", "programming-language", "ollama"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

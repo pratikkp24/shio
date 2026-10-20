@@ -1,5 +1,8 @@
 # Shio's public API and how it changes
 
+**Status: 1.0.0rc1.** The public API below is frozen as 1.0. Between the release candidate and 1.0.0 only fixes land;
+security fixes follow the rule at the end of this page.
+
 Shio follows [semantic versioning](https://semver.org). Before 1.0, a minor release (0.x) may change the public API,
 and every such change is listed in [CHANGELOG.md](https://github.com/pratikkp24/shio/blob/main/CHANGELOG.md) with what to write instead. From 1.0, the public
 API changes only in a major release, after at least one minor release in which the old form still works and warns.

@@ -18,7 +18,7 @@ The compiler enforces it. Compiles to Python.
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://github.com/pratikkp24/shio/blob/main/pyproject.toml)
 [![PyPI](https://img.shields.io/pypi/v/shio-lang?style=flat-square&color=6487D7)](https://pypi.org/project/shio-lang/)
 [![CI](https://img.shields.io/github/actions/workflow/status/pratikkp24/shio/ci.yml?branch=main&style=flat-square&label=tests)](https://github.com/pratikkp24/shio/actions/workflows/ci.yml)
-[![Status](https://img.shields.io/badge/status-alpha-E8A33D?style=flat-square)](#-status)
+[![Status](https://img.shields.io/badge/status-1.0%20release%20candidate-E8A33D?style=flat-square)](#-status)
 [![Compiles to](https://img.shields.io/badge/compiles%20to-Python-111?style=flat-square)](#-how-it-works)
 
 [**Docs**](https://pratikkp24.github.io/shio/) · [**Quick start**](#-quick-start) · [**Shio Guard**](#%EF%B8%8F-shio-guard-in-front-of-any-agents-tools) · [**Examples**](https://github.com/pratikkp24/shio/tree/main/examples) · [**Spec**](https://github.com/pratikkp24/shio/blob/main/SPEC.md) · [**Changelog**](https://github.com/pratikkp24/shio/blob/main/CHANGELOG.md) · [**Security**](https://github.com/pratikkp24/shio/blob/main/SECURITY.md)
@@ -471,9 +471,10 @@ every tool call going through a Shio gate.
 
 ## 🧭 Status
 
-**Alpha, on PyPI** (`pip install shio-lang`; [changelog](https://github.com/pratikkp24/shio/blob/main/CHANGELOG.md)). What
-is public and how it may change is in [docs/API.md](https://github.com/pratikkp24/shio/blob/main/docs/API.md): before
-1.0, a minor release may change the API, and the changelog says how.
+**1.0 release candidate** (`pip install --pre shio-lang` for 1.0.0rc1; `pip install shio-lang` stays on the latest
+0.x until 1.0.0 is final; [changelog](https://github.com/pratikkp24/shio/blob/main/CHANGELOG.md)). The public API in
+[docs/API.md](https://github.com/pratikkp24/shio/blob/main/docs/API.md) is frozen as 1.0: from here to 1.0.0 only fixes
+land, and after 1.0.0 it changes only in a major release.
 
 What's there: the language and its compiler-enforced boundary, typed tools, Shio Guard for agents written in Python
 (OpenAI, Claude, LangChain-style and MCP adapters, approvals), signed and hash-chained decision records with an
@@ -486,8 +487,11 @@ full information-flow analysis. Imported Python modules are trusted code. On Age
 attack on its own, so that run measured the cost of the gate more than its protection; runs on weaker models are next.
 [SECURITY.md](https://github.com/pratikkp24/shio/blob/main/SECURITY.md) has the details.
 
-**Before 1.0:** a stable API kept through at least one minor release, an outside security review, at least one
-production deployment, and benchmark results on weaker models.
+**From 1.0.0rc1 to 1.0.0:** done: a public API declared in 0.4.0 and unbroken since, CI, automated releases and a
+docs site. Still to come before 1.0.0 is final: an outside security review of the boundary, at least one production
+deployment, and the benchmark results on Haiku 5.5 (InjecAgent: 0 of 1,054 enhanced attacks succeeded against the
+model even without Shio; AgentDojo still running). If you'd review Shio's boundary or run it in production, please
+[open an issue](https://github.com/pratikkp24/shio/issues).
 
 **If you can get model output past the boundary, please tell us:** see [SECURITY.md](https://github.com/pratikkp24/shio/blob/main/SECURITY.md).
 Contributions are welcome: see [CONTRIBUTING.md](https://github.com/pratikkp24/shio/blob/main/CONTRIBUTING.md).

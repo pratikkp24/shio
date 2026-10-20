@@ -3,7 +3,15 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
-## 0.9.0 (unreleased)
+## 1.0.0rc1 (unreleased)
+
+The first release candidate for 1.0. Nothing new: the public API in [docs/API.md](docs/API.md) is frozen as 1.0, and
+from here to 1.0.0 only fixes land. Install with `pip install --pre shio-lang`.
+
+1.0.0 is final once these are done: an outside security review of the boundary, at least one production deployment,
+and the benchmark results on Haiku 5.5. Classifier: Development Status 4 (Beta).
+
+## 0.9.0 (2026-10-20)
 
 - **Images and PDFs, natively.** `Source.image(path)` (in `.shio`: `image(path)`) for PNG, JPEG, GIF and WebP, and
   `Source.from_pdf(path)` now records that it is a PDF. Claude gets images and PDFs as image and document blocks (a
