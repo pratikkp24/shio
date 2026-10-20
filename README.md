@@ -222,10 +222,8 @@ approved, and reconciliation ties every ERP journal back to it. Sample data, rea
 | **Python** | 3.10+ | Shio compiles to Python and runs on it |
 | **Ollama** (optional) | any | Run the examples with a local model; `replay` needs no model at all |
 
-> `shio-lang` is not on PyPI yet. Install it from GitHub:
-
 ```bash
-pip install "git+https://github.com/pratikkp24/shio"      # or, from a clone: pip install -e .
+pip install shio-lang                                     # or, from a clone: pip install -e .
 shio new myagent && cd myagent && shio run agent.shio    # a starter agent, no model needed
 ```
 
@@ -253,7 +251,7 @@ A third pays real invoice PDFs through a sandbox bank API with a live dashboard,
 account; the Shio agent's `account_on_file` check holds it and pays the other five:
 
 ```bash
-pip install "shio-lang[pdf] @ git+https://github.com/pratikkp24/shio"   # reads PDFs with pypdf
+pip install "shio-lang[pdf]"      # reads PDFs with pypdf
 cd examples/payables
 python bank.py &                  # dashboard on http://localhost:8077
 python pay_agent.py qwen3:8b      # plain Python

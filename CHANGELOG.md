@@ -3,9 +3,9 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
-## 0.1.0 (unreleased)
+## 0.2.0 (2026-10-20)
 
-The first release.
+The first release on PyPI. (0.1.0 was never published.)
 
 - **The language.** `read`, `check`, `when`, `rule` and `signoff`. A model's reading can only be looked at in a check,
   a when, a rule or a later read's `seeing` clause. Anywhere else is a compile error, and the runtime enforces it again.
