@@ -75,7 +75,7 @@ of the language rather than a convention:
 1. **Full information-flow tracking.** Track model data through containers, closures and calls, with rules as the
    only place it is approved for use. Today it is tracked by reading name inside an agent, reflection is refused, the
    reading's contents are sealed at runtime, and the boundary is fuzzed in CI (0.3.0).
-2. **Tools as typed effects** (designed below; planned for 0.7.0). Shio Guard (0.3.0) is the library form.
+2. ~~Tools as typed effects.~~ Done in 0.7.0 (below). Shio Guard (0.3.0) is the library form.
 3. ~~A prompt-injection benchmark.~~ Done: AgentDojo v1.2.2 on Opus 5.5, all 949 attack cases (README, "Benchmark").
 4. **A `read many` form** for batched extraction, and native PDF and image sources for models that take them.
 5. **A language server**, so errors show as you type.
@@ -84,7 +84,7 @@ of the language rather than a convention:
 7. **One real GRPO run** on a GPU, comparing a small fine-tuned open model with a large hosted one on held-out data,
    with the program's checks as the only reward.
 
-## Design: tools as typed effects (planned for 0.7.0)
+## Tools as typed effects (0.7.0)
 
 Shio Guard gives a Python agent this protection as a library. In the language it should be a declaration, so the
 compiler can refuse a call that isn't declared, isn't made from a rule, or passes a value of the wrong kind.
@@ -114,15 +114,20 @@ agent pay(request: Source, llm, approver):
   trusted text as declared, and is recorded in the task's ledger. An `acts` tool may be called **only inside a
   rule**; anywhere else is a compile error, as is calling an undeclared tool or a tool's Python callable directly.
 - **Every `acts` call goes through the gate:** planned by the blind read of the request, every control value from
-  trusted text or a place the request pointed at, no address the agent never read. Outcomes as in Guard: it runs, it
-  is held (the rule's result becomes a sign-off for `approved by`), or it is denied (the rule's call raises a
-  `GateDenied` the rule can catch to choose an outcome).
+  trusted text or a place the request pointed at, no address the agent never read. It runs; or it is held, and the
+  `approved by` approver is asked, and if the answer isn't yes the call raises `GateHeld`; or it is denied and raises
+  `GateDenied`. A rule catches either to choose the outcome (`except GateDenied as d: return ...`); uncaught, the
+  agent's run fails without acting. Calling an `acts` tool from plain Python, outside a rule or without `guard`, is
+  refused at run time too (`BoundaryError`).
+- **`guard`** belongs to the agent that runs it: its rules, and agents it calls, use that task. An agent without
+  `guard` may still call `reads` tools.
 - **Traces.** The plan, every gated call and every approval are records in the same chain as the agent's run.
 - **Compatibility.** Programs without `tool` declarations compile as today. `shio.guard` stays the way to protect
   agents written in Python.
 
-Open questions: whether `guard` belongs on the agent (one plan per call of the agent) or on `main:` (one plan per
-task); how a rule that calls several `acts` tools reports a partial hold; and whether reads should be cached per task.
+Still open: how a rule that calls several `acts` tools reports a partial hold (today the first hold or denial
+raises, and earlier calls in the rule have run); and whether reads should be cached per task. Example:
+[`examples/tools/mail.shio`](examples/tools/mail.shio).
 
 ## Evidence so far
 

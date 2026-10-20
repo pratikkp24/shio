@@ -3,7 +3,17 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
-## 0.6.0 (unreleased)
+## 0.7.0 (unreleased)
+
+- **Typed tools in the language.** `tool NAME(ARG: KIND, ...) reads [trusted|untrusted|mixed] [opens] = fn` and
+  `tool NAME(...) acts = fn` declare an agent's tools (kinds `email`, `url`, `iban`, `name`, `text` or a plain type);
+  `guard REQUEST by MODEL [approved by APPROVER]` starts the task (Shio Guard's blind plan); `call NAME(args)` calls a
+  tool. An `acts` call compiles only inside a rule, and at run time goes through the gate: it runs, or raises
+  `GateHeld` (after asking the approver) or `GateDenied`, which the rule can catch. Calling an `acts` tool from plain
+  Python, outside a rule or without `guard`, raises `BoundaryError`. Example: `examples/tools/mail.shio`.
+- **README and docs refreshed**: PyPI and CI badges, the language table, and the status section.
+
+## 0.6.0 (2026-10-20)
 
 - **Approvals for held calls** (`shio.guard`). A held call gets an id; `Guard(approver=...)` asks a person
   (`ApprovalRequest -> Approval`; `terminal_approver()` built in), or `Session.approve(id, by=)` / `reject(...)`

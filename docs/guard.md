@@ -100,6 +100,12 @@ A held or refused call never runs. The model is told why in the tool result, so 
 something else. `s.reply(final_answer)` lists names in a final answer that only untrusted text contained: what an
 injection planted.
 
+## In the language
+
+A `.shio` program gets the same gate natively: declare tools with `tool`, start the task with `guard`, and call them
+with `call`. The compiler refuses an `acts` call outside a rule. See
+[Getting started](getting-started.md#the-pieces-of-the-language).
+
 ## How well it works
 
 This is the gate measured on [AgentDojo](https://github.com/ethz-spylab/agentdojo) v1.2.2 with Opus 5.5: 0 of 949

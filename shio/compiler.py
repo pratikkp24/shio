@@ -50,6 +50,12 @@ TRAIN = re.compile(r"^train\s+(?P<agent>[A-Za-z_]\w*)\s+on\s+(?P<traces>.+?)\s+w
 SIGNOFF = re.compile(r"^signoff\s+(?P<label>[A-Za-z_]\w*|\*)(?:\s+when\s+(?P<cond>.+?))?\s+by\s+roles?\s+"
                      r"(?P<roles>(?:\"[^\"]+\"|'[^']+')(?:\s*(?:,|and)\s*(?:\"[^\"]+\"|'[^']+'))*)"
                      r"(?:\s+maker\s+(?P<makers>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*))?\s*$", re.S)
+TOOL = re.compile(r"^tool\s+(?P<name>[A-Za-z_]\w*)\s*\((?P<args>[^)]*)\)\s+(?P<mode>reads|acts)"
+                  r"(?:\s+(?P<output>trusted|untrusted|mixed))?(?P<opens>\s+opens)?\s*=\s*(?P<impl>.+)$")
+TOOL_ARG = re.compile(r"^(?P<name>[A-Za-z_]\w*)\s*:\s*(?P<kind>[A-Za-z_]\w*)$")
+TOOL_KINDS = {"email", "url", "iban", "name", "text", "str", "int", "float", "bool", "dict", "list"}
+GUARD = re.compile(r"^guard\s+(?P<req>.+?)\s+by\s+(?P<model>.+?)(?:\s+approved\s+by\s+(?P<approver>.+?))?\s*$")
+CALL = re.compile(r"\bcall\s+(?P<name>[A-Za-z_]\w*)\s*\(")
 CODE_ROW = re.compile(r"^(?P<code>[A-Za-z_]\w*)\s*:\s*(?P<text>.+)$")
 FIELD = re.compile(r"^(?P<name>[A-Za-z_]\w*)\s*:\s*(?P<type>.+?)(?:\s*=\s*(?P<default>.+))?$")
 
@@ -58,8 +64,10 @@ from typing import Optional, Literal, List, ClassVar
 from pydantic import BaseModel as _ShioType, Field as _ShioField
 from shio.models import ollama, openai_compat, replay
 from shio.core import Source, in_force
+from shio.guard import GateHeld, GateDenied
 pdf = Source.from_pdf
 __shio_train__ = []
+__shio_tools__ = {}
 """
 
 
@@ -232,7 +240,13 @@ class Compiler:
         self.codes = None      # the program's reason-code table, {CODE: text}, if it declares one
         self.code_uses = []    # (code, line) from `check NAME as CODE`
         # what `shio explain` documents: every declaration, read, check, rule and sign-off, with its .shio line
-        self.meta = {"types": [], "models": [], "agents": [], "regulated": False, "codes": {}}
+        self.meta = {"types": [], "models": [], "agents": [], "regulated": False, "codes": {}, "tools": []}
+        # declared tools, known before anything is compiled, so an agent may call a tool declared further down
+        self.tools = {}
+        for line in self.src:
+            m = TOOL.match(line.split("#", 1)[0].strip()) if line[:1] == "t" else None
+            if m:
+                self.tools[m["name"]] = m["mode"]
 
     # ---------------- helpers ----------------
     def error(self, line, msg):
@@ -366,6 +380,8 @@ class Compiler:
                 i = j
             elif word == "agent":
                 i = self.agent_decl(i, j, text)
+            elif word == "tool" and re.match(r"^tool\s+[A-Za-z_]\w*\s*\(", text):
+                i = self.tool_decl(line, text, j)
             elif text == "main:":
                 self.emit(0, "def __shio_main__():", line)
                 body, _ = self.block(j, 0)
@@ -387,7 +403,7 @@ class Compiler:
                 i = j
             elif text == "codes:":
                 i = self.codes_decl(i, j)
-            elif word in ("read", "check", "rule", "when", "signoff"):
+            elif word in ("read", "check", "rule", "when", "signoff") or word == "guard" and GUARD.match(text):
                 self.error(line, f"'{word}' can only be used inside an agent")
             else:
                 # plain Python (import, def, class, constants): passed through as written
@@ -408,6 +424,40 @@ class Compiler:
                                              "codes: table, with the text a customer is given for each")
         self.out.extend(self.tail)
         return self.out
+
+    def tool_decl(self, line, text, j):
+        m = TOOL.match(text) or self.error(
+            line, "expected: tool NAME(ARG: KIND, ...) reads [trusted|untrusted|mixed] [opens] | acts = python.callable")
+        args = []
+        for a in [x.strip() for x in m["args"].split(",") if x.strip()]:
+            am = TOOL_ARG.match(a) or self.error(line, f"expected an argument as NAME: KIND, got {a!r}")
+            if am["kind"] not in TOOL_KINDS:
+                self.error(line, f"argument {am['name']}: kind must be one of {', '.join(sorted(TOOL_KINDS))}")
+            args.append((am["name"], am["kind"]))
+        if m["mode"] == "acts" and (m["output"] or m["opens"]):
+            self.error(line, "an acts tool takes no trusted/untrusted/mixed or opens: those describe reading tools")
+        if m["opens"] and not any(k == "url" for _, k in args):
+            self.error(line, "an opens tool needs a url argument: it reads the page at that address")
+        self.py(m["impl"], line, "eval")
+        self.uses.append((_free_names(m["impl"], "eval"), line, f"tool {m['name']}"))
+        decl = (f"__shio_tools__[{m['name']!r}] = (__shio.guard.declare({m['name']!r}, {args!r}, {m['mode']!r}, "
+                f"{(m['output'] or 'untrusted')!r}, {bool(m['opens'])}), lambda: {m['impl']})")
+        self.emit(0, decl, line)
+        self.meta["tools"].append({"name": m["name"], "args": args, "mode": m["mode"], "output": m["output"] or
+                                   "untrusted", "opens": bool(m["opens"]), "impl": m["impl"].strip(), "line": line})
+        return j
+
+    def calls(self, text, line, in_rule):
+        """`call NAME(` -> the declared tool's runner. An acts tool is called only inside a rule."""
+        def repl(m):
+            name = m["name"]
+            if name not in self.tools:
+                self.error(line, f"'{name}' is not a declared tool: declare it with `tool {name}(...) reads|acts = ...`")
+            if self.tools[name] == "acts" and not in_rule:
+                self.error(line, f"{name} acts on the world, so it can only be called inside a rule, "
+                                 f"where the decision to act is written down")
+            return f"__shio.tool_call(__shio_tools__, {name!r})("
+        return CALL.sub(repl, text) if "call" in text else text
 
     def codes_decl(self, i, j):
         """codes:  /  INCOME_NOT_VERIFIED: "We could not verify your income."  -> __shio_codes__ = {...}"""
@@ -573,9 +623,21 @@ class Compiler:
                 self.error(i + 1, "unexpected indent" if ind > own else "unindent does not match any outer level")
             line = i + 1
             text, j = self.logical(i)
-            text = self.code(text)
+            text = self.calls(self.code(text), line, in_rule=False)
             word = text.split(None, 1)[0].rstrip(":")
             readings, kind = ctx["readings"], ctx["kind"]
+            if word == "guard" and GUARD.match(text):
+                if kind != "agent":
+                    self.error(line, "'guard' can only be used inside an agent")
+                g = GUARD.match(text)
+                for part in (g["req"], g["model"], g["approver"]):
+                    if part:
+                        self.py(part, line, "eval")
+                        self.scan(part, line, readings, "a guard statement")
+                self.emit(level, f"__shio.guard_task(__shio_tools__, {g['req']}, {g['model']}, {g['approver'] or 'None'})",
+                          line)
+                i = j
+                continue
             each = EACH.match(text) if kind == "agent" else None
             if each and each["root"] in readings:
                 # iterating over what the model returned: each item is still a reading, for checks and rules only
@@ -792,6 +854,7 @@ class Compiler:
         line = i + 1
         m = RULE.match(text)
         lines, k = self.block(j, ind)
+        lines = [self.calls(x, j + 1 + n, in_rule=True) for n, x in enumerate(lines)]
         if not any(s.strip() for s in lines):
             self.error(line, "a rule needs a body that returns the outcome")
         base = next(self.indent(x) for x in lines if x.strip())

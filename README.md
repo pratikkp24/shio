@@ -16,11 +16,14 @@ The compiler enforces it. Compiles to Python.
 [![GitHub Stars](https://img.shields.io/github/stars/pratikkp24/shio?style=flat-square&color=6487D7)](https://github.com/pratikkp24/shio)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-111?style=flat-square)](https://github.com/pratikkp24/shio/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://github.com/pratikkp24/shio/blob/main/pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-252%20passing-2ea44f?style=flat-square)](https://github.com/pratikkp24/shio/tree/main/tests)
-[![Status](https://img.shields.io/badge/status-v0.1%20prototype-E8A33D?style=flat-square)](#-status)
+[![PyPI](https://img.shields.io/pypi/v/shio-lang?style=flat-square&color=6487D7)](https://pypi.org/project/shio-lang/)
+[![CI](https://img.shields.io/github/actions/workflow/status/pratikkp24/shio/ci.yml?branch=main&style=flat-square&label=tests)](https://github.com/pratikkp24/shio/actions/workflows/ci.yml)
+[![Status](https://img.shields.io/badge/status-alpha-E8A33D?style=flat-square)](#-status)
 [![Compiles to](https://img.shields.io/badge/compiles%20to-Python-111?style=flat-square)](#-how-it-works)
 
-[**Quick start**](#-quick-start) · [**See it**](#-see-it) · [**Examples**](https://github.com/pratikkp24/shio/tree/main/examples) · [**Spec**](https://github.com/pratikkp24/shio/blob/main/SPEC.md) · [**Security**](https://github.com/pratikkp24/shio/blob/main/SECURITY.md)
+[**Docs**](https://pratikkp24.github.io/shio/) · [**Quick start**](#-quick-start) · [**Shio Guard**](#%EF%B8%8F-shio-guard-in-front-of-any-agents-tools) · [**Examples**](https://github.com/pratikkp24/shio/tree/main/examples) · [**Spec**](https://github.com/pratikkp24/shio/blob/main/SPEC.md) · [**Changelog**](https://github.com/pratikkp24/shio/blob/main/CHANGELOG.md) · [**Security**](https://github.com/pratikkp24/shio/blob/main/SECURITY.md)
+
+`pip install shio-lang`
 
 </div>
 
@@ -347,7 +350,11 @@ outcome. That gives you three things:
 | Form | What it does |
 |---|---|
 | `type Name:` | A structured value a model may propose. `T?` is nullable, `"A" \| "B"` is a choice, and a field's trailing comment is its description, which the model sees. |
-| `model name = ...` | A model: `ollama(...)`, `openai_compat(...)` or `replay(fn)`. |
+| `model name = ...` | A model: `ollama(...)`, `openai_compat(...)`, `anthropic(...)` or `replay(fn)`. |
+| `tool name(arg: kind, ...) reads [untrusted\|trusted\|mixed] [opens] = fn` | A tool the agent may call that only reads. Kinds `email`, `url`, `iban`, `name` mark the arguments that pick a target; `text` is free text. |
+| `tool name(arg: kind, ...) acts = fn` | A tool that changes something or sends data out. It can be called **only inside a rule**, and every call goes through the gate. |
+| `guard request by model [approved by approver]` | Starts the agent's task: a model reads only the user's request and plans which actions it calls for (Shio Guard). |
+| `call name(args)` | Calls a declared tool. An `acts` call runs if the gate lets it through, raises `GateHeld` if a person must approve, or `GateDenied` if refused. |
 | `agent name(params):` | A unit of work. Each call is saved as one trace. Agents nest. |
 | `read x[key]: T from sources by model [blind] [seeing a, b]:` | Asks a model for a `T`, with the prompt indented below and `{expr}` interpolating plain values. `blind` is an independent read that sees no other reading. A reply that does not fit `T` is a null reading, not a crash. |
 | `check name[key]: expr, "detail"` | A claim about readings. A check that raises counts as failed. |
@@ -359,6 +366,30 @@ outcome. That gives you three things:
 | `rule name[key]:` | Code that settles an outcome from readings and checks, and returns it. `checks.failed(...)` and `checks.failures()` are available inside. |
 | `train agent on "glob" with model "hf/id"` | Turns the agent's traces into training data and a training script. |
 | `main:` | The entry point for `shio run`. `argv` holds the arguments. |
+
+With tools, the decision to act is written down in a rule, and the gate checks it
+([`examples/tools/mail.shio`](https://github.com/pratikkp24/shio/blob/main/examples/tools/mail.shio)):
+
+```shio
+tool read_file(path: name) reads untrusted = read
+tool send_email(to: email, body: text) acts = send
+
+agent mail(request: str, llm):
+    guard request by planner
+    read e: Email from Source("notes", text=call read_file(path="notes.txt")) by llm:
+        Write the email the user's request asks for, from these notes.
+    rule send:
+        try:
+            return call send_email(to=e.to, body=e.body)
+        except GateDenied as refused:
+            return "refused: " + refused.decision.why
+    return send
+```
+
+```
+honest model: sent to dana@acme.com
+fooled model: refused: send_email would use [('to', 'audit@acme-review.co')], found only in untrusted text ...
+```
 
 ```bash
 shio new myagent                  # a starter agent that runs with no model, key or GPU
@@ -434,10 +465,23 @@ every tool call going through a Shio gate.
 
 ## 🧭 Status
 
-v0.1, a working prototype. It is honest about its limits: Shio guarantees that model output reaches actions only
-through a rule, not that every rule is right, and the boundary is tracked by name rather than full information-flow
-analysis. [SECURITY.md](https://github.com/pratikkp24/shio/blob/main/SECURITY.md) has the details, and [SPEC.md](https://github.com/pratikkp24/shio/blob/main/SPEC.md) has the design and what comes next:
-full information-flow tracking, tools as typed effects, and AgentDojo runs on weaker models and other attacks.
+**Alpha, on PyPI** (`pip install shio-lang`; [changelog](https://github.com/pratikkp24/shio/blob/main/CHANGELOG.md)). What
+is public and how it may change is in [docs/API.md](https://github.com/pratikkp24/shio/blob/main/docs/API.md): before
+1.0, a minor release may change the API, and the changelog says how.
+
+What's there: the language and its compiler-enforced boundary, typed tools, Shio Guard for agents written in Python
+(OpenAI, Claude, LangChain-style and MCP adapters, approvals), signed and hash-chained decision records with an
+erasable vault, trace sinks for SQL, S3 and OpenTelemetry, and backends for Ollama, OpenAI-compatible APIs and Claude.
+CI runs the tests on Python 3.10 to 3.13, fuzzes the boundary, and builds the package and the docs on every push.
+
+It is honest about its limits. Shio guarantees that model output reaches actions only through a rule, not that every
+rule is right. The boundary is tracked by name, with reflection refused and readings sealed at run time, rather than by
+full information-flow analysis. Imported Python modules are trusted code. On AgentDojo, Opus 5.5 resisted almost every
+attack on its own, so that run measured the cost of the gate more than its protection; runs on weaker models are next.
+[SECURITY.md](https://github.com/pratikkp24/shio/blob/main/SECURITY.md) has the details.
+
+**Before 1.0:** a stable API kept through at least one minor release, an outside security review, at least one
+production deployment, and benchmark results on weaker models.
 
 **If you can get model output past the boundary, please tell us:** see [SECURITY.md](https://github.com/pratikkp24/shio/blob/main/SECURITY.md).
 Contributions are welcome: see [CONTRIBUTING.md](https://github.com/pratikkp24/shio/blob/main/CONTRIBUTING.md).

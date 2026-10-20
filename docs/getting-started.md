@@ -39,5 +39,10 @@ shio check inbox_unsafe.shio      # the unsafe version: a compile error pointing
 | `when name: expression` | Like a check, but only steers control flow |
 | `rule name:` | Code that settles an outcome from readings and checks. The only place a reading's value becomes plain data |
 | `signoff` | An outcome that needs a person's approval before it takes effect |
+| `tool name(arg: kind) reads ... = fn` / `... acts = fn` | A tool the agent may call. `acts` tools change something, so they can be called only inside a rule |
+| `guard request by model` | Starts the agent's task: a plan from the user's request alone, which every `acts` call is checked against |
+| `call name(args)` | Calls a declared tool. An `acts` call raises `GateHeld` or `GateDenied` instead of running when the gate says so |
+
+See [`examples/tools/mail.shio`](https://github.com/pratikkp24/shio/blob/main/examples/tools/mail.shio) for tools end to end.
 
 The full grammar is in [SPEC.md](https://github.com/pratikkp24/shio/blob/main/SPEC.md).

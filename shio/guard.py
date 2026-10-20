@@ -647,3 +647,79 @@ class GuardedTool:
 def wrap_tools(session, tools):
     """[GuardedTool] for a list of tools: hand these to the agent instead of the originals."""
     return [GuardedTool(session, t) for t in tools]
+
+
+# -- typed tools in the language (tool / guard / call) ---------------------------------------------------------------
+#
+# A .shio program declares its tools (`tool send_money(recipient: iban, amount: float) acts = bank.send`), starts a
+# task in an agent with `guard request by model [approved by approver]`, and calls tools with `call NAME(...)`. The
+# compiler refuses an `acts` call outside a rule; these functions are what the compiled code runs.
+
+class GateHeld(Exception):
+    """An `acts` call that waits for a person (no approver, or the approver didn't answer yes). It did not run."""
+
+    def __init__(self, decision):
+        super().__init__(f"held for approval ({decision.id}): {decision.why}")
+        self.decision = decision
+
+
+class GateDenied(Exception):
+    """An `acts` call the gate refused. It did not run."""
+
+    def __init__(self, decision):
+        super().__init__(f"refused: {decision.why}")
+        self.decision = decision
+
+
+def declare(name, args, mode, output="untrusted", opens=False):
+    """The Tool for a `tool` declaration: args is [(name, kind)], kinds email/url/iban/name (control), text (content)
+    or a plain type."""
+    control = {a: k for a, k in args if k in KINDS}
+    content = [a for a, k in args if k == "text"]
+    return Tool(name, side_effect=(mode == "acts"), control=control, content=content, output=output,
+                opens_address=opens)
+
+
+def guard_task(tools, request, planner, approver=None):
+    """`guard REQUEST by MODEL [approved by APPROVER]`: start a task for the agent running now. Its rules (and the
+    agents it calls) find it."""
+    from .core import _current
+    run = _current("guard")
+    text = getattr(request, "text", None)
+    g = Guard([t for t, _ in tools.values()], planner, approver=approver)
+    run.guard_session = Session(g, text if text is not None else str(request))
+    return run.guard_session
+
+
+def _session_of(run):
+    while run is not None and getattr(run, "guard_session", None) is None:
+        run = run.parent
+    return run.guard_session if run is not None else None
+
+
+def tool_call(tools, name):
+    """`call NAME(...)`: a function that runs the declared tool. A `reads` tool runs and its result is recorded in the
+    task's ledger. An `acts` tool runs only inside a rule, only in a guarded task, and only if the gate lets it through
+    (GateHeld or GateDenied otherwise)."""
+    from .core import BoundaryError, _current, _open
+    if name not in tools:
+        raise BoundaryError(f"{name} is not a declared tool")
+    tool, impl = tools[name]
+
+    def go(**kwargs):
+        session = _session_of(_current(f"call {name}"))
+        if tool.side_effect:
+            if not _open.get():
+                raise BoundaryError(f"{name} acts on the world: call it only inside a rule")
+            if session is None:
+                raise BoundaryError(f"{name} acts on the world: the agent needs `guard REQUEST by MODEL` first")
+            d = session.decide(name, kwargs)
+            if d.outcome == "hold":
+                raise GateHeld(d)
+            if d.outcome == "deny":
+                raise GateDenied(d)
+        result = impl()(**kwargs)
+        if session is not None:
+            session.record(name, kwargs, result)
+        return result
+    return go

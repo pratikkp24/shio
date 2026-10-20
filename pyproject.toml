@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shio-lang"
-version = "0.6.0"
+version = "0.7.0"
 description = "Shio: a language for agents in which the model reads and code decides. Checks double as training rewards."
 readme = "README.md"
 license = "MIT OR Apache-2.0"

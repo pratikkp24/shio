@@ -7,10 +7,11 @@ from pathlib import Path
 
 from . import train  # noqa: F401  (shio.train.reward is what generated training scripts use)
 from .compiler import ShioError, compile_source, to_code
+from .guard import GateDenied, GateHeld, guard_task, tool_call  # noqa: F401  (used by compiled programs)
 from .core import (BoundaryError, Checks, Reading, RegulatedError, Source, agent, check, configure, each,  # noqa: F401
                    in_force, parallel, read, rule)
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 # The public API (see docs/API.md): these names, the modules shio.models, shio.guard and shio.trace (their documented
 # classes and functions), the `shio` command, and the .shio language. Anything else, and any name starting with "_",
