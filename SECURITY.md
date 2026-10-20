@@ -1,6 +1,6 @@
 # Security
 
-## What Shio guarantees in v0.1
+## What Shio guarantees
 
 Shio limits what a model's output can do. It does not stop a model from being fooled.
 
@@ -26,18 +26,33 @@ Shio limits what a model's output can do. It does not stop a model from being fo
   code that handles untrusted input.
 - **A rule's result is trusted.** Whatever a rule returns is ordinary data afterwards. That is the point of a rule,
   and also why rules deserve review.
-- **The boundary is checked by name, not by full information-flow analysis.** v0.1 tracks reading names inside an
+- **The boundary is checked by name, not by full information-flow analysis.** Shio tracks reading names inside an
   agent, refuses the reflective routes above, and blocks the reading object at runtime. It does not yet track data
   through every container, closure or C extension. Full information-flow tracking is on the roadmap (see SPEC.md).
 - **Imported Python modules are trusted code.** The checks above apply to `.shio` source. A Python module the program
   imports, or a helper a check calls, receives values and can do anything with them, just like a rule.
-  `tests/test_boundary_escapes.py` lists every escape route we know of and what stops it, and
-  `tests/test_fuzz_boundary.py` generates thousands more on every CI run, both in `.shio` code and against a live
-  reading from Python.
+  `tests/test_boundary_escapes.py` lists the escape routes we know of and what stops each, and
+  `tests/test_fuzz_boundary.py` runs generated programs and expressions on every CI run, both in `.shio` code and
+  against a live reading from Python. The fuzz covers a fixed grammar of forms (672 distinct `.shio` programs); it is a
+  regression net, not proof that no other route exists.
 - **Traces contain model inputs and outputs.** Treat `shio-traces/` as sensitive.
+
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) states the attackers, trust boundaries and the mechanism and test behind
+each guarantee, and lists the known limits, including issues found while preparing the outside review that are not
+fixed in 1.0.0rc1. [docs/REVIEW-BRIEF.md](docs/REVIEW-BRIEF.md) is the brief for reviewers.
+
+## Supported versions
+
+Fixes land on `main` and ship in the next release. The latest release is 1.0.0rc1 (`pip install --pre shio-lang`).
 
 ## Reporting a vulnerability
 
-If you find a way for a model's output to reach plain code without a check or rule, that is a bug we want to know
-about. Please report it privately through GitHub's private vulnerability reporting on this repository rather than in
-a public issue, with the smallest `.shio` program that shows it.
+If you find a way for a model's output to reach plain code without a check or rule, to run an acting tool without the
+gate, or to change a decision record without `shio verify` noticing, that is a bug we want to know about. Please
+report it privately, not in a public issue:
+
+- GitHub private vulnerability reporting: https://github.com/pratikkp24/shio/security/advisories/new
+- If that page is not available to you, open an issue titled "Security contact request" with no details, and we will
+  reply with a private channel.
+
+Include the smallest `.shio` program or Python snippet that shows it, the Shio version and the Python version.
