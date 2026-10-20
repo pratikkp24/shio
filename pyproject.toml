@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shio-lang"
-version = "0.2.0"
+version = "0.3.0"
 description = "Shio: a language for agents in which the model reads and code decides. Checks double as training rewards."
 readme = "README.md"
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE", "LICENSE-APACHE", "LICENSE-MIT"]
 authors = [{ name = "Aonami Labs" }]
 requires-python = ">=3.10"
 dependencies = ["pydantic>=2"]
@@ -34,6 +34,7 @@ Security = "https://github.com/pratikkp24/shio/blob/main/SECURITY.md"
 
 [project.optional-dependencies]
 regulated = ["cryptography>=42"]
+anthropic = ["anthropic>=1.0"]
 pdf = ["pypdf>=4"]
 train = ["trl>=0.20", "datasets", "peft"]
 
@@ -42,3 +43,6 @@ shio = "shio.cli:main"
 
 [tool.setuptools]
 packages = ["shio"]
+
+[tool.setuptools.package-data]
+shio = ["*.shio"]

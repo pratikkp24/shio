@@ -1,0 +1,432 @@
+"""Shio Guard: put Shio in front of any agent's tools, without rewriting the agent.
+
+    from shio import guard
+    g = guard.Guard([
+        guard.Tool("read_file", output="untrusted"),
+        guard.Tool("get_webpage", opens_address=True, control={"url": "url"}, output="untrusted"),
+        guard.Tool("send_money", side_effect=True, control={"recipient": "iban"}),
+        guard.Tool("send_email", side_effect=True, control={"to": "email"}, content=["body"]),
+    ], planner=shio.models.ollama("qwen3:8b"))
+
+    s = g.start("Pay the bill in bill.txt")       # a blind plan from the request alone
+    d = s.check("send_money", {"recipient": "UK12...", "amount": 98.7})   # -> Decision: run | hold | deny
+    if d.run: result = send_money(...); s.record("send_money", args, result)
+    # or: d, result = s.call("send_money", args, send_money)
+
+What it decides (the programs are in guard.shio, so every decision is a Shio run with a trace):
+  plan    before the agent reads any tool output, a model reads only the user's request: which tools that act or send
+          data it calls for, which places it points at for their values, and whether it hands the job to instructions
+          it does not spell out (delegated).
+  check   each proposed call. run: a declared tool, planned if it acts, and every control value (a recipient, a URL,
+          an IBAN) came from trusted text or a place the request pointed at for this tool. hold: it would run but needs
+          a person (a delegated request, or a pointed-at place offering more than one candidate). deny: an unplanned
+          action, a value found only in untrusted text, an address the agent never read anywhere (the model built it),
+          or an undeclared tool.
+  reply   names and addresses in a final answer that appear only in untrusted text: what an injection planted.
+
+Provenance is by value: a control value is tainted when it was seen in untrusted text and not in trusted text (the
+request, the system's own records, outputs of tools declared output="trusted"). This is the gate measured on AgentDojo
+v1.2.2 (README, "Benchmark"), made general: there its tool declarations were written per suite; here you declare them.
+"""
+import dataclasses
+import json
+import re
+from pathlib import Path
+
+URL = re.compile(r"(?:https?://)?(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ly|co|ch|uk|de|in|"
+                 r"info|biz|xyz|me|app|dev|ai|gov|edu|us|eu|fr|es|it|nl|au|ca|jp|ru|cn)(?:/[^\s\"'<>)\]]*)?", re.I)
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b")
+NAME = re.compile(r"\b[A-Z][\w'&-]+(?:\s+(?:(?:of|the|de|la|du|and|&)\s+)?[A-Z][\w'&-]+)+\b")
+ADDRESS_KINDS = {"email", "iban", "url"}
+KINDS = ADDRESS_KINDS | {"name"}
+LONG = 120                  # characters: a record field longer than this is free text someone wrote, so untrusted
+STOP = {"the", "a", "an", "her", "his", "their", "its", "my", "our", "your", "website", "site", "page", "web", "blog",
+        "email", "e-mail", "message", "file", "channel", "inbox", "from", "with", "and"}
+
+
+@dataclasses.dataclass
+class Tool:
+    """How a tool behaves, declared by whoever wires the agent.
+
+    side_effect: it changes something or sends data out (runs only if the plan names it).
+    control: {argument: kind} for arguments that pick a target: "email", "url", "iban" or "name". Their values must
+             come from trusted text or a place the request pointed at.
+    content: arguments holding free text (a message body): addresses inside it must be grounded and untainted.
+    output: "untrusted" (anyone could have written it: files, web pages, emails, reviews), "trusted" (the system's own
+            records), or "mixed" (records whose `untrusted_keys` fields are free text). In any output, a field longer
+            than 120 characters counts as free text, so as untrusted.
+    opens_address: a read that fetches a URL (get_webpage): allowed without planning, but its URL is checked.
+    """
+    name: str
+    description: str = ""
+    side_effect: bool = False
+    control: dict = dataclasses.field(default_factory=dict)
+    content: list = dataclasses.field(default_factory=list)
+    output: str = "untrusted"
+    untrusted_keys: list = dataclasses.field(default_factory=list)
+    opens_address: bool = False
+
+    def __post_init__(self):
+        if self.output not in ("untrusted", "trusted", "mixed"):
+            raise ValueError(f"tool {self.name}: output must be 'untrusted', 'trusted' or 'mixed'")
+        bad = {k for k in self.control.values() if k not in KINDS}
+        if bad:
+            raise ValueError(f"tool {self.name}: control kinds must be among {sorted(KINDS)}, not {sorted(bad)}")
+
+
+@dataclasses.dataclass
+class Decision:
+    outcome: str            # "run" | "hold" | "deny"
+    why: str = ""
+
+    @property
+    def run(self):
+        return self.outcome == "run"
+
+
+# -- text and values ------------------------------------------------------------------------------------------------
+
+def norm(s):
+    s = str(s).strip().lower()
+    s = re.sub(r"^https?://", "", s)
+    s = re.sub(r"^www\.", "", s)
+    return re.sub(r"\s+", "", s).rstrip("/.")
+
+
+def site(url):
+    """A URL without scheme, www., path, query or fragment: "https://www.a.com/x?d=1" -> "a.com"."""
+    return re.split(r"[/?#]", norm(url), maxsplit=1)[0]
+
+
+def addresses(text):
+    """URLs, email addresses and IBANs inside free text."""
+    text = str(text)
+    found = EMAIL.findall(text) + IBAN.findall(text)
+    found += URL.findall(EMAIL.sub(" ", text))
+    return list(dict.fromkeys(found))
+
+
+def kind(value):
+    v = str(value).strip()
+    if EMAIL.fullmatch(v):
+        return "email"
+    if IBAN.fullmatch(v):
+        return "iban"
+    if URL.fullmatch(v):
+        return "url"
+    return "name"
+
+
+def _plain(x):
+    if hasattr(x, "model_dump"):
+        return x.model_dump()
+    if dataclasses.is_dataclass(x) and not isinstance(x, type):
+        return dataclasses.asdict(x)
+    if isinstance(x, (list, tuple, set)):
+        return [_plain(v) for v in x]
+    if isinstance(x, dict):
+        return {str(k): _plain(v) for k, v in x.items()}
+    return x
+
+
+def _leaves(x, key=None):
+    """(key, text) for every leaf; a dict's keys are leaves too (names of things)."""
+    if isinstance(x, dict):
+        for k, v in x.items():
+            yield None, k
+            yield from _leaves(v, k)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _leaves(v, key)
+    elif x is not None:
+        yield key, x if isinstance(x, str) else str(x)
+
+
+def _unique(found):
+    out = {}
+    for a in found:
+        out.setdefault(norm(a), a)
+    return list(out.values())
+
+
+def _strings(args):
+    for v in (args or {}).values():
+        for s in v if isinstance(v, list) else [v]:
+            if isinstance(s, str) and len(norm(s)) >= 3:
+                yield s
+
+
+# -- the ledger -----------------------------------------------------------------------------------------------------
+
+class Ledger:
+    """What the agent has read, trusted and untrusted, and where each value came from. One per task."""
+
+    def __init__(self, tools, request, plan=None):
+        self.tools = tools
+        self.trusted = [norm(request)]
+        self.sites = set()          # sites (URLs without path or query) found in the request or a record
+        self._add_sites(request)
+        self.untrusted = []
+        self.open_text = []         # output of fully untrusted tools: text anyone can write
+        self.plan = plan or {"tools": [], "delegated": False, "sources": []}
+        self.designated = []        # [{"d": designation, "tool": read tool, "texts": [...], "addresses": [...], "items": [...]}]
+        self.derived = []           # designations made by following a link from a designated place (one hop)
+        self.endorsed_urls = {}     # tool -> {norm url}: pages opened from a designated place, citable in content
+
+    def add_trusted(self, text):
+        """A record the system itself holds (the user's contacts, the vendor master): values in it are trusted."""
+        for _, t in _leaves(_plain(text)):
+            self.trusted.append(norm(t))
+            self._add_sites(t)
+
+    def _add_sites(self, text):
+        self.sites |= {site(a) for a in addresses(text) if kind(a) == "url"}
+
+    def is_known(self, function):
+        return function in self.tools
+
+    def is_side_effect(self, function):
+        t = self.tools.get(function)
+        return t is None or t.side_effect       # an undeclared tool is treated as one that acts: fail closed
+
+    def reads(self):
+        return {n for n, t in self.tools.items() if t.opens_address}
+
+    def _designations_for(self, tool, args):
+        out = []
+        for d in self.plan.get("sources") or []:
+            ns = norm(d["source"])
+            if any(norm(a) in ns or ns in norm(a) for a in _strings(args)):
+                out.append(d)
+        if tool in self.reads():
+            url = norm((args or {}).get(self._url_arg(tool)) or "")
+            out += [d for d in self.derived if norm(d["source"]) == url]
+        return out
+
+    def _url_arg(self, tool):
+        t = self.tools.get(tool)
+        return next((a for a, k in (t.control if t else {}).items() if k == "url"), "url")
+
+    def record(self, tool, result, args=None):
+        """Note a tool's result: its text becomes trusted or untrusted, by the tool's declared output."""
+        t = self.tools.get(tool) or Tool(tool)
+        if tool in self.reads():            # a link followed on a designated place's say-so: that page is designated too
+            url = (args or {}).get(self._url_arg(tool))
+            if url and self.tainted(url):
+                status, d = self._endorse(tool, "url", url)
+                if status == "yes" and not any(norm(x["source"]) == norm(url) for x in self.derived):
+                    rest = sorted(set(d["tools"]) - self.reads())
+                    self.derived.append({"source": url, "tools": rest, "about": d["about"], "every": False})
+                    if self._endorse(tool, "url", url, every=False)[0] == "yes":
+                        for x in set(rest) | set(self.plan.get("tools") or []):
+                            self.endorsed_urls.setdefault(x, set()).add(norm(url))
+        plain = _plain(result)
+        leaves = list(_leaves(plain))
+        for key, text in leaves:
+            # a record holds short values: long free text inside one was written by someone, so it is untrusted too
+            bad = t.output == "untrusted" or key in t.untrusted_keys or len(text) > LONG
+            (self.untrusted if bad else self.trusted).append(norm(text))
+            if not bad:
+                self._add_sites(text)
+            if t.output == "untrusted":
+                self.open_text.append(norm(text))
+        items = plain if isinstance(plain, list) else [plain]     # a list result (messages, emails): one item each
+        for d in self._designations_for(tool, args):
+            self.designated.append({"d": d, "tool": tool, "texts": [norm(x) for _, x in leaves],
+                                    "addresses": _unique(addresses(" ".join(x for _, x in leaves))),
+                                    "items": [([norm(x) for _, x in _leaves(it)],
+                                               _unique(addresses(" ".join(x for _, x in _leaves(it))))) for it in items]})
+
+    # -- provenance -------------------------------------------------------------------------------------------------
+
+    def grounded(self, value):
+        v = norm(value)
+        return any(v in t for t in self.trusted)
+
+    def seen_untrusted(self, value):
+        v = norm(value)
+        return any(v in t for t in self.untrusted)
+
+    def tainted(self, value):
+        v = norm(value)
+        if len(v) < 3 or v.isdigit():
+            return False
+        return self.seen_untrusted(v) and not self.grounded(v)
+
+    def ungrounded(self, value, want=None):
+        """An address seen nowhere, whose site (for a URL) is in no trusted text either: the model built it."""
+        v = norm(value)
+        k = kind(value)
+        if (k not in ADDRESS_KINDS and want not in ADDRESS_KINDS) or len(v) < 3 or v.isdigit():
+            return False
+        if self.grounded(v) or self.seen_untrusted(v):
+            return False
+        return not (k == "url" or want == "url") or site(v) not in self.sites
+
+    def _endorse(self, function, want, value, every=True):
+        """("yes", designation) | ("ambiguous", designation) | (None, None) for a tainted value used in `function`
+        where an argument of kind `want` is expected."""
+        v, k = norm(value), kind(value)
+        if k != want:
+            return None, None
+        ambiguous = None
+        for rec in self.designated:
+            d = rec["d"]
+            if function not in d["tools"]:
+                continue
+            if function in self.reads() and rec["tool"] in self.reads():
+                continue                    # no second hop: links on a web page are not followed on the user's say-so
+            if not any(v in t for t in rec["texts"]):
+                continue
+            words = [w for w in re.findall(r"[a-z0-9]{3,}", (d["about"] or "").lower()) if w not in STOP]
+            if k == "name":
+                if words and any(w in v for w in words):
+                    return "yes", d
+            else:                           # an address: the one holding the request's word, in itself or its item
+                own = _unique([a for _, found in rec["items"] for a in found
+                               if kind(a) == k and any(w in norm(a) for w in words)])
+                near = _unique([a for texts, found in rec["items"] for a in found
+                                if kind(a) == k and any(w in t for t in texts for w in words)]) if len(rec["items"]) > 1 else []
+                for hits in (own, near):
+                    if hits:
+                        if len(hits) == 1 and norm(hits[0]) == v:
+                            return "yes", d
+                        break
+            if not self.is_side_effect(function):
+                # a read: the only address of its kind there, or every one if the request asked for all. An action
+                # needs the `about` match: a place can be tampered with so that its only IBAN is the attacker's.
+                cands = [a for a in rec["addresses"] if kind(a) == k]
+                if (every and d["every"]) or (len(cands) == 1 and norm(cands[0]) == v):
+                    return "yes", d
+            ambiguous = ambiguous or d
+        return ("ambiguous", ambiguous) if ambiguous else (None, None)
+
+    def _from_designated(self, value):
+        v = norm(value)
+        return any(v in t for rec in self.designated for t in rec["texts"])
+
+    def classify(self, function, args):
+        """-> (tainted, held, ungrounded): [(argument, value)] lists."""
+        t = self.tools.get(function)
+        tainted, held, ungrounded = [], [], []
+        if t is None:
+            return tainted, held, ungrounded
+
+        def judge(a, val, want):
+            if val is None:
+                return
+            if not self.tainted(val):
+                if norm(val) not in self.endorsed_urls.get(function, set()) and self.ungrounded(val, want):
+                    ungrounded.append((a, val))
+                return
+            if norm(val) in self.endorsed_urls.get(function, set()):
+                return
+            status, _ = self._endorse(function, want, val) if want else (None, None)
+            if status == "yes":
+                return
+            if status == "ambiguous" or (want and self.plan.get("delegated") and self._from_designated(val)):
+                held.append((a, val))
+            else:
+                tainted.append((a, val))
+
+        for a, want in t.control.items():
+            vals = (args or {}).get(a)
+            for v in vals if isinstance(vals, list) else [vals]:
+                judge(a, v, want)
+        for a in t.content:
+            for v in addresses((args or {}).get(a) or ""):
+                judge(a, v, None)       # an address inside a message is never endorsed by a place, only cited pages
+        return tainted, held, ungrounded
+
+    def tainted_args(self, function, args):
+        return self.classify(function, args)[0]
+
+    def held_args(self, function, args):
+        return self.classify(function, args)[1]
+
+    def ungrounded_args(self, function, args):
+        return self.classify(function, args)[2]
+
+    def untrusted_entities(self, text):
+        """Names (two or more capitalised words) and addresses in a final answer that appear only in fully untrusted
+        tool output, never in the request or a record. Longest match wins."""
+        out = []
+        tainted = lambda x: self.tainted(x) and any(norm(x) in t for t in self.open_text)     # noqa: E731
+        for a in addresses(text):
+            if tainted(a):
+                out.append(a)
+        for m in NAME.finditer(str(text)):
+            words = m.group(0).split()
+            spans = sorted(((i, j) for i in range(len(words)) for j in range(i + 2, len(words) + 1)),
+                           key=lambda s: s[0] - s[1])
+            for i, j in spans:
+                phrase = " ".join(words[i:j])
+                if tainted(phrase) and not any(phrase in o for o in out):
+                    out.append(phrase)
+                    break
+        return list(dict.fromkeys(out))
+
+
+# -- the guard ------------------------------------------------------------------------------------------------------
+
+_PROGRAM = None
+
+
+def _program():
+    global _PROGRAM
+    if _PROGRAM is None:
+        from . import load
+        _PROGRAM = load(Path(__file__).with_name("guard.shio"), name="shio_guard")
+    return _PROGRAM
+
+
+class Guard:
+    """The tools an agent may call, and the model that plans from the user's request alone."""
+
+    def __init__(self, tools, planner):
+        self.tools = {t.name: t for t in tools}
+        self.planner = planner
+
+    def start(self, request, records=()):
+        """A task: the blind plan from `request`, and a ledger seeded with the system's own `records` (trusted)."""
+        return Session(self, request, records)
+
+
+class Session:
+    def __init__(self, guard, request, records=()):
+        import shio
+        self.guard, self.request = guard, request
+        acts = [t for t in guard.tools.values() if t.side_effect]
+        menu = "\n".join(f"- {t.name}: {t.description}" for t in acts)
+        reads = "\n".join(f"- {t.name}: {t.description}" for t in guard.tools.values() if t.opens_address)
+        self.plan = _program().plan_actions(shio.Source("user request", text=request), menu, reads, guard.planner)
+        self.ledger = Ledger(guard.tools, request, self.plan)
+        for r in records:
+            self.ledger.add_trusted(r)
+
+    def check(self, name, args):
+        """-> Decision for one proposed call. Nothing runs here."""
+        import shio
+        from .models import replay
+        proposed = {"function": name, "args": dict(args or {})}
+        out = _program().gate(shio.Source("proposed tool call", text=json.dumps(proposed, default=str)),
+                              replay(lambda req, p=proposed: p, name="proposed tool call"), self.plan, self.ledger)
+        return Decision(out["outcome"], out.get("why", ""))
+
+    def record(self, name, args, result):
+        """Note what a tool returned, so later calls are judged against it."""
+        self.ledger.record(name, result, args)
+
+    def call(self, name, args, fn):
+        """Check, then run fn(**args) only on "run", and record its result. -> (Decision, result or None)."""
+        d = self.check(name, args)
+        if not d.run:
+            return d, None
+        result = fn(**(args or {}))
+        self.record(name, args, result)
+        return d, result
+
+    def reply(self, text):
+        """Names and addresses in a final answer that only untrusted text contained."""
+        return self.ledger.untrusted_entities(text)

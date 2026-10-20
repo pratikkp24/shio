@@ -5,7 +5,57 @@ OpenAI-compatible endpoint. replay answers from saved data, so programs can be t
 """
 import json
 import os
+import random
+import threading
+import time
+import urllib.error
 import urllib.request
+
+RETRY_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
+
+
+class Pacer:
+    """At most `per_minute` calls a minute, shared by every thread using the model, and retries with backoff."""
+
+    def __init__(self, per_minute=None, retries=2):
+        self.gap = 60.0 / per_minute if per_minute else 0.0
+        self.retries, self._lock, self._next = retries, threading.Lock(), 0.0
+
+    def wait(self):
+        if not self.gap:
+            return
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + self.gap
+        if start > now:
+            time.sleep(start - now)
+
+    def run(self, fn, retryable, retry_after=lambda e: None):
+        """fn() with retries: a retryable error waits (Retry-After if the server gave one, else 1s, 2s, 4s... with
+        jitter, at most 60s) and tries again; the last error is raised, so the reading is null and fails its checks."""
+        for attempt in range(self.retries + 1):
+            self.wait()
+            try:
+                return fn()
+            except Exception as e:
+                if attempt == self.retries or not retryable(e):
+                    raise
+                delay = retry_after(e)
+                time.sleep(min(60.0, delay if delay is not None else 2 ** attempt + random.uniform(0, 0.5)))
+
+
+def _http_retryable(e):
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code in RETRY_STATUS
+    return isinstance(e, (urllib.error.URLError, TimeoutError, ConnectionError))
+
+
+def _http_retry_after(e):
+    try:
+        return float(e.headers.get("Retry-After")) if isinstance(e, urllib.error.HTTPError) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def messages_for(req, sources_text=True):
@@ -27,10 +77,11 @@ class OpenAICompat:
     in every decision; required in regulated programs."""
 
     def __init__(self, model, base_url="http://localhost:11434/v1", key_env=None, temperature=0.0, timeout=600,
-                 structured=True, pinned=None):
+                 structured=True, pinned=None, retries=2, per_minute=None):
         self.model, self.base_url, self.key_env = model, base_url.rstrip("/"), key_env
         self.temperature, self.timeout, self.structured = temperature, timeout, structured
         self.name, self.pinned = model, pinned
+        self.pacer = Pacer(per_minute, retries)
 
     def identity(self):
         return {"kind": "openai_compat", "endpoint": self.base_url, "model": self.model, "pinned": self.pinned,
@@ -47,8 +98,11 @@ class OpenAICompat:
                 raise RuntimeError(f"{self.key_env} is not set.")
             headers["Authorization"] = f"Bearer {key}"
         r = urllib.request.Request(f"{self.base_url}/chat/completions", json.dumps(body).encode(), headers)
-        with urllib.request.urlopen(r, timeout=self.timeout) as resp:
-            return json.load(resp)["choices"][0]["message"]["content"]
+
+        def once():
+            with urllib.request.urlopen(r, timeout=self.timeout) as resp:
+                return json.load(resp)["choices"][0]["message"]["content"]
+        return self.pacer.run(once, _http_retryable, _http_retry_after)
 
 
 class Ollama(OpenAICompat):
@@ -108,3 +162,67 @@ class Replay:
 
 def replay(fn, name="replay"):
     return Replay(fn, name)
+
+
+def _strict(schema):
+    """A JSON schema as structured outputs need it: every object closed (additionalProperties false) and every
+    property listed in required (optional ones are already nullable in Shio's schemas)."""
+    if isinstance(schema, list):
+        return [_strict(s) for s in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out = {k: _strict(v) for k, v in schema.items()}
+    if out.get("type") == "object" or "properties" in out:
+        out["additionalProperties"] = False
+        out["required"] = list(out.get("properties", {}))
+    return out
+
+
+class Anthropic:
+    """Claude through the official SDK (pip install 'shio-lang[anthropic]'). The reading is asked for as structured
+    output (output_config.format with the reading's JSON schema), so the reply is JSON matching it. Credentials come
+    from the environment as the SDK finds them (ANTHROPIC_API_KEY, or an `ant auth login` profile); they are never
+    traced. The SDK retries 408/409/429/5xx itself (`retries`); `per_minute` paces calls across threads.
+    structured=False sends the schema in the prompt instead, for a model or gateway without structured outputs."""
+
+    def __init__(self, model="claude-opus-5-5", effort=None, max_tokens=16000, structured=True, retries=2,
+                 per_minute=None, timeout=600, client=None):
+        self.model, self.effort, self.max_tokens, self.structured = model, effort, max_tokens, structured
+        self.name, self.pinned, self.timeout = model, model, timeout
+        self.pacer = Pacer(per_minute, retries=0)          # the SDK does the retrying
+        self._client, self._retries = client, retries
+
+    def client(self):
+        if self._client is None:
+            try:
+                import anthropic
+            except ImportError:
+                raise RuntimeError("the Anthropic backend needs the SDK: pip install 'shio-lang[anthropic]'") from None
+            self._client = anthropic.Anthropic(max_retries=self._retries, timeout=self.timeout)
+        return self._client
+
+    def identity(self):
+        return {"kind": "anthropic", "model": self.model, "effort": self.effort, "structured": self.structured}
+
+    def propose(self, req):
+        msgs = messages_for(req)
+        system = next((m["content"] for m in msgs if m["role"] == "system"), None)
+        kw = {"model": self.model, "max_tokens": self.max_tokens,
+              "messages": [m for m in msgs if m["role"] != "system"]}
+        if system:
+            kw["system"] = system
+        config = {}
+        if self.structured:
+            config["format"] = {"type": "json_schema", "schema": _strict(req.json_schema)}
+        if self.effort:
+            config["effort"] = self.effort
+        if config:
+            kw["output_config"] = config
+        response = self.pacer.run(lambda: self.client().messages.create(**kw), lambda e: False)
+        if getattr(response, "stop_reason", None) == "refusal":
+            raise RuntimeError("the model declined to answer (stop_reason: refusal)")
+        return next(b.text for b in response.content if b.type == "text")
+
+
+def anthropic(model="claude-opus-5-5", **kw):
+    return Anthropic(model, **kw)

@@ -3,6 +3,23 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
+## 0.3.0 (unreleased)
+
+- **Shio Guard** (`shio.guard`). Put Shio in front of any agent's tools without rewriting the agent: declare the
+  tools (`Tool(name, side_effect=, control=, content=, output=)`), start a task from the user's request (a blind plan),
+  and check each proposed call: run, hold for a person, or deny, with the reason. Provenance by value: recipients,
+  URLs and IBANs must come from trusted text or a place the request pointed at; addresses the agent never read are
+  denied; delegated requests hold. `Session.reply()` finds names an injection planted in a final answer. Replayed over
+  the 3,058 tool calls of the AgentDojo run, it decides every one as the benchmarked gate did.
+- **Anthropic backend.** `models.anthropic("claude-opus-5-5", effort=...)` through the official SDK with structured
+  outputs (`pip install 'shio-lang[anthropic]'`). A refusal gives a null reading.
+- **Retries and pacing.** Every backend retries timeouts, 429 and 5xx with backoff, honouring `Retry-After`
+  (`retries=`); `per_minute=` paces calls across threads.
+- **Boundary fuzzing in CI.** Generated programs try to get a reading into plain code (10,000 across five seeds
+  refused at compile time), and 1,000+ expressions run against a live reading from Python: none leak.
+- **Dual licence.** Shio is now MIT OR Apache-2.0, at your option.
+- `AGENTS.md`: how to work in this repository, for coding agents and people.
+
 ## 0.2.0 (2026-10-20)
 
 The first release on PyPI. (0.1.0 was never published.)

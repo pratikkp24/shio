@@ -31,7 +31,9 @@ Shio limits what a model's output can do. It does not stop a model from being fo
   through every container, closure or C extension. Full information-flow tracking is on the roadmap (see SPEC.md).
 - **Imported Python modules are trusted code.** The checks above apply to `.shio` source. A Python module the program
   imports, or a helper a check calls, receives values and can do anything with them, just like a rule.
-  `tests/test_boundary_escapes.py` lists every escape route we know of and what stops it.
+  `tests/test_boundary_escapes.py` lists every escape route we know of and what stops it, and
+  `tests/test_fuzz_boundary.py` generates thousands more on every CI run, both in `.shio` code and against a live
+  reading from Python.
 - **Traces contain model inputs and outputs.** Treat `shio-traces/` as sensitive.
 
 ## Reporting a vulnerability

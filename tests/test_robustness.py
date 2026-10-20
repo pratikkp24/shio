@@ -115,10 +115,10 @@ class Backends(Base):
     def test_server_errors_and_unreachable_hosts_hold(self):
         s = Stub(status=500)
         try:
-            self.assertEqual(self.ask(openai_compat("m:1", s.url + "/v1"))[0], "HELD")
+            self.assertEqual(self.ask(openai_compat("m:1", s.url + "/v1", retries=0))[0], "HELD")
         finally:
             s.close()
-        self.assertEqual(self.ask(openai_compat("m:1", "http://127.0.0.1:9/v1", timeout=2))[0], "HELD")
+        self.assertEqual(self.ask(openai_compat("m:1", "http://127.0.0.1:9/v1", timeout=2, retries=0))[0], "HELD")
 
 
 class DigestPinning(Base):
@@ -322,3 +322,118 @@ class Traces(Base):
         self.assertIn("1 failed", text)
         self.assertIn("x known: no value", text)
         self.assertIn("unparseable readings: 1", text)
+
+
+class Flaky(Stub):
+    """Fails with `codes` first (one per request), then answers."""
+
+    def __init__(self, codes, retry_after=None):
+        super().__init__()
+        self.codes, self.retry_after = list(codes), retry_after
+        stub, handler = self, self.server.RequestHandlerClass
+        orig = handler.do_POST
+
+        def do_POST(h):
+            if stub.codes:
+                code = stub.codes.pop(0)
+                n = int(h.headers.get("Content-Length", 0))
+                h.rfile.read(n)
+                stub.requests.append({"failed": code})
+                h.send_response(code)
+                if stub.retry_after is not None:
+                    h.send_header("Retry-After", str(stub.retry_after))
+                h.end_headers()
+                return
+            orig(h)
+        handler.do_POST = do_POST
+
+
+class Retries(Base):
+    def test_transient_errors_are_retried(self):
+        s = Flaky([429, 503], retry_after=0)
+        try:
+            self.assertEqual(self.ask(openai_compat("m:1", s.url + "/v1", retries=2))[0], 7.5)
+            self.assertEqual(len(s.requests), 3)
+        finally:
+            s.close()
+
+    def test_client_errors_are_not_retried_and_hold(self):
+        s = Flaky([400], retry_after=0)
+        try:
+            self.assertEqual(self.ask(openai_compat("m:1", s.url + "/v1", retries=3))[0], "HELD")
+            self.assertEqual(len(s.requests), 1)
+        finally:
+            s.close()
+
+    def test_retries_run_out_and_hold(self):
+        s = Flaky([503, 503, 503], retry_after=0)
+        try:
+            self.assertEqual(self.ask(openai_compat("m:1", s.url + "/v1", retries=1))[0], "HELD")
+            self.assertEqual(len(s.requests), 2)
+        finally:
+            s.close()
+
+    def test_per_minute_paces_calls_across_threads(self):
+        import time
+        from shio.models import Pacer
+        p, stamps = Pacer(per_minute=600), []         # one call every 0.1s
+        ts = [threading.Thread(target=lambda: (p.wait(), stamps.append(time.monotonic()))) for _ in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        stamps.sort()
+        self.assertGreaterEqual(stamps[-1] - stamps[0], 0.28)
+
+
+class FakeAnthropic:
+    """Stands in for anthropic.Anthropic(): records the request, answers with a text block."""
+
+    def __init__(self, text='{"value": 4.0}', stop_reason="end_turn"):
+        self.calls, self.text, self.stop_reason = [], text, stop_reason
+        self.messages = self
+
+    def create(self, **kw):
+        self.calls.append(kw)
+        block = type("B", (), {"type": "text", "text": self.text})()
+        return type("R", (), {"content": [block], "stop_reason": self.stop_reason})()
+
+
+class AnthropicBackend(Base):
+    def test_structured_output_with_a_strict_schema(self):
+        from shio.models import anthropic
+        fake = FakeAnthropic()
+        out, text = self.ask(anthropic("claude-opus-5-5", effort="low", client=fake))
+        self.assertEqual(out, 4.0)
+        kw = fake.calls[-1]
+        self.assertEqual(kw["model"], "claude-opus-5-5")
+        fmt = kw["output_config"]["format"]
+        self.assertEqual((fmt["type"], kw["output_config"]["effort"]), ("json_schema", "low"))
+        self.assertIn('"kind": "anthropic"', text)
+
+    def test_strict_closes_every_object(self):
+        from shio.models import _strict
+        s = _strict({"type": "object", "properties": {"a": {"type": "object", "properties": {"b": {"type": "string"}}}}})
+        self.assertEqual((s["additionalProperties"], s["required"]), (False, ["a"]))
+        self.assertEqual((s["properties"]["a"]["additionalProperties"], s["properties"]["a"]["required"]), (False, ["b"]))
+
+    def test_a_refusal_holds(self):
+        from shio.models import anthropic
+        out, text = self.ask(anthropic(client=FakeAnthropic(text="", stop_reason="refusal")))
+        self.assertEqual(out, "HELD")
+        self.assertIn("refusal", text)
+
+    def test_without_the_sdk_it_says_which_extra(self):
+        import sys
+        from shio.models import anthropic
+        saved = sys.modules.get("anthropic")
+        sys.modules["anthropic"] = None
+        try:
+            out, text = self.ask(anthropic())
+            self.assertEqual(out, "HELD")
+            self.assertIn("shio-lang[anthropic]", text)
+        finally:
+            if saved is None:
+                del sys.modules["anthropic"]
+            else:
+                sys.modules["anthropic"] = saved

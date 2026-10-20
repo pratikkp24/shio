@@ -10,7 +10,7 @@ from .compiler import ShioError, compile_source, to_code
 from .core import (BoundaryError, Checks, Reading, RegulatedError, Source, agent, check, configure, each,  # noqa: F401
                    in_force, parallel, read, rule)
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def load(path, name=None, argv=()):

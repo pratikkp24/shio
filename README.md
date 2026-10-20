@@ -14,7 +14,7 @@ The compiler enforces it. Compiles to Python.
 <br>
 
 [![GitHub Stars](https://img.shields.io/github/stars/pratikkp24/shio?style=flat-square&color=6487D7)](https://github.com/pratikkp24/shio)
-[![License](https://img.shields.io/badge/license-Apache--2.0-111?style=flat-square)](https://github.com/pratikkp24/shio/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-111?style=flat-square)](https://github.com/pratikkp24/shio/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://github.com/pratikkp24/shio/blob/main/pyproject.toml)
 [![Tests](https://img.shields.io/badge/tests-252%20passing-2ea44f?style=flat-square)](https://github.com/pratikkp24/shio/tree/main/tests)
 [![Status](https://img.shields.io/badge/status-v0.1%20prototype-E8A33D?style=flat-square)](#-status)
@@ -263,12 +263,47 @@ shio run payables.shio qwen3:8b   # Shio (or: replay, no model needed)
 ## 🔌 Any model
 
 `ollama("qwen3:8b")` for anything on Ollama. `openai_compat(model, base_url, key_env="...")` for vLLM, LM Studio,
-llama.cpp server, OpenAI, Gemini, OpenRouter and anything else that speaks the OpenAI API. Keys come from the
-environment, never from code or traces. `replay(fn)` answers from saved data, for tests and demos.
+llama.cpp server, OpenAI, Gemini, OpenRouter and anything else that speaks the OpenAI API. `anthropic("claude-opus-5-5")`
+for Claude through the official SDK (`pip install 'shio-lang[anthropic]'`). Keys come from the environment, never from
+code or traces. `replay(fn)` answers from saved data, for tests and demos.
+
+Every backend retries transient failures (timeouts, 429, 5xx) with backoff, honouring `Retry-After` (`retries=2`), and
+`per_minute=` paces calls across threads.
 
 Shio asks for structured output (`response_format` with a JSON schema) by default. If a provider rejects it, pass
 `structured=False`: the schema still goes in the prompt and the reply is still parsed and checked. A reply that does
 not fit, a timeout or a provider error gives a null reading, which fails its checks instead of crashing the agent.
+
+## 🛡️ Shio Guard: in front of any agent's tools
+
+Already have an agent (LangChain, an MCP client, a hand-written tool loop)? Put Shio in front of its tools without
+rewriting it:
+
+```python
+from shio import guard, models
+
+g = guard.Guard([
+    guard.Tool("read_file", output="untrusted"),
+    guard.Tool("send_money", side_effect=True, control={"recipient": "iban"}),
+    guard.Tool("send_email", side_effect=True, control={"to": "email"}, content=["body"]),
+], planner=models.ollama("qwen3:8b"))
+
+s = g.start("Pay the bill in bill.txt", records=[vendor_master])   # a blind plan, from the request alone
+decision, result = s.call("send_money", {"recipient": iban, "amount": 98.7}, send_money)
+# decision.outcome: "run" | "hold" (a person approves) | "deny", with the reason
+```
+
+Before the agent reads any tool output, a model reads only the user's request and plans which actions it calls for.
+Then each proposed call is checked:
+
+- an action the request didn't ask for is denied;
+- a recipient, URL or IBAN found only in untrusted text (a file, a web page, an email) is denied;
+- an address the agent never read anywhere (the model built it) is denied;
+- a value from a place the request pointed at ("her e-mail is on her website") runs if the request's own words pick it out, and is held for a person if that place offers more than one;
+- a request that hands the job to instructions it doesn't spell out ("do what that email says") holds every action.
+
+Every plan and every decision is a traced Shio run. It is the gate from the benchmark below, made general: replayed
+over all 3,058 tool calls of that run, it reaches the same decision on every one.
 
 ## 🧪 Checks are tests, and rewards
 
@@ -402,6 +437,6 @@ Contributions are welcome: see [CONTRIBUTING.md](https://github.com/pratikkp24/s
 
 **If Shio held something your agent would have sent, a star helps others find it.**
 
-From Aonami Labs · Apache-2.0
+From Aonami Labs · MIT OR Apache-2.0
 
 </div>

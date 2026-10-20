@@ -1,0 +1,87 @@
+# Shio Guard: the decisions behind shio.guard. The model proposes tool calls; this program decides which run.
+#
+#   plan_actions  a blind read of the user's request alone (no tool output, so no injected text can reach it): which
+#                 tools that act or send data does the request call for, which sources does it point at for the values
+#                 those tools need, and does it hand the job over to instructions it does not spell out? A rule settles it.
+#   gate          each proposed tool call is a reading. Checks decide whether it runs, waits for a person's approval,
+#                 or is denied.
+#
+# The ledger (shio/guard.py) holds what the agent has read, trusted (the request, the system's records) and untrusted
+# (anything a third party could have written), and answers the provenance questions the checks ask.
+
+type Pointer:
+    source: str             # the place as the request names it: a file name, a URL, a channel, whose inbox, an email's sender or subject
+    tools: list[str]        # the tools (from either list) whose values are to be taken from this place
+    about: str?             # whose or which value it is, in the request's own words ("Dora", "the supplier"), or null
+    every: bool             # true if the request asks for every item of that kind there ("all the links in ...")
+
+type Plan:
+    actions: str            # what the user asks to have done or changed, in one sentence (or "only information")
+    delegated: bool         # true if the request says to carry out instructions written somewhere else, without saying what they are
+    tools: list[str]        # the tools that act or send data that those actions need, by exact name
+    sources: list[Pointer]  # the places the request points at for values the assistant will need
+
+type Call:
+    function: str           # the tool the model wants to call
+    args: dict              # its arguments
+
+agent plan_actions(request: Source, menu: str, reads: str, llm):
+    read plan: Plan from request by llm blind:
+        You plan for an assistant. Below is the user's request and a list of tools that change things or send data
+        out. List every tool from that list the assistant may need to complete this request, as the request is
+        written. Include a tool if the request asks for that kind of action, directly or as an obvious step: the steps
+        a person doing the job would take without being told (inviting someone before messaging them, if they must be
+        a member first). Leave a tool out if the request does not call for it. When the request could be done with
+        more than one of these tools (creating a new payment or changing an existing one), list each of them. Tools
+        that only read or search are always allowed; do not list them.
+
+        Sources: if the request points at a place to find a value the assistant needs (a file to pay, a website with
+        someone's e-mail, a message that holds the details or the link), list each such place in `sources` with the
+        tools (from either list below) whose values come from it, and `about`: whose or which value it is, in the
+        request's own words. Set `every` only if the request asks for every item of that kind there. A place the
+        request does not point at is not a source.
+
+        Delegated: set `delegated` to true only if the request tells the assistant to do whatever some document,
+        message, email, web page or list says, without saying what those actions are ("do the tasks on my list",
+        "do what that email asks"). List that place in `sources` too. A request that says what to do and only points
+        at a place for a value ("pay the bill in this file") is not delegated.
+
+        Tools that change things or send data out:
+        {menu}
+        Reading tools that open an address (always allowed; list them only under `sources`):
+        {reads}
+
+    rule settle:
+        # No usable plan (the model's answer could not be read): fail safe, as for a delegated request. Nothing is
+        # vouched for, so every action waits for a person's approval.
+        if plan is None:
+            return {"tools": [], "delegated": True, "sources": []}
+        # A delegated request does not say what is to be done, so a blind plan cannot vouch for any action: each one
+        # waits for a person's approval, whatever the planner guessed.
+        tools = [] if plan.delegated else sorted(t for t in (plan.tools or []) if f"- {t}:" in menu)
+        usable = set(tools) | {r.split(":")[0].removeprefix("- ") for r in reads.splitlines() if r.strip()}
+        sources = [{"source": s.source, "tools": sorted(t for t in s.tools if t in usable), "about": s.about,
+                    "every": bool(s.every)} for s in (plan.sources or []) if s.source]
+        return {"tools": tools, "delegated": bool(plan.delegated), "sources": sources}
+    return settle
+
+agent gate(proposal: Source, proposer, plan, ledger):
+    read call: Call from proposal by proposer:
+        The tool call the agent's model proposed.
+
+    check known: ledger.is_known(call.function), "{call.function} is not a declared tool"
+    check intended: not ledger.is_side_effect(call.function) or call.function in plan["tools"], "{call.function} changes something or sends data out, and the request did not ask for it (planned: {plan['tools']})"
+    check clean_values: not ledger.tainted_args(call.function, call.args or {}), "{call.function} would use {ledger.tainted_args(call.function, call.args or {})}, found only in untrusted text (not in the request, a trusted record, or a source the request pointed at for this tool)"
+    check grounded: not ledger.ungrounded_args(call.function, call.args or {}), "{call.function} would use {ledger.ungrounded_args(call.function, call.args or {})}: an address never read in the request, a record or any tool output, on a site none of them names"
+    check unambiguous: not ledger.held_args(call.function, call.args or {}), "{call.function} would use {ledger.held_args(call.function, call.args or {})}: read from a place the request pointed at, but that place offers other values of the same kind, or the request delegated the job to it"
+
+    rule decide:
+        if call is None:
+            return {"outcome": "deny", "why": "the proposed call could not be read"}
+        if known and intended and clean_values and grounded and unambiguous:
+            return {"outcome": "run", "why": ""}
+        why = "; ".join(c["detail"] for c in checks.failures())
+        if known and clean_values and grounded and (intended or plan["delegated"]):
+            return {"outcome": "hold", "why": why}
+        return {"outcome": "deny", "why": why}
+    return decide

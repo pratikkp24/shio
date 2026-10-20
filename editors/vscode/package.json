@@ -4,7 +4,7 @@
   "description": "Shio language support: highlighting for .shio and .policy files, and the read/decide boundary checked on save.",
   "version": "0.1.0",
   "publisher": "aonami-labs",
-  "license": "Apache-2.0",
+  "license": "(MIT OR Apache-2.0)",
   "repository": {
     "type": "git",
     "url": "https://github.com/pratikkp24/shio",
