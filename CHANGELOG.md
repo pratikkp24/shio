@@ -3,7 +3,15 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
-## 0.8.0 (unreleased)
+## 0.9.0 (unreleased)
+
+- **Images and PDFs, natively.** `Source.image(path)` (in `.shio`: `image(path)`) for PNG, JPEG, GIF and WebP, and
+  `Source.from_pdf(path)` now records that it is a PDF. Claude gets images and PDFs as image and document blocks (a
+  PDF sent as a document isn't also sent as text); `openai_compat(..., vision=True)` sends images as data URLs, which
+  covers Ollama vision models. A model that can't read a source fails the read, so the reading is null and its checks
+  fail. Traces record each source's media type and SHA-256. Files over 20 MB are refused with a clear error.
+
+## 0.8.0 (2026-10-20)
 
 - **Async agents.** `@shio.agent` on an `async def`, and `async agent` in `.shio`: reads become `await aread(...)`, so
   the model call doesn't block the event loop. A model with `async apropose(request)` is awaited; any other runs in a

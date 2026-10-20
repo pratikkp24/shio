@@ -66,6 +66,7 @@ from shio.models import ollama, openai_compat, replay
 from shio.core import Source, in_force
 from shio.guard import GateHeld, GateDenied
 pdf = Source.from_pdf
+image = Source.image
 __shio_train__ = []
 __shio_tools__ = {}
 """

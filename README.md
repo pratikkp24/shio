@@ -270,6 +270,10 @@ llama.cpp server, OpenAI, Gemini, OpenRouter and anything else that speaks the O
 for Claude through the official SDK (`pip install 'shio-lang[anthropic]'`). Keys come from the environment, never from
 code or traces. `replay(fn)` answers from saved data, for tests and demos.
 
+Images and PDFs go to models that read files as the files themselves: `image("receipt.png")` and `pdf("bill.pdf")`
+reach Claude as image and document blocks, and an OpenAI-compatible vision model (`vision=True`) as data URLs. A model
+that can't read a source fails the read instead of guessing.
+
 Every backend retries transient failures (timeouts, 429, 5xx) with backoff, honouring `Retry-After` (`retries=2`), and
 `per_minute=` paces calls across threads.
 

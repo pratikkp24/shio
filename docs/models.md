@@ -19,3 +19,17 @@ models.replay(lambda request: {"value": 42})              # saved answers, for t
 - **Retries and pacing.** Every backend retries timeouts, 429 and 5xx with backoff, honouring `Retry-After`
   (`retries=2`), and `per_minute=` paces calls across threads.
 - **Keys** come from the environment and are never written to a trace.
+
+## Images and PDFs
+
+```python
+read total: Receipt from image("receipt.png") by claude:       # in .shio: image(...) and pdf(...)
+    What does this receipt say?
+```
+
+`Source.image(path)` and `Source.from_pdf(path)` reach models that read files as the files themselves: Claude
+(`anthropic(...)`) gets images and PDFs as image and document blocks, and an OpenAI-compatible vision model
+(`openai_compat(..., vision=True)`, including Ollama's llava or qwen2.5-vl) gets images as data URLs. A PDF also keeps
+its extracted text, for text-only models. A model that can't read a source (an image, for a text-only model) fails the
+read: the reading is null and its checks fail, instead of the model guessing. The trace records each file's SHA-256, so
+the exact image a decision was made from is auditable.

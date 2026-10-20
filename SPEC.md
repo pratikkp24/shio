@@ -64,7 +64,7 @@ of the language rather than a convention:
 
 - Batching many fields into one model call. The port reads one field per call, where the original batched 36; a
   `read many` form is the next step.
-- Multimodal sources. `Source.from_pdf` extracts text; models that take PDFs or images directly are not used that way yet.
+- ~~Multimodal sources.~~ 0.9.0: `image(...)` and `pdf(...)` reach models that read files as images and documents.
 - Streaming. (Async agents arrived in 0.8.0: `async agent`, and `aread` from Python.)
 - Static types for plain values. Shio checks the read/decide boundary, not general types; Python type hints still
   work.

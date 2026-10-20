@@ -3,8 +3,10 @@
 openai_compat covers most of the field: Ollama, vLLM, LM Studio, llama.cpp server, OpenAI, and Gemini's
 OpenAI-compatible endpoint. replay answers from saved data, so programs can be tested without calling a model.
 """
+import dataclasses
 import json
 import os
+from pathlib import Path
 import random
 import threading
 import time
@@ -58,6 +60,33 @@ def _http_retry_after(e):
         return None
 
 
+MAX_FILE = 20 * 1024 * 1024        # bytes per file sent inline; larger files fail the read with a clear error
+
+
+def _media(req, kinds):
+    """[(source, media_type, base64 data)] for sources a backend will send as files: those with a media_type in `kinds`
+    and a readable path."""
+    import base64
+    out = []
+    for s in req.sources:
+        if s.media_type in kinds and s.path:
+            data = Path(s.path).read_bytes()
+            if len(data) > MAX_FILE:
+                raise RuntimeError(f"{s.name} is {len(data) // 1024 // 1024} MB; files over {MAX_FILE // 1024 // 1024} MB "
+                                   "can't be sent inline")
+            out.append((s, s.media_type, base64.standard_b64encode(data).decode()))
+    return out
+
+
+def _unreadable(req, kinds):
+    """Sources this backend can neither read as text nor send as files: a read that can't see its input fails."""
+    bad = [s.name for s in req.sources if s.text is None and s.media_type and s.media_type not in kinds]
+    if bad:
+        raise RuntimeError(f"this model can't read {', '.join(bad)} ({'images' if len(bad) > 1 else 'an image'} or "
+                           "files without text); use a model that sees them, e.g. anthropic(...) or "
+                           "openai_compat(..., vision=True)")
+
+
 def messages_for(req, sources_text=True):
     """The chat messages a request becomes. Training rebuilds prompts with this same function."""
     parts = [req.ask.strip()]
@@ -77,18 +106,26 @@ class OpenAICompat:
     in every decision; required in regulated programs."""
 
     def __init__(self, model, base_url="http://localhost:11434/v1", key_env=None, temperature=0.0, timeout=600,
-                 structured=True, pinned=None, retries=2, per_minute=None):
+                 structured=True, pinned=None, retries=2, per_minute=None, vision=False):
         self.model, self.base_url, self.key_env = model, base_url.rstrip("/"), key_env
         self.temperature, self.timeout, self.structured = temperature, timeout, structured
         self.name, self.pinned = model, pinned
         self.pacer = Pacer(per_minute, retries)
+        self.vision = vision          # send image sources as data URLs (OpenAI vision, Ollama llava / qwen2.5-vl...)
 
     def identity(self):
         return {"kind": "openai_compat", "endpoint": self.base_url, "model": self.model, "pinned": self.pinned,
                 "temperature": self.temperature}
 
     def propose(self, req):
-        body = {"model": self.model, "messages": messages_for(req), "temperature": self.temperature}
+        kinds = {"image/png", "image/jpeg", "image/gif", "image/webp"} if self.vision else set()
+        _unreadable(req, kinds)
+        msgs = messages_for(req)
+        images = _media(req, kinds)
+        if images:                    # the user turn becomes text plus one image part per image source
+            msgs[-1] = {"role": "user", "content": [{"type": "text", "text": msgs[-1]["content"]}] + [
+                {"type": "image_url", "image_url": {"url": f"data:{mt};base64,{data}"}} for _, mt, data in images]}
+        body = {"model": self.model, "messages": msgs, "temperature": self.temperature}
         if self.structured:
             body["response_format"] = {"type": "json_schema", "json_schema": {"name": req.name, "schema": req.json_schema}}
         headers = {"Content-Type": "application/json"}
@@ -204,11 +241,24 @@ class Anthropic:
     def identity(self):
         return {"kind": "anthropic", "model": self.model, "effort": self.effort, "structured": self.structured}
 
+    FILE_KINDS = {"image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"}
+
     def propose(self, req):
-        msgs = messages_for(req)
+        _unreadable(req, self.FILE_KINDS)
+        files = _media(req, self.FILE_KINDS)
+        sent = {s.name for s, _, _ in files}
+        # a file sent as a document or image needn't also go as extracted text
+        msgs = messages_for(dataclasses.replace(req, sources=[s for s in req.sources if s.name not in sent]))
         system = next((m["content"] for m in msgs if m["role"] == "system"), None)
-        kw = {"model": self.model, "max_tokens": self.max_tokens,
-              "messages": [m for m in msgs if m["role"] != "system"]}
+        turns = [m for m in msgs if m["role"] != "system"]
+        if files:                     # documents and images first, then the prompt text
+            blocks = []
+            for s, mt, data in files:
+                block = {"type": "document", "title": s.name} if mt == "application/pdf" else {"type": "image"}
+                block["source"] = {"type": "base64", "media_type": mt, "data": data}
+                blocks.append(block)
+            turns[-1] = {"role": "user", "content": blocks + [{"type": "text", "text": turns[-1]["content"]}]}
+        kw = {"model": self.model, "max_tokens": self.max_tokens, "messages": turns}
         if system:
             kw["system"] = system
         config = {}

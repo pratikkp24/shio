@@ -116,16 +116,29 @@ class Reading:
 
 @dataclasses.dataclass
 class Source:
-    """A document the model reads. `text` is sent to text-only models; `path` lets a model upload the file itself."""
+    """A document the model reads. `text` is sent to text-only models; `path` and `media_type` let a model that takes
+    files (Claude: images and PDFs; an OpenAI-compatible vision model: images) read the file itself."""
     name: str
     text: str = None
     path: str = None
+    media_type: str = None
 
     @classmethod
     def from_pdf(cls, path, name=None):
+        """A PDF: its text for text-only models, and the file itself for models that read PDFs."""
         from pypdf import PdfReader
         pages = [f"[page {i}]\n{p.extract_text() or ''}" for i, p in enumerate(PdfReader(path).pages, 1)]
-        return cls(name or str(path).rsplit("/", 1)[-1], "\n\n".join(pages), str(path))
+        return cls(name or str(path).rsplit("/", 1)[-1], "\n\n".join(pages), str(path), "application/pdf")
+
+    @classmethod
+    def image(cls, path, name=None):
+        """An image (PNG, JPEG, GIF or WebP) for a model that sees images. A text-only model given one fails the read,
+        so the reading is null and its checks fail, instead of a guess."""
+        suffix = str(path).rsplit(".", 1)[-1].lower()
+        kinds = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
+        if suffix not in kinds:
+            raise ValueError(f"{path}: an image source must be one of {', '.join(sorted(kinds))}")
+        return cls(name or str(path).rsplit("/", 1)[-1], None, str(path), kinds[suffix])
 
     @property
     def id(self):
@@ -322,7 +335,8 @@ def _prepare_read(schema, ask, by, sources, context, system, name, blind, key, m
     sources = [s if isinstance(s, Source) else Source(str(s), path=str(s)) for s in _flat(sources)]
     meta = {**(meta or {}), **({"key": key} if key is not None else {})}
     for s in sources:
-        run.sources.setdefault(s.id, {"name": s.name, "path": s.path, "text": s.text, "sha256": _source_hash(s)})
+        run.sources.setdefault(s.id, {"name": s.name, "path": s.path, "text": s.text, "media_type": s.media_type,
+                                      "sha256": _source_hash(s)})
     req = ReadRequest(name or getattr(schema, "__name__", "reading"), ask, system or "", sources,
                       to_jsonable(_uncover(context or {})), to_json_schema(schema), blind, meta)
     return run, req, model_identity(by)
