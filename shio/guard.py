@@ -29,6 +29,7 @@ request, the system's own records, outputs of tools declared output="trusted"). 
 v1.2.2 (README, "Benchmark"), made general: there its tool declarations were written per suite; here you declare them.
 """
 import dataclasses
+import functools
 import hashlib
 import json
 import re
@@ -140,6 +141,29 @@ def norm(s):
     return re.sub(r"\s+", "", s).rstrip("/.")
 
 
+def text_form(s):
+    """Text as values are looked for in it: lower case, single spaces, no scheme or www. (norm() for a whole text,
+    keeping the spaces, so a value can be matched as a whole token)."""
+    s = re.sub(r"https?://", "", str(s).lower())
+    s = re.sub(r"(?<![a-z0-9.-])www\.", "", s)
+    return " ".join(s.split())
+
+
+@functools.lru_cache(maxsize=4096)
+def _token(v):
+    # v is norm(value), which has no spaces: let a space sit between any two of its characters (a name written
+    # "Acme Corp" is the value "acmecorp"). Its ends must not continue into a longer address or word: bob@acme.co
+    # is not in bob@acme.com, 1234 is not in 12345, ob@acme.com is not in bob@acme.com. A path, query or sentence
+    # can follow (acme.com in "acme.com/x", or at the end of "write to bob@acme.com.").
+    body = r"\s?".join(re.escape(c) for c in v)
+    return re.compile(r"(?<![a-z0-9._%+@-])" + body + r"(?![a-z0-9_%+@-]|\.[a-z0-9])")
+
+
+def within(value, text):
+    """Is normalised `value` in text_form `text` as a whole token or address (not a piece of a longer one)?"""
+    return bool(value) and _token(value).search(text) is not None
+
+
 def site(url):
     """A URL without scheme, www., path, query or fragment: "https://www.a.com/x?d=1" -> "a.com"."""
     return re.split(r"[/?#]", norm(url), maxsplit=1)[0]
@@ -210,7 +234,7 @@ class Ledger:
 
     def __init__(self, tools, request, plan=None):
         self.tools = tools
-        self.trusted = [norm(request)]
+        self.trusted = [text_form(request)]     # text_form: values are matched in it as whole tokens
         self.sites = set()          # sites (URLs without path or query) found in the request or a record
         self._add_sites(request)
         self.untrusted = []
@@ -223,7 +247,7 @@ class Ledger:
     def add_trusted(self, text):
         """A record the system itself holds (the user's contacts, the vendor master): values in it are trusted."""
         for _, t in _leaves(_plain(text)):
-            self.trusted.append(norm(t))
+            self.trusted.append(text_form(t))
             self._add_sites(t)
 
     def _add_sites(self, text):
@@ -272,31 +296,42 @@ class Ledger:
         for key, text in leaves:
             # a record holds short values: long free text inside one was written by someone, so it is untrusted too
             bad = t.output == "untrusted" or key in t.untrusted_keys or len(text) > LONG
-            (self.untrusted if bad else self.trusted).append(norm(text))
+            if bad:
+                self.untrusted.append(norm(text))
+            else:
+                self.trusted.append(text_form(text))
             if not bad:
                 self._add_sites(text)
             if t.output == "untrusted":
                 self.open_text.append(norm(text))
         items = plain if isinstance(plain, list) else [plain]     # a list result (messages, emails): one item each
         for d in self._designations_for(tool, args):
-            self.designated.append({"d": d, "tool": tool, "texts": [norm(x) for _, x in leaves],
+            self.designated.append({"d": d, "tool": tool, "texts": [text_form(x) for _, x in leaves],
                                     "addresses": _unique(addresses(" ".join(x for _, x in leaves))),
-                                    "items": [([norm(x) for _, x in _leaves(it)],
+                                    "items": [([text_form(x) for _, x in _leaves(it)],
                                                _unique(addresses(" ".join(x for _, x in _leaves(it))))) for it in items]})
 
     # -- provenance -------------------------------------------------------------------------------------------------
 
     def grounded(self, value):
+        """In trusted text as a whole token: bob@acme.co is not grounded by bob@acme.com."""
         v = norm(value)
-        return any(v in t for t in self.trusted)
+        return any(within(v, t) for t in self.trusted)
 
     def seen_untrusted(self, value):
+        # any occurrence, even inside a longer token: the cautious direction (it can only make a value tainted)
         v = norm(value)
         return any(v in t for t in self.untrusted)
 
-    def tainted(self, value):
+    @staticmethod
+    def _exempt(v, want):
+        # very short values, and numbers (amounts, counts) where no account is wanted, are not judged by provenance.
+        # A number in an IBAN/account argument is an account number: it is.
+        return len(v) < 3 or (v.isdigit() and want != "iban")
+
+    def tainted(self, value, want=None):
         v = norm(value)
-        if len(v) < 3 or v.isdigit():
+        if self._exempt(v, want):
             return False
         return self.seen_untrusted(v) and not self.grounded(v)
 
@@ -304,7 +339,7 @@ class Ledger:
         """An address seen nowhere, whose site (for a URL) is in no trusted text either: the model built it."""
         v = norm(value)
         k = kind(value)
-        if (k not in ADDRESS_KINDS and want not in ADDRESS_KINDS) or len(v) < 3 or v.isdigit():
+        if (k not in ADDRESS_KINDS and want not in ADDRESS_KINDS) or self._exempt(v, want):
             return False
         if self.grounded(v) or self.seen_untrusted(v):
             return False
@@ -323,7 +358,7 @@ class Ledger:
                 continue
             if function in self.reads() and rec["tool"] in self.reads():
                 continue                    # no second hop: links on a web page are not followed on the user's say-so
-            if not any(v in t for t in rec["texts"]):
+            if not any(within(v, t) for t in rec["texts"]):
                 continue
             words = [w for w in re.findall(r"[a-z0-9]{3,}", (d["about"] or "").lower()) if w not in STOP]
             if k == "name":
@@ -350,7 +385,7 @@ class Ledger:
 
     def _from_designated(self, value):
         v = norm(value)
-        return any(v in t for rec in self.designated for t in rec["texts"])
+        return any(within(v, t) for rec in self.designated for t in rec["texts"])
 
     def classify(self, function, args):
         """-> (tainted, held, ungrounded): [(argument, value)] lists."""
@@ -362,7 +397,7 @@ class Ledger:
         def judge(a, val, want):
             if val is None:
                 return
-            if not self.tainted(val):
+            if not self.tainted(val, want):
                 if norm(val) not in self.endorsed_urls.get(function, set()) and self.ungrounded(val, want):
                     ungrounded.append((a, val))
                 return
@@ -469,7 +504,8 @@ class Guard:
 
     def start(self, request, records=(), requester=None):
         """A task: the blind plan from `request`, and a ledger seeded with the system's own `records` (trusted).
-        requester: who asked for it; with four_eyes, they can't approve this task's held calls themselves."""
+        requester: who asked for it (default: shio.configure(actor=...), SHIO_ACTOR or the OS user); with four_eyes,
+        they can't approve this task's held calls themselves."""
         return Session(self, request, records, requester)
 
 
@@ -480,8 +516,10 @@ def _call_key(name, args):
 class Session:
     def __init__(self, guard, request, records=(), requester=None):
         import shio
-        self.guard, self.request, self.requester = guard, request, requester
-        self.pending, self._approved = {}, {}      # id -> held call; call key -> who approved it
+        from .core import actor
+        self.guard, self.request = guard, request
+        self.requester = requester if requester is not None and str(requester).strip() else actor()
+        self.pending, self._approved = {}, {}      # id -> held call; call key -> who approved it (one run each)
         acts = [t for t in guard.tools.values() if t.side_effect]
         menu = "\n".join(f"- {t.name}: {t.description}" for t in acts)
         reads = "\n".join(f"- {t.name}: {t.description}" for t in guard.tools.values() if t.opens_address)
@@ -490,8 +528,9 @@ class Session:
         for r in records:
             self.ledger.add_trusted(r)
 
-    def check(self, name, args):
-        """-> Decision for one proposed call. Nothing runs here."""
+    def check(self, name, args, _use_approval=True):
+        """-> Decision for one proposed call. Nothing runs here, but a "run" that rests on a person's approval uses
+        it up: an approval covers one run of exactly that call, and the next identical call is held again."""
         import shio
         from .models import replay
         proposed = {"function": name, "args": dict(args or {})}
@@ -501,28 +540,35 @@ class Session:
             return Decision(out["outcome"], out.get("why", ""))
         key = _call_key(name, proposed["args"])
         if key in self._approved:                  # approved for exactly these arguments, and still only held
-            return Decision("run", f"approved by {self._approved[key]}", key[:12], self._approved[key])
+            by = self._approved.pop(key) if _use_approval else self._approved[key]
+            return Decision("run", f"approved by {by}", key[:12], by)
         self.pending[key[:12]] = {"tool": name, "args": proposed["args"], "why": out.get("why", ""), "key": key}
         return Decision("hold", out.get("why", ""), key[:12])
 
     # -- approvals ---------------------------------------------------------------------------------------------------
 
-    def _answer(self, id, by, note, approved):
+    def _answer(self, id, by, note, approved, use=False):
+        from .ledger import _same_person
         p = self.pending.get(id)
         if p is None:
             raise KeyError(f"no held call {id!r} in this task")
-        if approved and self.guard.four_eyes and self.requester and by == self.requester:
+        if not str(by or "").strip():
+            raise PermissionError("an approval or refusal needs the person's name (by)")
+        if approved and self.guard.four_eyes and _same_person(by, self.requester):
             raise PermissionError(f"{by} asked for this task, so can't approve its held calls (four eyes)")
         verdict = {"approved": approved, "by": by, "note": note, "tool": p["tool"], "time": time.time()}
         _program().approval({"tool": p["tool"], "args": p["args"]}, p["why"], verdict)     # a run in the chain
         del self.pending[id]
         if approved:
             self._approved[p["key"]] = by
-            return self.check(p["tool"], p["args"])   # re-checked: a call that is now denied stays denied
+            # re-checked: a call that is now denied stays denied. approve() leaves the approval for the call the agent
+            # makes next; decide() runs the call itself, so it uses it now.
+            return self.check(p["tool"], p["args"], _use_approval=use)
         return Decision("deny", f"refused by {by}" + (f": {note}" if note else ""), id)
 
     def approve(self, id, by, note=""):
-        """A person approves held call `id`. -> the call's Decision now: "run" unless something since made it a deny."""
+        """A person approves held call `id`. -> the call's Decision now: "run" unless something since made it a deny.
+        The approval covers one run: the next check() of exactly this call runs, the one after is held again."""
         return self._answer(id, by, note, True)
 
     def reject(self, id, by, note=""):
@@ -535,7 +581,7 @@ class Session:
             p = self.pending[d.id]
             a = self.guard.approver(ApprovalRequest(d.id, name, p["args"], d.why, self.request, self.requester))
             try:
-                return self._answer(d.id, a.by, a.note, bool(a.approved))
+                return self._answer(d.id, a.by, a.note, bool(a.approved), use=True)
             except PermissionError as e:
                 return Decision("hold", str(e), d.id)
         return d
@@ -683,11 +729,11 @@ def declare(name, args, mode, output="untrusted", opens=False):
 def guard_task(tools, request, planner, approver=None):
     """`guard REQUEST by MODEL [approved by APPROVER]`: start a task for the agent running now. Its rules (and the
     agents it calls) find it."""
-    from .core import _current
+    from .core import _current, actor
     run = _current("guard")
     text = getattr(request, "text", None)
     g = Guard([t for t, _ in tools.values()], planner, approver=approver)
-    run.guard_session = Session(g, text if text is not None else str(request))
+    run.guard_session = Session(g, text if text is not None else str(request), requester=actor())
     return run.guard_session
 
 

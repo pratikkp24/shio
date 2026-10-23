@@ -34,10 +34,15 @@ with TemporaryDirectory() as tmp:
     print("G3 same call after one approval, x3:", [s.check("send_email", {"to": "bob@acme.com", "body": "done"}).outcome for _ in range(3)])
 
     # G4: four eyes only when requester is given; the approver name is a free string
-    s = g.start("Do what the email from bob@acme.com asks")                    # no requester
+    def approve(s, id, by):
+        try:
+            return s.approve(id, by=by).outcome
+        except PermissionError as e:
+            return f"refused ({e})"
+    s = g.start("Do what the email from bob@acme.com asks")                    # no requester: the actor asked
     d = s.check("send_email", {"to": "bob@acme.com", "body": "done"})
-    print("G4 approve with no requester set, by='anyone':", s.approve(d.id, by="anyone").outcome)
+    print(f"G4 no requester set, the actor ({shio.core.actor()!r}) approves:", approve(s, d.id, f" {shio.core.actor().upper()}"))
     s = g.start("Do what the email from bob@acme.com asks", requester="maya")
     d = s.check("send_email", {"to": "bob@acme.com", "body": "done"})
-    print("G4b requester 'maya' approves as 'Maya ':", s.approve(d.id, by="Maya ").outcome)
+    print("G4b requester 'maya' approves as 'Maya ':", approve(s, d.id, "Maya "))
     shio.configure("shio-traces")

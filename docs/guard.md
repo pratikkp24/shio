@@ -34,7 +34,8 @@ A held call gets an id and waits. A person answers it, either through an approve
 
 ```python
 g = guard.Guard(tools, planner=models.ollama("qwen3:8b"), approver=guard.terminal_approver())
-s = g.start(request, requester="maya")          # maya can't approve her own task's held calls (four eyes)
+s = g.start(request, requester="maya")          # maya can't approve her own task's held calls (four eyes);
+                                                # without requester=, the actor (shio.configure / SHIO_ACTOR) asked
 
 d = s.check("send_email", args)                 # without an approver: d.outcome == "hold", d.id
 s.pending                                       # {id: {"tool", "args", "why"}}
@@ -43,6 +44,9 @@ s.reject(d.id, by="omar", note="not now")       # -> Decision("deny")
 ```
 
 - An approval is bound to the **exact arguments**: changing them needs a new approval.
+- An approval covers **one run**: the next identical call is held again.
+- Names compare like the ledger's maker-checker (case and spacing ignored): `"Maya "` can't approve `maya`'s task. In
+  a `.shio` program, `guard ... approved by` makes the actor the requester.
 - Only a **hold** can be approved. A denied call stays denied, and an approved call is re-checked, so it stays denied
   if something since made it one.
 - Every answer is a **run in the chain**: who, approved or not, the note, and the call, signed when a key is set.
