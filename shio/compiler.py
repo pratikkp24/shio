@@ -30,6 +30,9 @@ import io
 import re
 import textwrap
 import tokenize
+import unicodedata
+
+from .core import MUTATING_METHODS
 
 PY_COMPOUND = re.compile(r"^(for|async\s+for|if|elif|else|while|with|async\s+with|try|except|finally|match|case)\b")
 READ = re.compile(r"^read\s+(?P<name>[A-Za-z_]\w*)(?:\[(?P<key>.+?)\])?\s*:\s*(?P<type>.+?)"
@@ -65,6 +68,7 @@ from pydantic import BaseModel as _ShioType, Field as _ShioField
 from shio.models import ollama, openai_compat, replay
 from shio.core import Source, in_force
 from shio.guard import GateHeld, GateDenied
+from shio.core import checked_getattr as getattr
 pdf = Source.from_pdf
 image = Source.image
 __shio_train__ = []
@@ -238,6 +242,7 @@ class Compiler:
         self.regulated = any(line.split("#", 1)[0].strip() == "regulated" and not line[:1].isspace()
                              for line in self.src)
         self.uses = []         # (names, line, where) used in prompts and checks, verified once the module is known
+        self.pure_uses = []    # (expression tree, line, where) of every check and when, for _check_helpers
         self.codes = None      # the program's reason-code table, {CODE: text}, if it declares one
         self.code_uses = []    # (code, line) from `check NAME as CODE`
         # what `shio explain` documents: every declaration, read, check, rule and sign-off, with its .shio line
@@ -329,28 +334,28 @@ class Compiler:
                              f"A reading can only be looked at in a check, a when, a rule, or a later read's 'seeing' clause; "
                              f"write a check or a rule that decides from it.")
 
-    MUTATORS = {"append", "extend", "insert", "add", "update", "setdefault", "pop", "popitem", "remove", "discard",
-                "clear", "sort", "reverse", "write", "writelines", "send", "put", "put_nowait", "appendleft",
-                "extendleft", "__setitem__", "__setattr__"}
+    MUTATORS = MUTATING_METHODS
 
     def pure(self, code, line, where):
-        """A check or when only decides: it may not assign (:=) or call a method that changes something, which could
-        carry a reading's value out into plain code."""
+        """A check or when only decides: it may not assign (:=), or take a method that changes something (called or
+        not) or any dunder method, which could carry a reading's value out into plain code. Functions this file
+        defines that the check uses are checked too, once the whole module is known (_check_helpers)."""
         try:
             tree = ast.parse(code, mode="eval")
         except SyntaxError:
             return               # reported by py()
         for n in ast.walk(tree):
-            bad = None
+            bad = _impure_node(n)
             if isinstance(n, ast.NamedExpr):
                 bad = "':=' assigns"
-            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("setattr", "delattr"):
-                bad = f"{n.func.id}() changes an object"
-            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in self.MUTATORS:
-                bad = f".{n.func.attr}() changes something"
+            elif isinstance(n, ast.Attribute) and n.attr.startswith("__"):
+                bad = f"'.{n.attr}' is a dunder method, which can change its object"
+            elif isinstance(n, ast.Attribute) and n.attr in self.MUTATORS:
+                bad = f".{n.attr}() changes something"
             if bad:
                 self.error(line, f"{where} only decides, so it cannot change anything: {bad}. "
                                  f"Move it to a rule, after the check.")
+        self.pure_uses.append((tree, line, where))
 
     def py(self, code, line, mode="exec"):
         try:
@@ -920,16 +925,187 @@ def _compile(source, path):
         _reflection_scan(c, py, lines)
     if c.regulated:
         _regulated_scan(c, py, lines)
+    if bound is not None:
+        _check_helpers(c, py, lines)
     return py, lines, c
+
+
+# A check only decides. pure() looks at the check's own text; this looks at what it uses that the same .shio file
+# defines: a function (def or lambda), a class's methods, or a name bound to an expression. Each must not change
+# anything outside itself. Python modules a program imports are trusted code and not looked into.
+FRESH_CALLS = {"list", "dict", "set", "sorted", "tuple", "frozenset", "str", "bytearray"}
+MUTATING_FUNCS = {"setattr", "delattr", "heappush", "heappushpop", "heapreplace", "heapify", "insort", "insort_left",
+                  "insort_right", "shuffle", "methodcaller", "attrgetter"}
+
+
+def _impure_node(n):
+    """Why a node in a check (or a helper it uses) changes something, ignoring receivers; None if it does not."""
+    if isinstance(n, ast.Call):
+        f = n.func
+        name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
+        if name in MUTATING_FUNCS:
+            return f"{name}() changes an object"
+        if name == "getattr" and len(n.args) > 1 and isinstance(n.args[1], ast.Constant) and \
+                (str(n.args[1].value) in MUTATING_METHODS or str(n.args[1].value).startswith("__")):
+            return f"getattr(..., {n.args[1].value!r}) takes a method that changes something"
+    elif isinstance(n, ast.Name) and n.id in MUTATING_FUNCS:
+        return f"{n.id} changes an object"
+    return None
+
+
+def _root(n):
+    while isinstance(n, (ast.Attribute, ast.Subscript, ast.Starred)):
+        n = n.value
+    return n.id if isinstance(n, ast.Name) else None
+
+
+def _targets(t):
+    if isinstance(t, (ast.Tuple, ast.List)):
+        for x in t.elts:
+            yield from _targets(x)
+    elif isinstance(t, ast.Starred):
+        yield from _targets(t.value)
+    else:
+        yield t
+
+
+def _new_container(v):
+    return isinstance(v, (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)) or (
+        isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id in FRESH_CALLS)
+
+
+def _fresh_locals(fn):
+    """Names a function only ever binds to a new container it built itself: changing those changes nothing outside."""
+    if isinstance(fn, ast.Lambda):
+        return set()
+    params = {a.arg for a in ast.walk(fn.args) if isinstance(a, ast.arg)}
+    seen, bad = set(), set(params)
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                pairs = [(t, n.value)]
+                if isinstance(t, (ast.Tuple, ast.List)) and isinstance(n.value, (ast.Tuple, ast.List)) and \
+                        len(t.elts) == len(n.value.elts):          # vals, n = {}, 10
+                    pairs = list(zip(t.elts, n.value.elts))
+                for target, value in pairs:
+                    if isinstance(target, ast.Name):
+                        (seen if _new_container(value) else bad).add(target.id)
+                    else:
+                        bad |= {x.id for x in _targets(target) if isinstance(x, ast.Name)}
+        elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+            bad |= {x.id for x in ast.walk(n.target) if isinstance(x, ast.Name)}
+        elif isinstance(n, (ast.With, ast.AsyncWith)):
+            bad |= {x.id for i in n.items if i.optional_vars for x in ast.walk(i.optional_vars) if isinstance(x, ast.Name)}
+        elif isinstance(n, ast.NamedExpr):
+            bad.add(n.target.id)
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            bad.add(n.target.id)
+    return seen - bad
+
+
+def _check_helpers(c, py, lines):
+    tree = ast.parse(py)
+    defs, aliases = {}, {}
+    for node in ast.walk(tree):
+        ln = lines[node.lineno - 1] if getattr(node, "lineno", 0) and node.lineno <= len(lines) else 0
+        if not ln:               # the prelude the compiler adds
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("__shio"):
+            defs.setdefault(node.name, []).append(node)
+        elif isinstance(node, ast.ClassDef):
+            defs.setdefault(node.name, []).extend(
+                x for x in node.body if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)))
+        elif isinstance(node, ast.Assign):
+            v = node.value
+            # a name bound to a function value: a lambda, a method taken off an object, or functools.partial(...)
+            called = isinstance(v, ast.Attribute) or (isinstance(v, ast.Call) and (
+                getattr(v.func, "id", None) == "partial" or getattr(v.func, "attr", None) == "partial"))
+            for t in node.targets:
+                if isinstance(t, ast.Name) and not t.id.startswith("__shio"):
+                    if isinstance(v, ast.Lambda):
+                        defs.setdefault(t.id, []).append(v)
+                    elif called:
+                        aliases.setdefault(t.id, []).append(v)
+
+    def impure(name, seen):
+        """Why something this file binds to `name` changes what is outside it, or None."""
+        if name in seen:
+            return None
+        seen.add(name)
+        for fn in defs.get(name, []):
+            why = impure_fn(fn, seen)
+            if why:
+                return why
+        for value in aliases.get(name, []) if name not in defs else []:
+            why = impure_expr(value, set(), seen)
+            if why:
+                return f"is bound to {ast.unparse(value)[:60]}, which {why}"
+        return None
+
+    def impure_expr(node, fresh, seen):
+        for n in ast.walk(node):
+            why = _impure_node(n)
+            if why:
+                return why.replace(" changes", " that changes", 1) if why.startswith("getattr") else why
+            if isinstance(n, (ast.Global, ast.Nonlocal)):
+                return f"declares {'global' if isinstance(n, ast.Global) else 'nonlocal'} {', '.join(n.names)}"
+            if isinstance(n, ast.Attribute) and (n.attr in MUTATING_METHODS or n.attr.startswith("__")) \
+                    and _root(n.value) not in fresh:
+                return f"uses {ast.unparse(n)[:60]} (it changes {ast.unparse(n.value)[:40]})"
+            for t in (n.targets if isinstance(n, (ast.Assign, ast.Delete)) else
+                      [n.target] if isinstance(n, (ast.AugAssign, ast.AnnAssign)) else []):
+                for x in _targets(t):
+                    if isinstance(x, (ast.Attribute, ast.Subscript)) and _root(x) not in fresh:
+                        return f"changes {ast.unparse(x)[:60]}"
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and (n.id in defs or n.id in aliases):
+                why = impure(n.id, seen)
+                if why:
+                    return f"uses {n.id}, which {why}"
+        return None
+
+    def impure_fn(fn, seen):
+        return impure_expr(fn, _fresh_locals(fn), seen)
+
+    for expr, line, where in c.pure_uses:
+        for name in dict.fromkeys(n.id for n in ast.walk(expr) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)):
+            if name in defs or name in aliases:
+                why = impure(name, set())
+                if why:
+                    c.error(line, f"{where} only decides, so it cannot change anything: {name}, defined in this "
+                                  f"file, {why}. Move it to a rule, after the check (or into a Python module you "
+                                  f"import, which Shio treats as trusted code and does not look into).")
 
 
 # Every program: the routes that reach a reading without naming it, so the name check above never sees them (found by
 # an escape test: each of these returned a reading's value from plain code). Regulated programs ban more, below.
-REFLECTION_NAMES = {"locals", "vars", "globals", "eval", "exec", "compile", "__import__", "breakpoint"}
+REFLECTION_NAMES = {"locals", "vars", "globals", "eval", "exec", "compile", "__import__", "breakpoint", "__builtins__",
+                    "attrgetter", "methodcaller"}
 REFLECTION_ATTRS = {"_getframe", "f_locals", "f_globals", "f_back", "gi_frame", "cr_frame", "ag_frame", "tb_frame",
                     "currentframe", "stack", "trace", "get_objects", "get_referrers", "get_referents", "__dict__",
-                    "__closure__", "__globals__", "__code__", "__self__", "_sealed", "_SEALED", "_gate"}
-REFLECTION_MODULES = {"gc", "inspect", "ctypes"}
+                    "__closure__", "__globals__", "__code__", "__self__", "_sealed", "_SEALED", "_gate",
+                    "__getattribute__", "__builtins__", "attrgetter", "methodcaller", "last_run"}
+REFLECTION_MODULES = {"gc", "inspect", "ctypes", "builtins"}
+_PRIVATE = None
+
+
+def shio_private_names():
+    """Every private (_x, not dunder) name the shio package's modules define: the runtime's internals (_open, _run,
+    _current, _config...). Shio code may not name them as an attribute or import them, in any mode."""
+    global _PRIVATE
+    if _PRIVATE is None:
+        import importlib
+        import pkgutil
+        import shio
+        names = set()
+        for m in pkgutil.iter_modules(shio.__path__):
+            try:
+                mod = importlib.import_module(f"shio.{m.name}")
+            except Exception:
+                continue
+            names |= {n for n in vars(mod) if n.startswith("_") and not n.startswith("__")}
+        names |= {n for n in vars(shio) if n.startswith("_") and not n.startswith("__")}
+        _PRIVATE = frozenset(names)
+    return _PRIVATE
 
 
 def _reflection_scan(c, py, lines):
@@ -939,15 +1115,34 @@ def _reflection_scan(c, py, lines):
         if not ln:               # the prelude the compiler adds
             continue
         why = None
+        private = shio_private_names()
         if isinstance(node, ast.Name) and node.id in REFLECTION_NAMES:
             why = f"'{node.id}' can reach a model reading without naming it, so it is not allowed in Shio code"
+        elif isinstance(node, ast.Name) and node.id == "getattr" and not isinstance(node.ctx, ast.Load):
+            why = "'getattr' is Shio's checked getattr in Shio code, so it can't be rebound or deleted"
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == "getattr":
+            why = "'getattr' is Shio's checked getattr in Shio code, so it can't be redefined"
         elif isinstance(node, ast.Attribute) and node.attr in REFLECTION_ATTRS:
             why = f"'.{node.attr}' can reach a model reading without naming it, so it is not allowed in Shio code"
+        elif isinstance(node, ast.Attribute) and node.attr in private:
+            why = f"'.{node.attr}' is one of the Shio runtime's internals, which Shio code can't reach"
+        elif isinstance(node, ast.Call) and getattr(node.func, "id", None) == "getattr" and len(node.args) > 1 \
+                and isinstance(node.args[1], ast.Constant) and str(node.args[1].value).startswith("_"):
+            why = f"getattr(..., {node.args[1].value!r}): Shio code can't fetch private or dunder attributes by name"
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
             bad = [m for m in mods if m.split(".")[0] in REFLECTION_MODULES]
             if bad:
                 why = f"importing {bad[0]} is not allowed: it can reach a model reading without naming it"
+            elif isinstance(node, ast.ImportFrom):
+                names = [a.name for a in node.names]
+                bad = [n for n in names if n in REFLECTION_NAMES or n in REFLECTION_ATTRS or n == "getattr"
+                       or ((node.module or "").split(".")[0] == "shio" and n.startswith("_"))]
+                if bad:
+                    why = f"importing {bad[0]} from {node.module} is not allowed: it can reach a model reading " \
+                          f"without naming it"
+            if not why and any((a.asname or "") == "getattr" for a in node.names):
+                why = "'getattr' is Shio's checked getattr in Shio code, so it can't be rebound"
         if why:
             c.error(ln, why + " (put such code in a Python module you import, which Shio treats as trusted code)")
 
@@ -965,7 +1160,16 @@ PERSONAL = re.compile(r"(?i)(^|_)(e_?mail|phone|mobile|msisdn|pan|aadhaar|aadhar
 COMPILER_NAMES = {"_ShioType", "_ShioField", "__name__", "__file__"}
 
 
+IDENT = re.compile(r"[^\W\d]\w*")
+
+
 def _regulated_scan(c, py, lines):
+    # names the compiler emits (__shio.read, __shio_tools__...) are exempt from the dunder rule below, so the program's
+    # own text may not use them: read from the .shio source, as Python sees an identifier (NFKC-normalised)
+    for k, text in enumerate(c.src):
+        for m in IDENT.finditer(text):
+            if unicodedata.normalize("NFKC", m.group(0)).startswith("__shio"):
+                c.error(k + 1, f"regulated: '{m.group(0)}' is the compiler's own name; Shio code can't use it")
     tree = ast.parse(py)
     for node in ast.walk(tree):
         ln = lines[node.lineno - 1] if getattr(node, "lineno", 0) and node.lineno <= len(lines) else 0

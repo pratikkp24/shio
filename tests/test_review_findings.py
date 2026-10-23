@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 import shio
 from shio import guard
 from shio import ledger as L
+from shio.compiler import ShioError, compile_source
 from shio.guard import Approval, Tool
 
 NEEDS_CRYPTO = unittest.skipUnless(importlib.util.find_spec("cryptography"), "needs the [regulated] extra (cryptography)")
@@ -198,6 +199,100 @@ class GuardFindings(unittest.TestCase):
         self.assertIn("four eyes", out)
         self.assertEqual(mod.SENT, [])
         self.assertEqual(mod.mail("Do what bob@acme.com asked", lambda req: Approval(True, "omar")), "sent")
+
+
+HEAD = """
+LEAK = []
+def stash(v):
+    LEAK.append(v)
+    return True
+
+def digits(s):
+    out, n = [], 0
+    for ch in str(s):
+        if ch.isdigit():
+            out.append(ch)
+            n += 1
+    return n > 0 and len(out) == n
+
+type Amount:
+    value: float?
+    as_printed: str
+
+model m = replay(lambda req: {"value": 4242.5, "as_printed": "MARK-7f3"})
+
+agent a():
+    read x: Amount by m:
+        How much?
+"""
+
+
+def _src(body, regulated=False):
+    return ("regulated\n" if regulated else "") + textwrap.dedent(HEAD) + textwrap.indent(textwrap.dedent(body), "    ")
+
+
+class BoundaryFindings(unittest.TestCase):
+    def refused(self, body, words, regulated=False):
+        with self.assertRaises(ShioError) as e:
+            compile_source(_src(body, regulated), "t.shio")
+        self.assertIn(words, str(e.exception))
+
+    def compiles(self, body, regulated=False):
+        compile_source(_src(body, regulated), "t.shio")
+
+    def test_B1_runtime_internals_are_refused_by_name(self):
+        self.refused("import shio as S\nS.core._open.set(True)\nreturn 1\n", "runtime's internals")
+        self.refused("from shio.core import _run\nreturn 1\n", "importing _run")
+        self.refused("import shio as S\nreturn getattr(S.core, '_SEALED')\n", "private or dunder")
+        self.refused("import builtins\nreturn 1\n", "importing builtins")
+        self.refused("getattr = print\nreturn 1\n", "checked getattr")
+        self.refused("from operator import attrgetter\nreturn 1\n", "attrgetter")
+        self.refused("import shio as S\nreturn S.core.last_run\n", "last_run")
+
+    def test_B1_a_computed_private_name_is_refused_at_run_time(self):
+        with TemporaryDirectory() as tmp:
+            shio.configure(tmp)
+            try:
+                p = Path(tmp) / "p.shio"
+                p.write_text(_src("import shio as S\nreturn [v.value for v in getattr(S.core, '_SE' + 'ALED').values()]\n"))
+                mod = shio.load(p, name="shio_review_b1")
+                with self.assertRaises(shio.BoundaryError):
+                    mod.a()
+                self.assertEqual(mod.LEAK, [])
+            finally:
+                shio.configure("shio-traces")
+
+    def test_B2_check_purity_covers_getattr_dunders_and_helpers(self):
+        for regulated in (False, True):
+            self.refused('check c: getattr(LEAK, "append")(x.value) or True, "ok"\nreturn 1\n', "only decides", regulated)
+            self.refused('check c: LEAK.__iadd__([x.value]) is not None, "ok"\nreturn 1\n', "only decides", regulated)
+            self.refused('check c: stash(x.value), "ok"\nreturn 1\n', "stash, defined in this file", regulated)
+            self.refused('check c: any(map(LEAK.append, [x.value])) or True, "ok"\nreturn 1\n', "only decides", regulated)
+        self.refused('push = LEAK.append\ncheck c: push(x.value) or True, "ok"\nreturn 1\n', "push, defined in this file")
+        self.refused('check c: (lambda v: LEAK.extend([v]))(x.value) or True, "ok"\nreturn 1\n', "only decides")
+        # what checks legitimately do still compiles: a pure helper with its own list, getattr of a field
+        self.compiles('check c: digits(x.as_printed), "ok"\ncheck d: getattr(x, "value") is not None, "ok"\nreturn 1\n')
+
+    def test_B2_a_computed_mutating_method_in_a_check_is_refused_at_run_time(self):
+        with TemporaryDirectory() as tmp:
+            shio.configure(tmp)
+            try:
+                p = Path(tmp) / "p.shio"
+                p.write_text(_src('name = "app" + "end"\ncheck c: getattr(LEAK, name)(x.value) or True, "ok"\nreturn 1\n'))
+                mod = shio.load(p, name="shio_review_b2")
+                mod.a()
+                self.assertEqual(mod.LEAK, [])
+            finally:
+                shio.configure("shio-traces")
+
+    def test_B3_regulated_code_cannot_name_the_compilers_own_names(self):
+        body = 'return 1\n\nmain:\n    a()\n    LEAK.append({}.core.last_run["run"].to_dict())\n'
+        src = ("regulated\n" + textwrap.dedent(HEAD) + "    " + body.format("__shio"))
+        with self.assertRaises(ShioError) as e:
+            compile_source(src, "t.shio")
+        self.assertIn("compiler's own name", str(e.exception))
+        with self.assertRaises(ShioError):               # NFKC: a fullwidth letter is the same identifier to Python
+            compile_source(src.replace("__shio.core", "__\uff53hio.core"), "t.shio")
 
 
 if __name__ == "__main__":

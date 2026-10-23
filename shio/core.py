@@ -24,6 +24,28 @@ from .schema import parse, schema_ref, to_json_schema, to_jsonable
 
 _run = contextvars.ContextVar("shio_run", default=None)
 _open = contextvars.ContextVar("shio_open", default=False)   # True inside a @check or @rule
+_checking = contextvars.ContextVar("shio_checking", default=False)   # True inside a @check only
+
+# methods that change their object: a check only decides, so it may not call them (the compiler refuses them by
+# name; checked_getattr refuses them when the name is computed)
+MUTATING_METHODS = frozenset({
+    "append", "extend", "insert", "add", "update", "setdefault", "pop", "popitem", "remove", "discard", "clear",
+    "sort", "reverse", "write", "writelines", "send", "put", "put_nowait", "appendleft", "extendleft",
+    "difference_update", "intersection_update", "symmetric_difference_update", "throw"})
+
+
+def checked_getattr(obj, name, *default):
+    """getattr as .shio code gets it (the compiler binds it in every program). A computed attribute name can't reach
+    what a literal one may not: no _private or __dunder__ attribute (the runtime's internals, a reading's registry),
+    and inside a check no method that changes its object."""
+    if isinstance(name, str):
+        if name.startswith("_"):
+            raise BoundaryError(f"getattr(..., {name!r}): Shio code can't fetch private or dunder attributes by a "
+                                f"computed name")
+        if _checking.get() and name in MUTATING_METHODS:
+            raise BoundaryError(f"getattr(..., {name!r}) in a check: a check only decides, so it can't take a method "
+                                f"that changes something")
+    return getattr(obj, name, *default)
 
 CHECKS = {}   # "module:qualname" -> the plain check function, so training can re-run a check on a new completion
 
@@ -412,22 +434,24 @@ def check(fn=None, *, name=None, reward=True, after=(), code=None):
                                    "detail": f"not checked: {', '.join(dict.fromkeys(blocked))} failed",
                                    "reward": False, "args": [], "kwargs": {}, "readings": []})
                 return False
-            tok = _open.set(True)
+            tok, ctok = _open.set(True), _checking.set(True)
             try:
                 out = fn(*[_uncover(a) for a in args], **{k: _uncover(v) for k, v in kwargs.items()})
             except Exception as e:   # a check that cannot be evaluated (a null reading, say) has failed
                 out = (False, f"could not be evaluated: {type(e).__name__}: {e}")
             finally:
+                _checking.reset(ctok)
                 _open.reset(tok)
             passed, detail = out if isinstance(out, tuple) else (out, "")
             passed = bool(passed)
             if callable(detail):   # compiled checks explain themselves only when they fail
-                tok = _open.set(True)
+                tok, ctok = _open.set(True), _checking.set(True)
                 try:
                     detail = "" if passed else str(detail())
                 except Exception as e:
                     detail = f"{cname} failed (its explanation could not be written: {type(e).__name__}: {e})"
                 finally:
+                    _checking.reset(ctok)
                     _open.reset(tok)
             run.checks.append({"name": cname, "fn": ref, "key": key, "code": code, "passed": passed, "detail": detail,
                                "reward": reward,
