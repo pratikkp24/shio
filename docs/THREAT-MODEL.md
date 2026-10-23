@@ -63,7 +63,8 @@ claims. The rest of this document tests each one.
 
 - **`.shio` code vs imported Python.** The compiler checks `.shio` source only. A module the program imports, and a
   function defined in plain Python at the top of a `.shio` file, are trusted code: if a check or rule passes them a
-  value, they can do anything with it (finding B2 shows a top-level helper in the same file is not checked either).
+  value, they can do anything with it. A function, lambda or method alias defined in the `.shio` file itself is
+  Shio code: a check that uses one has it checked for purity too (finding B2, fixed).
   In regulated mode the hashes of imported local modules are recorded with each decision.
 - **Rules are trusted code.** A rule receives readings' values and the check results. Whatever it returns is ordinary
   data afterwards. Shio forces the decision into a rule; it cannot make the rule check the right thing.
@@ -110,9 +111,11 @@ Each row is a guarantee as the code enforces it today, with its limit. "Tests" a
 - **Tests.** `test_boundary_escapes.py::SealedReading`; `test_fuzz_boundary.py::FuzzPythonAPI` (every fuzz
   expression and pairs of them against a live reading).
 - **Limits.** Python is not a sandbox: from Python, `shio.core._sealed(r)` or `shio.core._open.set(True)` opens
-  everything; that is out of scope. From `.shio` code outside regulated mode, the same internals are reachable because
-  `_open`, `_run` and `getattr` with a computed name are not refused (finding B1). `_open` means "inside a check *or*
-  a rule", so anything a check calls can read values (B2). `_SEALED` is keyed by `id()`; the finalizer runs before
+  everything; that is out of scope. From `.shio` code the same internals are refused: every private name the shio
+  package defines, as an attribute or an import, and `getattr` in `.shio` code is `core.checked_getattr`, which
+  refuses computed private names at run time (finding B1, fixed in e23ce33). `_open` means "inside a check *or* a
+  rule", so anything a check calls can read values; helpers defined in the `.shio` file are checked for purity (B2),
+  imported Python is trusted. `_SEALED` is keyed by `id()`; the finalizer runs before
   the id can be reused in CPython, which is assumed rather than tested.
 
 ### G3. A check or `when` only decides
@@ -122,9 +125,15 @@ Each row is a guarantee as the code enforces it today, with its limit. "Tests" a
   `update`, `write`, `send`, `__setitem__`...). The compiled check returns `bool(expr)`. A failure message is
   evaluated only when the check fails, also with `_open` set.
 - **Tests.** `test_boundary_escapes.py::ChecksOnlyDecide`; `test_fuzz_boundary.py::Fuzz` (the `SIDE` forms).
-- **Limit.** A deny-list of names, applied to the check's own text. It does not see `getattr(LEAK, "append")(v)` or
-  `LEAK.__iadd__([v])` (outside regulated mode), or a helper function the check calls, including one defined in the
-  same `.shio` file (in regulated mode too). All three carry a value into plain state (finding B2, probes P1-P3).
+- **Since e23ce33 (finding B2, probes P1-P3).** A check may not take a mutating method at all (called or passed
+  as a value), or any dunder attribute; `getattr` with a literal mutating name is refused at compile time and with a
+  computed one at run time (`core.checked_getattr` knows it is inside a check). Functions, lambdas, class methods and
+  method aliases (`push = LEAK.append`, `partial(...)`) defined in the same `.shio` file are checked when a check
+  uses them, in every mode: no `global`/`nonlocal`, no mutating method or assignment through anything but a
+  container the function built itself (`out = []`).
+- **Limit.** Still a deny-list of names. Imported Python is trusted and not looked into, and a library function that
+  changes its argument and is not in the list (`heapq.heappush` and `bisect.insort` are) carries a value out. File
+  writes through `print(..., file=...)` are not checked.
 
 ### G4. Reflection is refused in `.shio` code
 
@@ -136,11 +145,15 @@ Each row is a guarantee as the code enforces it today, with its limit. "Tests" a
   `sys`, `operator`, `pickle`, `marshal`, `copyreg`, `types`, `builtins` and others.
 - **Tests.** `test_boundary_escapes.py::Reflection` (7 builtins, 3 frame/internal routes, 3 modules);
   `test_regulated.py::Regulated` (6 escape hatches, 4 module imports, a private attribute in a helper).
-- **Limits.** Outside regulated mode the lists are short and attribute-name based: `shio.core._open`,
-  `shio.core._run` and `getattr(shio.core, "_SE" + "ALED")` compile and read every reading's value without naming it
-  (finding B1, P5, P6). In regulated mode the compiler's own prelude alias `__shio` is exempt from the dunder rule, so
-  `__shio.core.last_run["run"].to_dict()` reads the previous run's values in clear (finding B3, P9). Reading the
-  program's own trace file with `open()` works in every mode (P10); see §7.
+- **Since e23ce33.** Outside regulated mode the scan also refuses every private name the shio package defines
+  (`_open`, `_run`, `_current`...) as an attribute or a `from shio... import`, `last_run`, `__getattribute__`,
+  `__builtins__`, `attrgetter`, `methodcaller`, `import builtins`, and rebinding `getattr`; `getattr` itself is
+  `core.checked_getattr`, which refuses a computed private or dunder name at run time (finding B1, P5, P6). In
+  regulated mode the program's own text may not contain a `__shio` identifier (NFKC-normalised, as Python reads it),
+  so the dunder exemption covers only what the compiler emits (finding B3, P9).
+- **Limits.** Outside regulated mode the lists remain attribute-name based and Python is not a sandbox (for example,
+  `().__class__.__base__.__subclasses__()` is not refused). Reading the program's own trace file with `open()` works
+  in every mode (P10); see §7.
 
 ### G5. Acting tools run only inside a rule, and only through the gate
 
@@ -167,29 +180,30 @@ Each row is a guarantee as the code enforces it today, with its limit. "Tests" a
 - **Tests.** `test_guard.py` (17 cases: unplanned action, injected recipient, built address, tampered bill, long
   text in a trusted record...), `test_guard_adapters.py`, `test_typed_tools.py`. External evidence: the AgentDojo run
   in the README (Opus 5.5 refused every tool-call attack on its own, so that run did not test the gate).
-- **Limits.** Provenance is substring matching on normalised text. A value counts as grounded if it is a *substring*
-  of trusted text, so `bob@acme.co` is grounded by a request that says `bob@acme.com` (finding G1). Values of fewer
-  than three characters or made only of digits are never tainted or ungrounded, so a digits-only account number
-  copied from an injected invoice runs (G2). Amounts and other non-control arguments are not checked at all. The plan
+- **Since 07d547d.** A value is grounded only where trusted text holds it as a whole token or address (`within`,
+  `guard.py`): `bob@acme.co` is not grounded by `bob@acme.com` (finding G1). Being seen in untrusted text stays a
+  substring test, the cautious direction. A digits-only value is judged when an `iban`/account argument wants it
+  (G2). On shio-bench's recorded AgentDojo run the gate reaches the same verdict on all 3,058 calls as before, and the
+  offline obedient attacker still gets 0 of 249 through, with the benign tasks unchanged.
+- **Limits.** Values of fewer than three characters, and numbers in non-account arguments, are not judged. Amounts and other non-control arguments are not checked at all. The plan
   is a model reading of the request: a request that is itself hostile is out of scope (the request is trusted).
 
 ### G7. Approvals and four eyes (Guard)
 
 - **Mechanism.** A held call gets an id bound to `sha256([tool, args])`. `Session.approve(id, by)` re-runs the gate
   (an approved call that is now denied stays denied) and records the verdict as a Shio run in the chain. With
-  `four_eyes=True` (the default) and a `requester`, the requester cannot approve (`guard.py:514`).
+  `four_eyes=True` (the default) the requester cannot approve. Since 07d547d: the requester defaults to the actor
+  (`shio.configure(actor=)`, `SHIO_ACTOR`, the OS user), and `guard ... approved by` passes it; names compare like
+  the ledger's maker-checker (case and spacing ignored); an approval covers one run of exactly that call (G3, G4).
 - **Tests.** `test_guard_approvals.py` (bound to exact arguments, four eyes, re-check, approver callbacks).
-- **Limits.** Four eyes applies only when the caller passes `requester=`; the `.shio` form `guard ... approved by`
-  never does (`guard.py:683`), and the comparison is exact (`"Maya "` passes for `"maya"`), unlike the ledger's
-  case-folding (finding G4). An approval is reusable: every later identical call in the session runs without asking
-  again (G3). `by` is whatever string the approver returns.
+- **Limits.** `by` and the requester are names, not authenticated identities: whatever string the approver returns.
 
 ### G8. The record: hash chain, signatures, vault, erasure, sign-off
 
 - **Mechanism.** `ledger.write` (`shio/ledger.py:549`) computes a record's sha256 over canonical JSON including its
   `integrity.seq` and `integrity.prev`, signs that digest (Ed25519 or HMAC-SHA256), writes the record and appends a
   ledger entry under a POSIX file lock. Events (erasure, label, sign-off, migration) are appended with a sha256 over
-  their own fields (`ledger.py:582`, `:606`, `:690`, `:794`). Vaults are AES-256-GCM with the record's file name as
+  their own fields and, since 8603f62 (format `v: 2`), their `seq` and `prev` (`ledger._event_hash`). Vaults are AES-256-GCM with the record's file name as
   associated data (`ledger.py:190`), so a vault cannot be moved to another record. `verify` (`ledger.py:808`) checks
   sequence numbers, the `prev` chain, signatures, every record's hash, vault hashes, erasures, sign-off maker-checker
   and roles, files on disk that are not in the ledger, and an optional anchored `--head`.
@@ -197,12 +211,12 @@ Each row is a guarantee as the code enforces it today, with its limit. "Tests" a
   without erasure), `test_oversight.py` (maker-checker, two roles, rejection, edited sign-off, sign-off around the
   checks, personal signer keys), `test_vault_encryption.py`, `test_async_and_labels.py`.
 - **Limits.**
-  - `verify` reports a signature check per entry, but only `BAD SIGNATURE` is a problem; an **unsigned** entry is
-    counted and passed (`ledger.py:834`). Anyone who can write the folder can append an unsigned sign-off that turns
-    a PENDING decision APPROVED, and `verify` with the public key returns ok (finding L1).
-  - An event's own hash and signature do not cover its `seq` or `prev`. A record binds its position (its hash
-    includes them); an event does not. So an event followed only by other events can be removed or reordered and the
-    later events re-linked without breaking any signature: a signed rejection can be deleted (L2).
+  - Fixed in 8603f62 (L1): with a public key or secret, `verify` (and the evidence manifest check) treats every
+    entry that is not verifiably signed by that key (unsigned, or signed in another scheme) as a problem. Without a
+    key, signatures are only counted.
+  - Fixed in 8603f62 (L2): events now bind their chain position. Events written before 1.0 (no `v`) still verify,
+    with a note that their position is not signed, so in such a ledger an old event followed only by old events can
+    still be removed undetected; anchor the head. An old-form event after a current one is a problem (downgrade).
   - Entries at the end can be removed unless the head was anchored (L3, documented).
   - The signing key is on the host that writes; with it, everything can be rewritten (A5).
 
@@ -243,19 +257,21 @@ Documented before this review (SECURITY.md, docs/REGULATED.md):
   against the program itself (P10).
 - The signing key is the root of trust; anchor the head outside the folder.
 - HMAC signatures are verifiable only by holders of the secret.
-- A role and a person's name are claims. Maker-checker compares names; Guard's four eyes compares exact strings.
+- A role and a person's name are claims. Maker-checker and Guard's four eyes compare names (case and spacing
+  ignored), not identities.
 - File locking is POSIX only.
 
-Found while preparing this review (20 October 2026; not fixed in 1.0.0rc1; details in REVIEW-BRIEF.md §4):
+Found while preparing this review (20 October 2026, in 1.0.0rc1; details in REVIEW-BRIEF.md §4). All nine are
+fixed on main for 1.0.0; the regression tests are in `tests/test_review_findings.py`:
 
-| Id | Area | Finding | Mode |
-|---|---|---|---|
-| L1 | Ledger | `verify` with the public key passes an unsigned, forged sign-off; the decision reads APPROVED | all |
-| L2 | Ledger | An event's `seq` and `prev` are not covered by its hash or signature; a signed rejection followed only by events can be deleted undetected | all |
-| B1 | Compiler | `shio.core._open`, `shio.core._run` and `getattr` with a computed name reach every reading's value from plain `.shio` code | non-regulated |
-| B2 | Compiler | Check purity misses `getattr(o, "append")(v)`, `o.__iadd__(...)` and helper functions, including helpers defined in the same `.shio` file | B2 helpers: all; others: non-regulated |
-| B3 | Compiler | The prelude alias `__shio` is exempt from the dunder rule: `__shio.core.last_run` exposes the previous run's values | regulated |
-| G1 | Guard | Provenance by substring: a value is "grounded" if it is a substring of trusted text | all |
-| G2 | Guard | Digits-only control values are never tainted or ungrounded | all |
-| G3 | Guard | One approval covers every later identical call in the session | all |
-| G4 | Guard | Four eyes is off unless `requester=` is passed (never, from `.shio`), and compares exact strings | all |
+| Id | Area | Finding | Mode | Status |
+|---|---|---|---|---|
+| L1 | Ledger | `verify` with the public key passes an unsigned, forged sign-off; the decision reads APPROVED | all | Fixed in 8603f62 |
+| L2 | Ledger | An event's `seq` and `prev` are not covered by its hash or signature; a signed rejection followed only by events can be deleted undetected | all | Fixed in 8603f62 |
+| B1 | Compiler | `shio.core._open`, `shio.core._run` and `getattr` with a computed name reach every reading's value from plain `.shio` code | non-regulated | Fixed in e23ce33 |
+| B2 | Compiler | Check purity misses `getattr(o, "append")(v)`, `o.__iadd__(...)` and helper functions, including helpers defined in the same `.shio` file | B2 helpers: all; others: non-regulated | Fixed in e23ce33 |
+| B3 | Compiler | The prelude alias `__shio` is exempt from the dunder rule: `__shio.core.last_run` exposes the previous run's values | regulated | Fixed in e23ce33 |
+| G1 | Guard | Provenance by substring: a value is "grounded" if it is a substring of trusted text | all | Fixed in 07d547d |
+| G2 | Guard | Digits-only control values are never tainted or ungrounded | all | Fixed in 07d547d |
+| G3 | Guard | One approval covers every later identical call in the session | all | Fixed in 07d547d |
+| G4 | Guard | Four eyes is off unless `requester=` is passed (never, from `.shio`), and compares exact strings | all | Fixed in 07d547d |

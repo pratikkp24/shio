@@ -3,7 +3,31 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
-## 1.0.0rc1 (unreleased)
+## 1.0.0 (unreleased)
+
+Security fixes for the nine findings in [docs/REVIEW-BRIEF.md](docs/REVIEW-BRIEF.md) §4, found preparing the outside
+review. Each has a regression test in `tests/test_review_findings.py`, and its probe in `docs/review/probes/` now
+shows it stopped.
+
+- **Ledger (L1, L2).** `verify` with a public key or HMAC secret (and `shio verify --pubkey`, and the evidence manifest
+  check) now treats an unsigned or unverifiable entry as a problem, so an appended unsigned sign-off no longer passes.
+  Event entries (sign-off, label, erasure, migration) are written as `"v": 2`: their hash and signature cover `seq`
+  and `prev`, so a signed event followed only by events can't be deleted and the rest re-linked. Ledgers written
+  before 1.0 still verify, with a note; an old-form event after a new one is a problem.
+- **Guard (G1-G4).** A control value is grounded only where trusted text holds it as a whole token or address
+  (`bob@acme.co` is no longer grounded by `bob@acme.com`). Digits-only values are judged when an IBAN/account is
+  wanted. An approval covers one run of exactly that call (the next identical call is held again). The requester
+  defaults to the actor, `guard ... approved by` passes it, and four eyes compares names like the ledger's
+  maker-checker. Same verdict as before on all 3,058 recorded AgentDojo calls; offline obedient attacker 0 of 249.
+- **Compiler (B1-B3).** `.shio` code can't reach the runtime's private names (`_open`, `_run`, `_SEALED`...) as
+  attributes or imports, `last_run`, `builtins`, `attrgetter`/`methodcaller`; `getattr` in `.shio` code is
+  `shio.core.checked_getattr`, which refuses computed private or dunder names, and mutating methods inside a check.
+  A check can't take a mutating method or a dunder at all, and functions, lambdas and method aliases defined in the
+  same `.shio` file are checked for purity when a check uses them. Regulated programs can't name `__shio` themselves.
+  Possibly breaking: `.shio` code that used these names, or a check that calls a same-file helper which changes
+  outside state, no longer compiles.
+
+## 1.0.0rc1
 
 The first release candidate for 1.0. Nothing new: the public API in [docs/API.md](docs/API.md) is frozen as 1.0, and
 from here to 1.0.0 only fixes land. Install with `pip install --pre shio-lang`.

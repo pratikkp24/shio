@@ -73,25 +73,26 @@ work at the time; nothing under `shio/` or `tests/` did.
 
 **How to read the fuzz numbers.** "20,000 programs" is 20,000 samples from 672 distinct programs, and none of them
 reached the runtime: the compile-time name check refused them all. The `.shio` fuzz therefore tests the compiler only,
-on the forms in its grammar. The Python-API fuzz does test the runtime seal. Neither generates the routes in §4, all of
-which pass the suite. Treat the fuzz as a regression net, not as evidence of coverage.
+on the forms in its grammar. The Python-API fuzz does test the runtime seal. Neither generates the routes in §4
+(now fixed, with their own regression tests). Treat the fuzz as a regression net, not as evidence of coverage.
 
-## 4. Known findings (found while preparing this brief, not fixed in 1.0.0rc1)
+## 4. Known findings (found while preparing this brief in 1.0.0rc1; fixed on main for 1.0.0)
 
 Each has a reproduction in `docs/review/probes/`. We list them so you don't spend time rediscovering them, and because
-the fixes may move the boundary you're reviewing. Severity is our estimate.
+the fixes moved the boundary you're reviewing: please attack the fixes too. Severity is our estimate. Each probe now
+shows the issue stopped, and each fix has a regression test in `tests/test_review_findings.py`.
 
-| Id | Severity | Finding | Probe |
-|---|---|---|---|
-| L1 | High | `ledger.verify` (and `shio verify --pubkey`) treats an **unsigned** entry as fine; only `BAD SIGNATURE` is a problem (`ledger.py:834`). An attacker who can write the trace folder appends an unsigned `signoff` entry and a PENDING decision becomes APPROVED; verify reports `ok`, with "1 unsigned" in the report. | `ledger_probes.py` L1 |
-| L2 | High | Event entries (sign-off, label, erasure, migration) hash and sign their own fields but **not `seq` or `prev`**. A signed rejection followed only by other events can be removed and the later entries renumbered and re-linked; verify passes and the decision reads PENDING again. | `ledger_probes.py` L2 |
-| B1 | Medium | Outside regulated mode, `.shio` code can `import shio` and use `shio.core._open.set(True)`, `shio.core._run.get().readings`, or `getattr(shio.core, "_SE" + "ALED")` to read every reading's value without naming it. `_reflection_scan` refuses `_sealed`, `_SEALED` and `_gate` as literal attribute names only. | `boundary_probes.py` P5, P6 |
-| B2 | Medium | Check purity is a deny-list on the check's own text. `getattr(LEAK, "append")(x.value)` and `LEAK.__iadd__([x.value])` pass outside regulated mode; a helper function the check calls passes in **every** mode, including one defined at the top of the same `.shio` file. | P1, P2, P3 |
-| B3 | Medium | In regulated mode, names starting with `__shio` are exempt from the dunder rule (`compiler.py:979`) so the prelude works. `__shio.core.last_run["run"].to_dict()` then gives plain code the previous run's readings in clear. | P9 |
-| G1 | Medium | Guard provenance is substring matching: a control value is "grounded" if its normalised form is a substring of any trusted text. With `bob@acme.com` in the request, an injected `bob@acme.co` runs. | `guard_probes.py` G1 |
-| G2 | Medium | A value of fewer than 3 characters, or made only of digits, is never tainted or ungrounded (`guard.py:299`, `:307`). A digits-only account number taken from an injected invoice runs. | G2 |
-| G3 | Low | An approval is stored per session by call hash and reused: after one approval, every identical later call runs without asking. | G3 |
-| G4 | Low | Four eyes is enforced only when `requester=` is passed, which the `.shio` form `guard ... approved by` never does (`guard.py:683`). The comparison is exact, so `"Maya "` approves `"maya"`'s task; the ledger's maker-checker case-folds. | G4 |
+| Id | Severity | Finding | Probe | Status |
+|---|---|---|---|---|
+| L1 | High | `ledger.verify` (and `shio verify --pubkey`) treats an **unsigned** entry as fine; only `BAD SIGNATURE` is a problem (`ledger.py:834`). An attacker who can write the trace folder appends an unsigned `signoff` entry and a PENDING decision becomes APPROVED; verify reports `ok`, with "1 unsigned" in the report. | `ledger_probes.py` L1 | **Fixed** in 8603f62: verify with a key: an unsigned or unverifiable entry is a PROBLEM |
+| L2 | High | Event entries (sign-off, label, erasure, migration) hash and sign their own fields but **not `seq` or `prev`**. A signed rejection followed only by other events can be removed and the later entries renumbered and re-linked; verify passes and the decision reads PENDING again. | `ledger_probes.py` L2 | **Fixed** in 8603f62: events are `v: 2`, hashed over seq and prev; pre-1.0 events verify with a note; old after new is a problem |
+| B1 | Medium | Outside regulated mode, `.shio` code can `import shio` and use `shio.core._open.set(True)`, `shio.core._run.get().readings`, or `getattr(shio.core, "_SE" + "ALED")` to read every reading's value without naming it. `_reflection_scan` refuses `_sealed`, `_SEALED` and `_gate` as literal attribute names only. | `boundary_probes.py` P5, P6 | **Fixed** in e23ce33: shio's private names refused as attributes and imports; `getattr` in `.shio` is `core.checked_getattr` |
+| B2 | Medium | Check purity is a deny-list on the check's own text. `getattr(LEAK, "append")(x.value)` and `LEAK.__iadd__([x.value])` pass outside regulated mode; a helper function the check calls passes in **every** mode, including one defined at the top of the same `.shio` file. | P1, P2, P3 | **Fixed** in e23ce33: no mutating method or dunder in a check; same-file helpers checked for purity |
+| B3 | Medium | In regulated mode, names starting with `__shio` are exempt from the dunder rule (`compiler.py:979`) so the prelude works. `__shio.core.last_run["run"].to_dict()` then gives plain code the previous run's readings in clear. | P9 | **Fixed** in e23ce33: regulated `.shio` text may not contain a `__shio` identifier |
+| G1 | Medium | Guard provenance is substring matching: a control value is "grounded" if its normalised form is a substring of any trusted text. With `bob@acme.com` in the request, an injected `bob@acme.co` runs. | `guard_probes.py` G1 | **Fixed** in 07d547d: grounded = whole token or address in trusted text |
+| G2 | Medium | A value of fewer than 3 characters, or made only of digits, is never tainted or ungrounded (`guard.py:299`, `:307`). A digits-only account number taken from an injected invoice runs. | G2 | **Fixed** in 07d547d: digits-only values judged for iban/account arguments |
+| G3 | Low | An approval is stored per session by call hash and reused: after one approval, every identical later call runs without asking. | G3 | **Fixed** in 07d547d: an approval covers one run |
+| G4 | Low | Four eyes is enforced only when `requester=` is passed, which the `.shio` form `guard ... approved by` never does (`guard.py:683`). The comparison is exact, so `"Maya "` approves `"maya"`'s task; the ledger's maker-checker case-folds. | G4 | **Fixed** in 07d547d: requester defaults to the actor; `guard ... approved by` passes it; names compared like maker-checker |
 
 Also observed, not a bug: P7 and P8 (a comprehension or lambda that rebinds a reading's name hides it from the name
 check) compile, but the runtime holds; P10 (plain code reading its own trace file) works in every mode and is listed
