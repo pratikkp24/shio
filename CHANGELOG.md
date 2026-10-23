@@ -3,7 +3,7 @@
 Shio follows [semantic versioning](https://semver.org). Until 1.0, a minor version (0.x) may change the language or the
 API; every such change is listed here.
 
-## 1.0.0 (unreleased)
+## 1.0.0rc2 (2026-10-23)
 
 Security fixes for the nine findings in [docs/REVIEW-BRIEF.md](docs/REVIEW-BRIEF.md) §4, found preparing the outside
 review. Each has a regression test in `tests/test_review_findings.py`, and its probe in `docs/review/probes/` now
@@ -27,7 +27,7 @@ shows it stopped.
   Possibly breaking: `.shio` code that used these names, or a check that calls a same-file helper which changes
   outside state, no longer compiles.
 
-## 1.0.0rc1
+## 1.0.0rc1 (2026-10-21)
 
 The first release candidate for 1.0. Nothing new: the public API in [docs/API.md](docs/API.md) is frozen as 1.0, and
 from here to 1.0.0 only fixes land. Install with `pip install --pre shio-lang`.

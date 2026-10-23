@@ -1,6 +1,6 @@
 # Shio's public API and how it changes
 
-**Status: 1.0.0rc1.** The public API below is frozen as 1.0. Between the release candidate and 1.0.0 only fixes land;
+**Status: 1.0.0rc2.** The public API below is frozen as 1.0. Between the release candidate and 1.0.0 only fixes land;
 security fixes follow the rule at the end of this page.
 
 Shio follows [semantic versioning](https://semver.org). Before 1.0, a minor release (0.x) may change the public API,

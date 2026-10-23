@@ -471,7 +471,7 @@ every tool call going through a Shio gate.
 
 ## 🧭 Status
 
-**1.0 release candidate** (`pip install --pre shio-lang` for 1.0.0rc1; `pip install shio-lang` stays on the latest
+**1.0 release candidate** (`pip install --pre shio-lang` for 1.0.0rc2; `pip install shio-lang` stays on the latest
 0.x until 1.0.0 is final; [changelog](https://github.com/pratikkp24/shio/blob/main/CHANGELOG.md)). The public API in
 [docs/API.md](https://github.com/pratikkp24/shio/blob/main/docs/API.md) is frozen as 1.0: from here to 1.0.0 only fixes
 land, and after 1.0.0 it changes only in a major release.
@@ -487,7 +487,7 @@ full information-flow analysis. Imported Python modules are trusted code. On Age
 attack on its own, so that run measured the cost of the gate more than its protection; runs on weaker models are next.
 [SECURITY.md](https://github.com/pratikkp24/shio/blob/main/SECURITY.md) has the details.
 
-**From 1.0.0rc1 to 1.0.0:** done: a public API declared in 0.4.0 and unbroken since, CI, automated releases and a
+**From 1.0.0rc2 to 1.0.0:** done: a public API declared in 0.4.0 and unbroken since, CI, automated releases and a
 docs site. Still to come before 1.0.0 is final: an outside security review of the boundary, at least one production
 deployment, and the benchmark results on Haiku 5.5 (InjecAgent: 0 of 1,054 enhanced attacks succeeded against the
 model even without Shio; AgentDojo still running). If you'd review Shio's boundary or run it in production, please

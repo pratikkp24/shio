@@ -1,4 +1,4 @@
-# Security review brief: Shio 1.0.0rc1
+# Security review brief: Shio 1.0.0rc2
 
 Thank you for reviewing Shio. This brief says what to review, how to build and test it, what we already know is
 wrong, and the ten questions we most want attacked. Read [THREAT-MODEL.md](THREAT-MODEL.md) first: it states the
@@ -9,8 +9,8 @@ and benchmark results on weaker models).
 
 ## 1. Scope
 
-**Version.** `shio-lang` 1.0.0rc1 on PyPI (`pip install --pre shio-lang==1.0.0rc1`), git commit `d00dc3a` on
-`main` of https://github.com/pratikkp24/shio. Python 3.10 to 3.13.
+**Version.** `shio-lang` 1.0.0rc2 on PyPI (`pip install --pre shio-lang==1.0.0rc2`), git tag `v1.0.0rc2` of
+https://github.com/pratikkp24/shio. It includes the fixes for the nine findings in §4; 1.0.0rc1 does not. Python 3.10 to 3.13.
 
 **In scope.** About 3,500 lines:
 
@@ -76,7 +76,7 @@ reached the runtime: the compile-time name check refused them all. The `.shio` f
 on the forms in its grammar. The Python-API fuzz does test the runtime seal. Neither generates the routes in §4
 (now fixed, with their own regression tests). Treat the fuzz as a regression net, not as evidence of coverage.
 
-## 4. Known findings (found while preparing this brief in 1.0.0rc1; fixed on main for 1.0.0)
+## 4. Known findings (found while preparing this brief in 1.0.0rc1; fixed in 1.0.0rc2)
 
 Each has a reproduction in `docs/review/probes/`. We list them so you don't spend time rediscovering them, and because
 the fixes moved the boundary you're reviewing: please attack the fixes too. Severity is our estimate. Each probe now

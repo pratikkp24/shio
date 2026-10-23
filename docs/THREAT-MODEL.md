@@ -1,6 +1,6 @@
 # Shio threat model
 
-For Shio 1.0.0rc1 (commit `d00dc3a`), written 20 October 2026 for an outside security review. It describes what Shio
+Written 20 October 2026 for an outside security review, against Shio 1.0.0rc1 (commit `d00dc3a`); the nine findings in §7 are fixed in 1.0.0rc2, the version to review. It describes what Shio
 tries to protect, from whom, where the trust boundaries are, which mechanism enforces each guarantee, which test covers
 it, and where each guarantee stops. Everything here was checked against the code. Where the code does less than the
 docs suggest, this document says so; those findings are numbered (B1, L1, G1...) and listed with reproductions in
@@ -262,7 +262,7 @@ Documented before this review (SECURITY.md, docs/REGULATED.md):
 - File locking is POSIX only.
 
 Found while preparing this review (20 October 2026, in 1.0.0rc1; details in REVIEW-BRIEF.md §4). All nine are
-fixed on main for 1.0.0; the regression tests are in `tests/test_review_findings.py`:
+fixed in 1.0.0rc2; the regression tests are in `tests/test_review_findings.py`:
 
 | Id | Area | Finding | Mode | Status |
 |---|---|---|---|---|

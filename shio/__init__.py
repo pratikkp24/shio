@@ -11,7 +11,7 @@ from .guard import GateDenied, GateHeld, guard_task, tool_call  # noqa: F401  (u
 from .core import (BoundaryError, Checks, Reading, RegulatedError, Source, agent, check, configure, each,  # noqa: F401
                    in_force, parallel, read, aread, rule)
 
-__version__ = "1.0.0rc1"
+__version__ = "1.0.0rc2"
 
 # The public API (see docs/API.md): these names, the modules shio.models, shio.guard and shio.trace (their documented
 # classes and functions), the `shio` command, and the .shio language. Anything else, and any name starting with "_",
