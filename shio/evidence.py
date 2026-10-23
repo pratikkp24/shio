@@ -292,6 +292,8 @@ def check_manifest(pack, public_key=None, secret=None):
     state = _check_signature(m, public_key, secret) if m.get("signature") else "unsigned"
     if state.startswith("BAD"):
         problems.append(f"manifest.json: {state}")
+    elif (public_key is not None or secret is not None) and state != "ok":
+        problems.append(f"manifest.json: {state.upper()}, but it is checked against a key")
     return not problems, problems, state
 
 

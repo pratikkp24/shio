@@ -527,11 +527,33 @@ def _entries(folder):
     return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
 
 
-def _append(folder, entry, signer):
-    """Chain and sign one ledger entry (a record or an event) and append it. Caller holds the lock."""
-    entries = _entries(folder)
+EVENT_VERSION = 2       # event entries whose hash (and so signature) covers their seq and prev
+
+
+def _event_hash(entry, fields):
+    """An event entry's hash. From version 2 it binds the entry's place in the chain (seq, prev), as a record's hash
+    does; entries written before 1.0 (no "v") hash their own fields only."""
+    body = {k: entry.get(k) for k in fields}
+    if entry.get("v") is not None:
+        body.update(seq=entry.get("seq"), prev=entry.get("prev"), v=entry.get("v"))
+    return sha256(body)
+
+
+def _chain(entries, entry, fields=None):
+    """Give an entry its place after `entries`; an event (fields given) is then hashed over its fields and place."""
     entry["seq"] = len(entries)
     entry["prev"] = entries[-1]["sha256"] if entries else GENESIS
+    if fields is not None:
+        entry["v"] = EVENT_VERSION
+        entry["sha256"] = _event_hash(entry, fields)
+    return entry
+
+
+def _append(folder, entry, signer, fields=None):
+    """Chain and sign one ledger entry (a record or an event) and append it. Caller holds the lock. An event passes
+    its hashed fields; one already chained (seq set, as signoff does to add a personal signature) keeps its place."""
+    if "seq" not in entry:
+        _chain(_entries(folder), entry, fields)
     if signer:
         entry["key_id"] = signer.key_id
         entry["signature"] = signer.sign(entry["sha256"])
@@ -579,10 +601,10 @@ def erase(record_path, reason, signer=None):
     with _locked(folder):
         (folder / v["file"]).unlink(missing_ok=True)
         event = {"kind": "erasure", "file": record_path.name, "vault": v["file"], "reason": reason, "time": time.time()}
-        event["sha256"] = sha256({k: event[k] for k in ("kind", "file", "vault", "reason", "time")})
-        return _append(folder, event, signer)
+        return _append(folder, event, signer, ERASURE_FIELDS)
 
 
+ERASURE_FIELDS = ("kind", "file", "vault", "reason", "time")
 MIGRATION_FIELDS = ("kind", "file", "from_sha256", "to_sha256", "reason", "policies", "time")
 LABEL_FIELDS = ("kind", "file", "record_sha256", "verdict", "by", "note", "time")
 VERDICTS = ("right", "wrong")
@@ -603,8 +625,7 @@ def label(record_path, verdict, by, note="", signer=None):
             raise ValueError(f"{record_path.name} is not a record in this folder's ledger")
         event = {"kind": "label", "file": record_path.name, "record_sha256": recs[-1]["sha256"], "verdict": verdict,
                  "by": str(by), "note": note or "", "time": time.time()}
-        event["sha256"] = sha256({k: event[k] for k in LABEL_FIELDS})
-        return _append(folder, event, signer)
+        return _append(folder, event, signer, LABEL_FIELDS)
 
 
 def labels(folder):
@@ -687,8 +708,7 @@ def migrate(folder, handling, reason, signer=None, dry_run=False):
             path.write_text(json.dumps(new, indent=1, ensure_ascii=False, default=str))
             event = {"kind": "migration", "file": e["file"], "from_sha256": old, "to_sha256": digest,
                      "reason": reason, "policies": handling.stamps, "time": time.time()}
-            event["sha256"] = sha256({k: event[k] for k in MIGRATION_FIELDS})
-            _append(folder, event, signer)
+            _append(folder, event, signer, MIGRATION_FIELDS)
     return done
 
 
@@ -791,7 +811,7 @@ def signoff(record_path, signer_name, role, meaning, signer=None, reject=False, 
         new = [p for p in problems if p not in signoff_state(req, prior)[1]]
         if new:
             raise SignoffRefused(new[0])
-        event["sha256"] = sha256({k: event[k] for k in SIGNOFF_FIELDS})
+        _chain(entries, event, SIGNOFF_FIELDS)
         if personal_key is not None:
             event["signer_key_id"] = key_id(personal_key.public_key())
             event["signer_signature"] = base64.b64encode(personal_key.sign(event["sha256"].encode())).decode()
@@ -822,6 +842,8 @@ def verify(folder, public_key=None, secret=None, head=None, signer_keys=()):
     seen = set()
     prev = GENESIS
     sig_states = {}
+    keyed = public_key is not None or secret is not None
+    legacy, current = 0, False
     for i, e in enumerate(entries):
         where = f"entry {i}"
         if e.get("seq") != i:
@@ -833,24 +855,35 @@ def verify(folder, public_key=None, secret=None, head=None, signer_keys=()):
         sig_states[state] = sig_states.get(state, 0) + 1
         if state.startswith("BAD"):
             problems.append(f"{where} ({e.get('file')}): {state}")
+        elif keyed and state != "ok":        # with a key to check against, every entry must carry a good signature
+            problems.append(f"{where} ({e.get('file')}): {state.upper()}, but the ledger is checked against a key")
+        if e.get("kind", "record") != "record":
+            if e.get("v") is None:
+                legacy += 1
+                if current:
+                    problems.append(f"{where}: {e.get('kind')} entry in the pre-1.0 form after entries in the current "
+                                    f"form (its chain position is not hashed)")
+            elif e.get("v") != EVENT_VERSION:
+                problems.append(f"{where}: unknown event format v={e.get('v')}")
+            else:
+                current = True
         if e.get("kind") == "erasure":
-            body = {k: e[k] for k in ("kind", "file", "vault", "reason", "time")}
-            if sha256(body) != e["sha256"]:
-                problems.append(f"{where}: erasure entry edited")
+            if _event_hash(e, ERASURE_FIELDS) != e.get("sha256"):
+                problems.append(f"{where}: erasure entry edited or moved")
             continue
         if e.get("kind") == "migration":
-            if sha256({k: e.get(k) for k in MIGRATION_FIELDS}) != e.get("sha256"):
-                problems.append(f"{where}: migration entry edited")
+            if _event_hash(e, MIGRATION_FIELDS) != e.get("sha256"):
+                problems.append(f"{where}: migration entry edited or moved")
             continue
         if e.get("kind") == "label":
-            if sha256({k: e.get(k) for k in LABEL_FIELDS}) != e.get("sha256"):
-                problems.append(f"{where}: label entry edited")
+            if _event_hash(e, LABEL_FIELDS) != e.get("sha256"):
+                problems.append(f"{where}: label entry edited or moved")
             elif e.get("file") not in record_hashes:
                 problems.append(f"{where}: label for {e.get('file')}, which is not an earlier record in the ledger")
             continue
         if e.get("kind") == "signoff":
-            if sha256({k: e.get(k) for k in SIGNOFF_FIELDS}) != e.get("sha256"):
-                problems.append(f"{where}: sign-off entry edited")
+            if _event_hash(e, SIGNOFF_FIELDS) != e.get("sha256"):
+                problems.append(f"{where}: sign-off entry edited or moved")
                 continue
             if e.get("file") not in record_hashes:
                 problems.append(f"{where}: sign-off for {e.get('file')}, which is not an earlier record in the ledger")
@@ -917,6 +950,10 @@ def verify(folder, public_key=None, secret=None, head=None, signer_keys=()):
                              f"({er['reason']})")
             else:
                 problems.append(f"{v['file']}: vault MISSING with no erasure entry")
+    if legacy:
+        notes.append(f"{legacy} event entr{'ies' if legacy > 1 else 'y'} in the pre-1.0 form: hashed and signed without "
+                     f"their chain position, so removing one that only events follow is not detectable from the chain "
+                     f"alone; anchor the head")
     pending = 0
     for name, req in requests.items():
         state, bad = signoff_state(req, signoffs.get(name, []))
